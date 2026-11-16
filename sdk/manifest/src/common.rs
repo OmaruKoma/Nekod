@@ -94,6 +94,14 @@ pub fn validate_schema_v1(version: &Version) -> Result<(), ManifestError> {
     Ok(())
 }
 
+/// Ensures `schema_version` has major version `2` (used by `ModManifest` v2 / `.nmod`).
+pub fn validate_schema_v2(version: &Version) -> Result<(), ManifestError> {
+    if version.major != 2 {
+        return Err(ManifestError::UnsupportedSchemaVersion(version.to_string()));
+    }
+    Ok(())
+}
+
 /// Checks strict lowercase kebab-case canonical slug (`^[a-z0-9]+(?:-[a-z0-9]+)*$`, length 2..=128).
 pub fn is_valid_kebab_slug(id: &str) -> bool {
     if !(2..=128).contains(&id.len()) {

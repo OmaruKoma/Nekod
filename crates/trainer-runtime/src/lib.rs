@@ -23,8 +23,9 @@ use std::sync::{Arc, Mutex};
 
 use nekod_manifest::RuntimeKind;
 use nekod_runtime_api::{
-    FeatureCommand, ProcessIdentity, RuntimeDiagnostics, RuntimeError, RuntimeProvider,
-    RuntimeSessionId, StartSessionRequest,
+    FeatureCommand, ProcessIdentity, RuntimeAdapterClass, RuntimeAdapterMetadata,
+    RuntimeDiagnostics, RuntimeError, RuntimeLifecycleMode, RuntimeProvider, RuntimeSessionId,
+    StartSessionRequest,
 };
 
 pub use adapter_ipc::{
@@ -132,6 +133,17 @@ impl Drop for ManagedSession {
 impl RuntimeProvider for DeclarativeRuntime {
     fn kind(&self) -> RuntimeKind {
         RuntimeKind::DeclarativePatchV1
+    }
+
+    fn adapter_metadata(&self) -> RuntimeAdapterMetadata {
+        RuntimeAdapterMetadata {
+            adapter_id: "declarative_patch_v1".to_owned(),
+            adapter_class: RuntimeAdapterClass::DeclarativeCe,
+            runtime_kind: RuntimeKind::DeclarativePatchV1,
+            lifecycle_mode: RuntimeLifecycleMode::MemorySession,
+            manages_disk_files: false,
+            requires_process_attach: true,
+        }
     }
 
     fn discover_matching_processes(

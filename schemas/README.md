@@ -1,4 +1,4 @@
-# Nekod JSON Schemas (`v1`)
+# Nekod JSON Schemas (`v1` & `v2`)
 
 This directory contains the canonical, independently versioned JSON Schema (Draft 2020-12) contracts for Nekod L4 manifests.
 
@@ -6,6 +6,8 @@ This directory contains the canonical, independently versioned JSON Schema (Draf
 | :--- | :--- | :--- |
 | [`game-manifest.v1.schema.json`](game-manifest.v1.schema.json) | `https://nekod.dev/schemas/v1/game-manifest.schema.json` | [`docs/specs/game-manifest.md`](../docs/specs/game-manifest.md) |
 | [`trainer-manifest.v1.schema.json`](trainer-manifest.v1.schema.json) | `https://nekod.dev/schemas/v1/trainer-manifest.schema.json` | [`docs/specs/trainer-manifest.md`](../docs/specs/trainer-manifest.md) |
+| [`mod-manifest.v2.schema.json`](mod-manifest.v2.schema.json) | `https://nekod.dev/schemas/v2/mod-manifest.schema.json` | [`docs/runtime-engine-ecosystem.md`](../docs/runtime-engine-ecosystem.md) |
+| [`declarative-patch.v1.schema.json`](declarative-patch.v1.schema.json) | `https://nekod.dev/schemas/v1/declarative-patch.schema.json` | [`docs/specs/declarative-patch.md`](../docs/specs/declarative-patch.md) |
 | [`registry-manifest.v1.schema.json`](registry-manifest.v1.schema.json) | `https://nekod.dev/schemas/v1/registry-manifest.schema.json` | [`docs/specs/registry-manifest.md`](../docs/specs/registry-manifest.md) |
 
 ## Design Conventions

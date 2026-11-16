@@ -53,6 +53,7 @@ jobs:
         run: |
           cargo run -p nekod-validator -- game schemas/examples/game-manifest.example.json
           cargo run -p nekod-validator -- trainer schemas/examples/trainer-manifest.example.json
+          cargo run -p nekod-validator -- mod schemas/examples/mod-manifest.v2.example.json
           cargo run -p nekod-validator -- registry schemas/examples/registry-manifest.example.json
           cargo run -p nekod-validator -- patch schemas/examples/declarative-patch.example.json
           cargo run -p nekod-validator -- package examples/sample-singleplayer-rpg

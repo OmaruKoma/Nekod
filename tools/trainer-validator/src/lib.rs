@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 
 use jsonschema::Validator;
 use nekod_manifest::{
-    GameManifest, ManifestError, RegistryManifest, RuntimeKind, TrainerManifest,
-    validate_relative_path,
+    GameManifest, ManifestError, ModManifest, RegistryManifest, RuntimeKind, TrainerArtifact,
+    TrainerManifest, validate_relative_path,
 };
 pub use nekod_trainer_sdk::sha256_hex_bytes;
 use nekod_trainer_sdk::{DeclarativePatchPayload, TrainerPackageDefinition};
@@ -19,12 +19,14 @@ use thiserror::Error;
 
 const GAME_SCHEMA_STR: &str = include_str!("../../../schemas/game-manifest.v1.schema.json");
 const TRAINER_SCHEMA_STR: &str = include_str!("../../../schemas/trainer-manifest.v1.schema.json");
+const MOD_V2_SCHEMA_STR: &str = include_str!("../../../schemas/mod-manifest.v2.schema.json");
 const REGISTRY_SCHEMA_STR: &str = include_str!("../../../schemas/registry-manifest.v1.schema.json");
 const DECLARATIVE_PATCH_SCHEMA_STR: &str =
     include_str!("../../../schemas/declarative-patch.v1.schema.json");
 
 static GAME_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
 static TRAINER_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
+static MOD_V2_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
 static REGISTRY_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
 static DECLARATIVE_PATCH_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
 
@@ -98,6 +100,15 @@ pub fn validate_trainer_manifest_str(raw: &str) -> Result<TrainerManifest, Valid
     Ok(manifest)
 }
 
+/// Validates a raw JSON string as a `.nmod` Mod Manifest (`v2`).
+pub fn validate_mod_manifest_str(raw: &str) -> Result<ModManifest, ValidationError> {
+    let value: Value = serde_json::from_str(raw)?;
+    validate_with(&MOD_V2_VALIDATOR, MOD_V2_SCHEMA_STR, &value)?;
+    let manifest: ModManifest = serde_json::from_value(value)?;
+    manifest.validate_semantic()?;
+    Ok(manifest)
+}
+
 /// Validates a raw JSON string as a Registry Manifest (`v1`).
 pub fn validate_registry_manifest_str(raw: &str) -> Result<RegistryManifest, ValidationError> {
     let value: Value = serde_json::from_str(raw)?;
@@ -122,30 +133,18 @@ pub fn validate_declarative_patch_str(
     Ok(payload)
 }
 
-/// Validates an unpacked trainer package directory end-to-end:
-/// `trainer-manifest.json` schema + semantics, artifact path containment + size + SHA-256,
-/// and `declarative_patch_v1` payload cross-reference checks.
-pub fn validate_trainer_package_dir(
-    package_dir: impl AsRef<Path>,
-) -> Result<(TrainerManifest, String), ValidationError> {
-    let root = fs::canonicalize(package_dir.as_ref())
-        .map_err(|e| ValidationError::Package(format!("cannot open package dir: {e}")))?;
-
-    let manifest_bytes = fs::read(root.join("trainer-manifest.json"))
-        .map_err(|e| ValidationError::Package(format!("missing trainer-manifest.json: {e}")))?;
-    let manifest_raw = std::str::from_utf8(&manifest_bytes).map_err(|e| {
-        ValidationError::Package(format!("trainer-manifest.json is not UTF-8: {e}"))
-    })?;
-    let manifest = validate_trainer_manifest_str(manifest_raw)?;
-    let manifest_sha256 = sha256_hex_bytes(&manifest_bytes);
-
+fn verify_package_artifacts(
+    root: &Path,
+    artifacts: &[TrainerArtifact],
+    entrypoint: &str,
+) -> Result<(), ValidationError> {
     let mut entrypoint_listed = false;
-    for artifact in &manifest.artifacts {
+    for artifact in artifacts {
         validate_relative_path(&artifact.filename)?;
         let canonical_file = fs::canonicalize(root.join(&artifact.filename)).map_err(|e| {
             ValidationError::Package(format!("missing artifact '{}': {e}", artifact.filename))
         })?;
-        if !canonical_file.starts_with(&root) {
+        if !canonical_file.starts_with(root) {
             return Err(ValidationError::Package(format!(
                 "artifact '{}' escapes package root",
                 artifact.filename
@@ -169,17 +168,66 @@ pub fn validate_trainer_package_dir(
                 artifact.filename, artifact.sha256
             )));
         }
-        if artifact.filename == manifest.runtime.entrypoint {
+        if artifact.filename == entrypoint {
             entrypoint_listed = true;
         }
     }
 
     if !entrypoint_listed {
         return Err(ValidationError::Package(format!(
-            "runtime.entrypoint '{}' must be declared in artifacts with SHA-256",
-            manifest.runtime.entrypoint
+            "runtime.entrypoint '{entrypoint}' must be declared in artifacts with SHA-256"
         )));
     }
+    Ok(())
+}
+
+/// Validates an unpacked `.nmod` mod package directory (`mod-manifest.json` + artifacts).
+pub fn validate_nmod_package_dir(
+    package_dir: impl AsRef<Path>,
+) -> Result<(ModManifest, String), ValidationError> {
+    let root = fs::canonicalize(package_dir.as_ref())
+        .map_err(|e| ValidationError::Package(format!("cannot open .nmod dir: {e}")))?;
+
+    let manifest_bytes = fs::read(root.join("mod-manifest.json"))
+        .map_err(|e| ValidationError::Package(format!("missing mod-manifest.json: {e}")))?;
+    let manifest_raw = std::str::from_utf8(&manifest_bytes)
+        .map_err(|e| ValidationError::Package(format!("mod-manifest.json is not UTF-8: {e}")))?;
+    let manifest = validate_mod_manifest_str(manifest_raw)?;
+    let manifest_sha256 = sha256_hex_bytes(&manifest_bytes);
+
+    verify_package_artifacts(&root, &manifest.artifacts, &manifest.runtime.entrypoint)?;
+    if manifest.runtime.kind == RuntimeKind::DeclarativePatchV1 {
+        let entry_raw =
+            fs::read_to_string(root.join(&manifest.runtime.entrypoint)).map_err(|e| {
+                ValidationError::Package(format!(
+                    "cannot read entrypoint '{}': {e}",
+                    manifest.runtime.entrypoint
+                ))
+            })?;
+        validate_declarative_patch_str(&entry_raw)?;
+    }
+
+    Ok((manifest, manifest_sha256))
+}
+
+/// Validates an unpacked trainer package directory end-to-end:
+/// `trainer-manifest.json` schema + semantics, artifact path containment + size + SHA-256,
+/// and `declarative_patch_v1` payload cross-reference checks.
+pub fn validate_trainer_package_dir(
+    package_dir: impl AsRef<Path>,
+) -> Result<(TrainerManifest, String), ValidationError> {
+    let root = fs::canonicalize(package_dir.as_ref())
+        .map_err(|e| ValidationError::Package(format!("cannot open package dir: {e}")))?;
+
+    let manifest_bytes = fs::read(root.join("trainer-manifest.json"))
+        .map_err(|e| ValidationError::Package(format!("missing trainer-manifest.json: {e}")))?;
+    let manifest_raw = std::str::from_utf8(&manifest_bytes).map_err(|e| {
+        ValidationError::Package(format!("trainer-manifest.json is not UTF-8: {e}"))
+    })?;
+    let manifest = validate_trainer_manifest_str(manifest_raw)?;
+    let manifest_sha256 = sha256_hex_bytes(&manifest_bytes);
+
+    verify_package_artifacts(&root, &manifest.artifacts, &manifest.runtime.entrypoint)?;
 
     if manifest.runtime.kind == RuntimeKind::DeclarativePatchV1 {
         let entry_raw =
@@ -320,5 +368,13 @@ mod tests {
             ValidationError::Package(_)
         ));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn validates_example_mod_manifest_v2_against_schema() {
+        let raw = include_str!("../../../schemas/examples/mod-manifest.v2.example.json");
+        let parsed =
+            validate_mod_manifest_str(raw).expect("mod v2 example passes schema + semantic");
+        assert_eq!(parsed.id, "dev.example.retroarch-qol-pack");
     }
 }

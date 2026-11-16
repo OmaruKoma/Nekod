@@ -4,13 +4,14 @@ use std::process;
 
 use nekod_validator::ct_importer::{CtImportOptions, convert_ct_file_to_package_dir};
 use nekod_validator::{
-    validate_declarative_patch_str, validate_game_manifest_str, validate_registry_manifest_str,
-    validate_trainer_manifest_str, validate_trainer_package_dir,
+    validate_declarative_patch_str, validate_game_manifest_str, validate_mod_manifest_str,
+    validate_nmod_package_dir, validate_registry_manifest_str, validate_trainer_manifest_str,
+    validate_trainer_package_dir,
 };
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  nekod-validator <game|trainer|registry|patch|package> <path-to-manifest-or-dir>\n  nekod-validator import-ct <input.ct> --game-id <slug> --game-name <name> --trainer-id <id> --out <dir> [--name <title>] [--module <exe>] [--repo <https-url>]"
+        "Usage:\n  nekod-validator <game|trainer|mod|registry|patch|package|nmod> <path-to-manifest-or-dir>\n  nekod-validator import-ct <input.ct> --game-id <slug> --game-name <name> --trainer-id <id> --out <dir> [--name <title>] [--module <exe>] [--repo <https-url>]"
     );
 }
 
@@ -50,6 +51,22 @@ fn main() {
         }
     }
 
+    if kind == "nmod" {
+        match validate_nmod_package_dir(path) {
+            Ok((m, sha)) => {
+                println!(
+                    "valid .nmod package: {}@{} (manifest sha256 {sha})",
+                    m.id, m.version
+                );
+                return;
+            }
+            Err(err) => {
+                eprintln!(".nmod validation failed for '{path}':\n{err}");
+                process::exit(1);
+            }
+        }
+    }
+
     let raw = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) => {
@@ -64,6 +81,12 @@ fn main() {
         }
         "trainer" => validate_trainer_manifest_str(&raw)
             .map(|m| format!("valid trainer manifest: {}@{}", m.id, m.version)),
+        "mod" => validate_mod_manifest_str(&raw).map(|m| {
+            format!(
+                "valid mod manifest v2 ({:?}): {}@{}",
+                m.mod_kind, m.id, m.version
+            )
+        }),
         "registry" => validate_registry_manifest_str(&raw)
             .map(|m| format!("valid registry manifest: {}", m.repository_id)),
         "patch" => validate_declarative_patch_str(&raw).map(|p| {

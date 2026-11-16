@@ -183,6 +183,17 @@ impl RuntimeProvider for AdapterIpcRuntime {
         RuntimeKind::AdapterIpcV1
     }
 
+    fn adapter_metadata(&self) -> nekod_runtime_api::RuntimeAdapterMetadata {
+        nekod_runtime_api::RuntimeAdapterMetadata {
+            adapter_id: "adapter_ipc_v1".to_owned(),
+            adapter_class: nekod_runtime_api::RuntimeAdapterClass::GameSpecificBridge,
+            runtime_kind: RuntimeKind::AdapterIpcV1,
+            lifecycle_mode: nekod_runtime_api::RuntimeLifecycleMode::ExternalProtocolIpc,
+            manages_disk_files: false,
+            requires_process_attach: false,
+        }
+    }
+
     fn discover_matching_processes(
         &self,
         _expected_process_names: &[String],

@@ -3,10 +3,11 @@
 //! This crate intentionally contains no UI, networking, or OS-specific process handles.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use nekod_manifest::{
-    BinaryArch, PermissionConstraints, PermissionScope, RuntimeKind, TargetPlatform,
-    TrainerManifest, TrustTier,
+    BinaryArch, PermissionConstraints, PermissionScope, RuntimeDependencySpec, RuntimeKind,
+    TargetPlatform, TrainerManifest, TrustTier,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -208,10 +209,93 @@ pub enum RuntimeError {
     NotImplemented(&'static str),
 }
 
-/// Stable trait implemented by L3 runtime engines (`crates/trainer-runtime`).
+/// Architectural classification of an L3 Runtime Adapter (ADR-019).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAdapterClass {
+    DeclarativeCe,
+    WasmSandbox,
+    DynamicInstrumentation,
+    UnityBridge,
+    UnrealBridge,
+    GameSpecificBridge,
+}
+
+/// Execution lifecycle model distinguishing session-based vs. disk-deployed adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLifecycleMode {
+    MemorySession,
+    HookSession,
+    ManagedLoaderDeployment,
+    ExternalProtocolIpc,
+}
+
+/// Descriptive capabilities & lifecycle contract exposed uniformly by every `RuntimeProvider`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAdapterMetadata {
+    pub adapter_id: String,
+    pub adapter_class: RuntimeAdapterClass,
+    pub runtime_kind: RuntimeKind,
+    pub lifecycle_mode: RuntimeLifecycleMode,
+    pub manages_disk_files: bool,
+    pub requires_process_attach: bool,
+}
+
+/// Preflight resolution outcome for a declared [`RuntimeDependencySpec`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DependencyStatus {
+    Satisfied { resolved_location: String },
+    Missing { suggested_action: String },
+    LicenseBlocked { reason: String },
+}
+
+/// Per-dependency inspection summary returned before attaching an adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyCheckResult {
+    pub dependency_id: String,
+    pub optional: bool,
+    pub outcome: DependencyStatus,
+}
+
+/// Stable trait implemented by L3 runtime adapters (`crates/trainer-runtime`).
 pub trait RuntimeProvider: Send + Sync {
     /// Returns the runtime kind supported by this provider.
     fn kind(&self) -> RuntimeKind;
+
+    /// Returns unified adapter lifecycle & capability metadata for L2/L6 callers.
+    fn adapter_metadata(&self) -> RuntimeAdapterMetadata {
+        RuntimeAdapterMetadata {
+            adapter_id: format!("{:?}", self.kind()),
+            adapter_class: RuntimeAdapterClass::DeclarativeCe,
+            runtime_kind: self.kind(),
+            lifecycle_mode: RuntimeLifecycleMode::MemorySession,
+            manages_disk_files: false,
+            requires_process_attach: true,
+        }
+    }
+
+    /// Evaluates declared external loader/protocol dependencies against `game_install_dir`.
+    fn check_dependencies(
+        &self,
+        dependencies: &[RuntimeDependencySpec],
+        _game_install_dir: Option<&Path>,
+    ) -> Vec<DependencyCheckResult> {
+        dependencies
+            .iter()
+            .map(|dep| DependencyCheckResult {
+                dependency_id: dep.dependency_id.clone(),
+                optional: dep.optional,
+                outcome: DependencyStatus::Missing {
+                    suggested_action: format!(
+                        "Dependency '{}' ({}) requires manual verification or upstream fetch",
+                        dep.dependency_id, dep.version_req
+                    ),
+                },
+            })
+            .collect()
+    }
 
     /// Discovers running processes matching one of `expected_process_names`.
     /// Requires no privilege elevation; skips inaccessible protected processes.

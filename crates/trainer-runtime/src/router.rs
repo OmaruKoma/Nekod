@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use nekod_manifest::RuntimeKind;
 use nekod_runtime_api::{
-    FeatureCommand, ProcessIdentity, RuntimeDiagnostics, RuntimeError, RuntimeProvider,
-    RuntimeSessionId, StartSessionRequest,
+    FeatureCommand, ProcessIdentity, RuntimeAdapterMetadata, RuntimeDiagnostics, RuntimeError,
+    RuntimeProvider, RuntimeSessionId, StartSessionRequest,
 };
 
 use crate::{AdapterIpcRuntime, DeclarativeRuntime};
@@ -50,6 +50,14 @@ impl CompositeRuntimeRouter {
         } else {
             self.providers.push((kind, provider));
         }
+    }
+
+    /// Returns adapter lifecycle & capability metadata for a registered `RuntimeKind`.
+    pub fn adapter_metadata_for(
+        &self,
+        kind: RuntimeKind,
+    ) -> Result<RuntimeAdapterMetadata, RuntimeError> {
+        Ok(self.provider_for(kind)?.adapter_metadata())
     }
 
     fn provider_for(&self, kind: RuntimeKind) -> Result<&Arc<dyn RuntimeProvider>, RuntimeError> {
@@ -138,5 +146,36 @@ impl RuntimeProvider for CompositeRuntimeRouter {
             .get(&session_id.0)
             .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))?;
         self.provider_for(kind)?.diagnostics(session_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nekod_runtime_api::{RuntimeAdapterClass, RuntimeLifecycleMode};
+
+    #[test]
+    fn router_exposes_distinct_adapter_metadata_per_runtime_kind() {
+        let router = CompositeRuntimeRouter::with_default_providers();
+
+        let decl = router
+            .adapter_metadata_for(RuntimeKind::DeclarativePatchV1)
+            .unwrap();
+        assert_eq!(decl.adapter_class, RuntimeAdapterClass::DeclarativeCe);
+        assert_eq!(decl.lifecycle_mode, RuntimeLifecycleMode::MemorySession);
+        assert!(decl.requires_process_attach);
+
+        let adapter = router
+            .adapter_metadata_for(RuntimeKind::AdapterIpcV1)
+            .unwrap();
+        assert_eq!(
+            adapter.adapter_class,
+            RuntimeAdapterClass::GameSpecificBridge
+        );
+        assert_eq!(
+            adapter.lifecycle_mode,
+            RuntimeLifecycleMode::ExternalProtocolIpc
+        );
+        assert!(!adapter.requires_process_attach);
     }
 }

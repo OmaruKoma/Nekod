@@ -1,0 +1,87 @@
+{
+  "schema_version": "2.0.0",
+  "package_format": "nmod_v1",
+  "mod_kind": "emulator_mod",
+  "id": "dev.example.retroarch-qol-pack",
+  "version": "1.0.0",
+  "name": "RetroArch QoL & Pause Adapter",
+  "description": "Source-first .nmod recipe driving RetroArch UDP loopback controls cleanly with zero binary redistribution.",
+  "authors": [
+    {
+      "name": "Nekod Contributors",
+      "github": "OmaruKoma"
+    }
+  ],
+  "license": "MIT",
+  "source_repository": "https://github.com/OmaruKoma/Nekod",
+  "target_game": {
+    "game_id": "sample-singleplayer-rpg",
+    "game_name": "Sample Singleplayer RPG"
+  },
+  "supported_versions": [
+    {
+      "platform": "windows-x64",
+      "version_pattern": "1.2.*",
+      "status": "verified"
+    }
+  ],
+  "runtime": {
+    "kind": "adapter_ipc_v1",
+    "api_version": "1.0.0",
+    "min_nekod_version": "0.1.0-alpha.0",
+    "entrypoint": "adapter.json",
+    "supported_platforms": ["windows-x64", "linux-x64"]
+  },
+  "dependencies": [
+    {
+      "dependency_id": "retroarch-udp-network-cmd",
+      "kind": "emulator_protocol",
+      "version_req": ">=1.16.0",
+      "optional": false,
+      "redistribution": "local_detect_only"
+    }
+  ],
+  "permissions": [
+    {
+      "scope": "process.discover",
+      "reason": "Verify that the target local emulator/game process is running before attaching.",
+      "required": true
+    }
+  ],
+  "features": [
+    {
+      "id": "pause-toggle",
+      "name": "Pause Toggle",
+      "description": "Toggles emulator pause state via loopback UDP command.",
+      "category": "time",
+      "control_type": "toggle",
+      "default_hotkey": "F8",
+      "mutates_memory": false,
+      "supports_rollback": true,
+      "risk_level": "low"
+    }
+  ],
+  "compatibility": {
+    "singleplayer_only": true,
+    "requires_offline_mode": false,
+    "anti_cheat_incompatible": [],
+    "compatibility_matrix": [
+      {
+        "game_version": "1.2.0",
+        "store_platform": "custom_path",
+        "runtime_adapter": "adapter_ipc_v1",
+        "runtime_version": "1.0.0",
+        "status": "verified",
+        "notes": "Verified loopback UDP roundtrip."
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "filename": "adapter.json",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": 256,
+      "platform": "windows-x64"
+    }
+  ]
+}

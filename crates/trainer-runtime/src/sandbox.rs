@@ -265,6 +265,17 @@ impl RuntimeProvider for SandboxedWasmRuntime {
         RuntimeKind::WasmSandboxV1
     }
 
+    fn adapter_metadata(&self) -> nekod_runtime_api::RuntimeAdapterMetadata {
+        nekod_runtime_api::RuntimeAdapterMetadata {
+            adapter_id: "wasm_sandbox_v1".to_owned(),
+            adapter_class: nekod_runtime_api::RuntimeAdapterClass::WasmSandbox,
+            runtime_kind: RuntimeKind::WasmSandboxV1,
+            lifecycle_mode: nekod_runtime_api::RuntimeLifecycleMode::MemorySession,
+            manages_disk_files: false,
+            requires_process_attach: true,
+        }
+    }
+
     fn discover_matching_processes(
         &self,
         expected_process_names: &[String],
