@@ -58,6 +58,12 @@ pub enum RuntimeKind {
     WasmSandboxV1,
     #[serde(rename = "adapter_ipc_v1")]
     AdapterIpcV1,
+    #[serde(rename = "ce_subset_v1")]
+    CeSubsetV1,
+    #[serde(rename = "unity_bridge_v1")]
+    UnityBridgeV1,
+    #[serde(rename = "ue4ss_bridge_v1")]
+    Ue4ssBridgeV1,
     #[serde(rename = "native_provider_v1")]
     NativeProviderV1,
 }

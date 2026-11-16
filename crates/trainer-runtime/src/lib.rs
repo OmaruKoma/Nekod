@@ -8,12 +8,16 @@
 pub mod adapter_ipc;
 pub mod aob;
 pub mod backend;
+mod bridge_ipc;
+pub mod ce_subset;
 pub mod deployment;
 pub mod ledger;
 pub mod linux;
 pub mod router;
 pub mod sandbox;
 mod session;
+pub mod ue4ss_bridge;
+pub mod unity_bridge;
 #[cfg(target_os = "windows")]
 pub mod win32;
 
@@ -34,6 +38,7 @@ pub use adapter_ipc::{
 pub use backend::{
     MemoryRegionInfo, ModuleInfo, ProcessAccessMode, ProcessHandle, ProcessMemoryBackend,
 };
+pub use ce_subset::{CeScriptRuntime, CeSubsetFeature, CeSubsetPayload};
 pub use deployment::{
     DeploymentError, DeploymentLedger, DeploymentRecord, DeploymentState, UndeployReport,
 };
@@ -41,6 +46,10 @@ pub use ledger::{PatchLedger, RollbackReport};
 pub use router::CompositeRuntimeRouter;
 pub use sandbox::{SandboxBudget, SandboxHostBridge, SandboxedGuestAdapter, SandboxedWasmRuntime};
 pub use session::{check_running_anti_cheat, validate_session_preflight};
+pub use ue4ss_bridge::{Ue4ssBridgePayload, Ue4ssBridgeRuntime, Ue4ssFeatureBinding};
+pub use unity_bridge::{
+    UnityBridgePayload, UnityBridgeRuntime, UnityFeatureBinding, UnityFlavor, UnityLoaderKind,
+};
 
 use session::{
     ManagedSession, SessionMap, apply_feature_command, insert_session_id, start_managed_session,

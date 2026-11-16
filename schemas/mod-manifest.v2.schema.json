@@ -234,6 +234,9 @@
             "declarative_patch_v1",
             "wasm_sandbox_v1",
             "adapter_ipc_v1",
+            "ce_subset_v1",
+            "unity_bridge_v1",
+            "ue4ss_bridge_v1",
             "native_provider_v1"
           ]
         },

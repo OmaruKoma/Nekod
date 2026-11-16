@@ -10,7 +10,9 @@ use nekod_runtime_api::{
     RuntimeProvider, RuntimeSessionId, StartSessionRequest,
 };
 
-use crate::{AdapterIpcRuntime, DeclarativeRuntime};
+use crate::{
+    AdapterIpcRuntime, CeScriptRuntime, DeclarativeRuntime, Ue4ssBridgeRuntime, UnityBridgeRuntime,
+};
 
 /// Dispatches trainer runtime sessions across registered `RuntimeProvider` engines
 /// keyed by `TrainerManifest.runtime.kind`.
@@ -25,10 +27,13 @@ impl CompositeRuntimeRouter {
         Self::with_declarative(Arc::new(DeclarativeRuntime::new()))
     }
 
-    /// Creates a router pre-loaded with all safe built-in providers (`declarative_patch_v1`
-    /// and zero-injection `adapter_ipc_v1`).
+    /// Creates a router pre-loaded with all safe built-in providers (`declarative_patch_v1`,
+    /// `ce_subset_v1`, `unity_bridge_v1`, `ue4ss_bridge_v1`, and zero-injection `adapter_ipc_v1`).
     pub fn with_default_providers() -> Self {
         let mut router = Self::with_declarative_default();
+        router.register_provider(Arc::new(CeScriptRuntime::new()));
+        router.register_provider(Arc::new(UnityBridgeRuntime::new()));
+        router.register_provider(Arc::new(Ue4ssBridgeRuntime::new()));
         router.register_provider(Arc::new(AdapterIpcRuntime::new()));
         router
     }
@@ -66,6 +71,15 @@ impl CompositeRuntimeRouter {
             .find(|(k, _)| *k == kind)
             .map(|(_, p)| p)
             .ok_or(match kind {
+                RuntimeKind::CeSubsetV1 => {
+                    RuntimeError::NotImplemented("ce_subset_v1 provider not registered")
+                }
+                RuntimeKind::UnityBridgeV1 => {
+                    RuntimeError::NotImplemented("unity_bridge_v1 provider not registered")
+                }
+                RuntimeKind::Ue4ssBridgeV1 => {
+                    RuntimeError::NotImplemented("ue4ss_bridge_v1 provider not registered")
+                }
                 RuntimeKind::WasmSandboxV1 => {
                     RuntimeError::NotImplemented("wasm_sandbox_v1 provider not registered")
                 }
@@ -177,5 +191,32 @@ mod tests {
             RuntimeLifecycleMode::ExternalProtocolIpc
         );
         assert!(!adapter.requires_process_attach);
+
+        let ce = router
+            .adapter_metadata_for(RuntimeKind::CeSubsetV1)
+            .unwrap();
+        assert_eq!(ce.adapter_class, RuntimeAdapterClass::DeclarativeCe);
+        assert_eq!(ce.lifecycle_mode, RuntimeLifecycleMode::MemorySession);
+        assert!(ce.requires_process_attach);
+
+        let unity = router
+            .adapter_metadata_for(RuntimeKind::UnityBridgeV1)
+            .unwrap();
+        assert_eq!(unity.adapter_class, RuntimeAdapterClass::UnityBridge);
+        assert_eq!(
+            unity.lifecycle_mode,
+            RuntimeLifecycleMode::ManagedLoaderDeployment
+        );
+        assert!(unity.manages_disk_files);
+
+        let ue4ss = router
+            .adapter_metadata_for(RuntimeKind::Ue4ssBridgeV1)
+            .unwrap();
+        assert_eq!(ue4ss.adapter_class, RuntimeAdapterClass::UnrealBridge);
+        assert_eq!(
+            ue4ss.lifecycle_mode,
+            RuntimeLifecycleMode::ManagedLoaderDeployment
+        );
+        assert!(ue4ss.manages_disk_files);
     }
 }
