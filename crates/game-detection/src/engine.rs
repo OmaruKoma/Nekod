@@ -30,6 +30,8 @@ pub enum InstalledLoaderKind {
     MelonLoader,
     Ue4ss,
     ReFramework,
+    ScriptHookV,
+    ScriptHookRdr2,
 }
 
 /// Concrete mod loader installation observed inside a game's files.
@@ -193,6 +195,22 @@ fn detect_loaders(root: &Path) -> Vec<DetectedLoader> {
         });
     }
 
+    if root.join("ScriptHookV.dll").is_file() {
+        loaders.push(DetectedLoader {
+            kind: InstalledLoaderKind::ScriptHookV,
+            entry_path: "ScriptHookV.dll".to_owned(),
+            detected_version: None,
+        });
+    }
+
+    if root.join("ScriptHookRDR2.dll").is_file() {
+        loaders.push(DetectedLoader {
+            kind: InstalledLoaderKind::ScriptHookRdr2,
+            entry_path: "ScriptHookRDR2.dll".to_owned(),
+            detected_version: None,
+        });
+    }
+
     loaders
 }
 
@@ -239,11 +257,15 @@ fn recommend_adapters(engine: GameEngineKind, anti_cheat: &[AntiCheatKind]) -> V
             "declarative_patch_v1".to_owned(),
         ],
         GameEngineKind::ReEngine => vec![
-            "managed_framework_v1:reframework".to_owned(),
+            "managed_framework_v1".to_owned(),
             "declarative_patch_v1".to_owned(),
         ],
         GameEngineKind::Godot | GameEngineKind::NativeUnknown => {
-            vec!["declarative_patch_v1".to_owned(), "ce_script_v1".to_owned()]
+            vec![
+                "declarative_patch_v1".to_owned(),
+                "ce_subset_v1".to_owned(),
+                "frida_gum_v1".to_owned(),
+            ]
         }
     }
 }
@@ -370,8 +392,22 @@ mod tests {
             re_profile.installed_loaders[0].kind,
             InstalledLoaderKind::ReFramework
         );
+        assert!(
+            re_profile
+                .recommended_adapters
+                .contains(&"managed_framework_v1".to_owned())
+        );
+
+        let sh_root = temp_dir("scripthook");
+        fs::write(sh_root.join("ScriptHookV.dll"), b"MZ").unwrap();
+        let sh_profile = inspect_game_directory(&sh_root);
+        assert_eq!(
+            sh_profile.installed_loaders[0].kind,
+            InstalledLoaderKind::ScriptHookV
+        );
 
         let _ = fs::remove_dir_all(ue_root);
         let _ = fs::remove_dir_all(re_root);
+        let _ = fs::remove_dir_all(sh_root);
     }
 }

@@ -197,6 +197,10 @@ fn matches_loader_id(dependency_id: &str, kind: InstalledLoaderKind) -> bool {
         InstalledLoaderKind::MelonLoader => low.contains("melonloader"),
         InstalledLoaderKind::Ue4ss => low.contains("ue4ss"),
         InstalledLoaderKind::ReFramework => low.contains("reframework"),
+        InstalledLoaderKind::ScriptHookV => low.contains("scripthookv") || low == "scripthook-v",
+        InstalledLoaderKind::ScriptHookRdr2 => {
+            low.contains("scripthookrdr2") || low == "scripthook-rdr2"
+        }
     }
 }
 

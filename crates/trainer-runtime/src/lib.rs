@@ -11,8 +11,10 @@ pub mod backend;
 mod bridge_ipc;
 pub mod ce_subset;
 pub mod deployment;
+pub mod frida_gum;
 pub mod ledger;
 pub mod linux;
+pub mod managed_framework;
 pub mod router;
 pub mod sandbox;
 mod session;
@@ -42,7 +44,12 @@ pub use ce_subset::{CeScriptRuntime, CeSubsetFeature, CeSubsetPayload};
 pub use deployment::{
     DeploymentError, DeploymentLedger, DeploymentRecord, DeploymentState, UndeployReport,
 };
+pub use frida_gum::{FridaGumPayload, FridaGumRuntime, FridaHookBinding};
 pub use ledger::{PatchLedger, RollbackReport};
+pub use managed_framework::{
+    FrameworkIpcConfig, ManagedFrameworkFeature, ManagedFrameworkKind, ManagedFrameworkPayload,
+    ManagedFrameworkRuntime, ManagedScriptAsset,
+};
 pub use router::CompositeRuntimeRouter;
 pub use sandbox::{SandboxBudget, SandboxHostBridge, SandboxedGuestAdapter, SandboxedWasmRuntime};
 pub use session::{check_running_anti_cheat, validate_session_preflight};

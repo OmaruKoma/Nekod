@@ -11,7 +11,8 @@ use nekod_runtime_api::{
 };
 
 use crate::{
-    AdapterIpcRuntime, CeScriptRuntime, DeclarativeRuntime, Ue4ssBridgeRuntime, UnityBridgeRuntime,
+    AdapterIpcRuntime, CeScriptRuntime, DeclarativeRuntime, FridaGumRuntime,
+    ManagedFrameworkRuntime, Ue4ssBridgeRuntime, UnityBridgeRuntime,
 };
 
 /// Dispatches trainer runtime sessions across registered `RuntimeProvider` engines
@@ -27,14 +28,18 @@ impl CompositeRuntimeRouter {
         Self::with_declarative(Arc::new(DeclarativeRuntime::new()))
     }
 
-    /// Creates a router pre-loaded with all safe built-in providers (`declarative_patch_v1`,
-    /// `ce_subset_v1`, `unity_bridge_v1`, `ue4ss_bridge_v1`, and zero-injection `adapter_ipc_v1`).
+    /// Creates a router pre-loaded with built-in providers (`declarative_patch_v1`,
+    /// `ce_subset_v1`, `unity_bridge_v1`, `ue4ss_bridge_v1`, `managed_framework_v1`,
+    /// zero-injection `adapter_ipc_v1`, and optional isolated `frida_gum_v1` in its
+    /// default-disabled state).
     pub fn with_default_providers() -> Self {
         let mut router = Self::with_declarative_default();
         router.register_provider(Arc::new(CeScriptRuntime::new()));
         router.register_provider(Arc::new(UnityBridgeRuntime::new()));
         router.register_provider(Arc::new(Ue4ssBridgeRuntime::new()));
+        router.register_provider(Arc::new(ManagedFrameworkRuntime::new()));
         router.register_provider(Arc::new(AdapterIpcRuntime::new()));
+        router.register_provider(Arc::new(FridaGumRuntime::new()));
         router
     }
 
@@ -79,6 +84,12 @@ impl CompositeRuntimeRouter {
                 }
                 RuntimeKind::Ue4ssBridgeV1 => {
                     RuntimeError::NotImplemented("ue4ss_bridge_v1 provider not registered")
+                }
+                RuntimeKind::FridaGumV1 => {
+                    RuntimeError::NotImplemented("frida_gum_v1 provider not registered")
+                }
+                RuntimeKind::ManagedFrameworkV1 => {
+                    RuntimeError::NotImplemented("managed_framework_v1 provider not registered")
                 }
                 RuntimeKind::WasmSandboxV1 => {
                     RuntimeError::NotImplemented("wasm_sandbox_v1 provider not registered")
@@ -218,5 +229,28 @@ mod tests {
             RuntimeLifecycleMode::ManagedLoaderDeployment
         );
         assert!(ue4ss.manages_disk_files);
+
+        let frida = router
+            .adapter_metadata_for(RuntimeKind::FridaGumV1)
+            .unwrap();
+        assert_eq!(
+            frida.adapter_class,
+            RuntimeAdapterClass::DynamicInstrumentation
+        );
+        assert_eq!(frida.lifecycle_mode, RuntimeLifecycleMode::HookSession);
+        assert!(frida.requires_process_attach);
+
+        let framework = router
+            .adapter_metadata_for(RuntimeKind::ManagedFrameworkV1)
+            .unwrap();
+        assert_eq!(
+            framework.adapter_class,
+            RuntimeAdapterClass::GameSpecificBridge
+        );
+        assert_eq!(
+            framework.lifecycle_mode,
+            RuntimeLifecycleMode::ManagedLoaderDeployment
+        );
+        assert!(framework.manages_disk_files);
     }
 }

@@ -201,8 +201,10 @@ impl PermissionEvaluator {
             ));
         }
 
-        let uses_native = manifest.runtime.kind == RuntimeKind::NativeProviderV1
-            || manifest.has_permission(PermissionScope::RuntimeNativeModule);
+        let uses_native = matches!(
+            manifest.runtime.kind,
+            RuntimeKind::NativeProviderV1 | RuntimeKind::FridaGumV1
+        ) || manifest.has_permission(PermissionScope::RuntimeNativeModule);
 
         if uses_native
             && trust_tier != TrustTier::Official
@@ -360,6 +362,16 @@ mod tests {
             &confirmed,
         );
         assert!(matches!(res, Err(PermissionError::PolicyBlocked(_))));
+
+        trainer.runtime.kind = RuntimeKind::FridaGumV1;
+        let frida_res = PermissionEvaluator::evaluate(
+            &trainer,
+            &"a".repeat(64),
+            TrustTier::CommunityVerified,
+            &SecurityPolicyConfig::default(),
+            &confirmed,
+        );
+        assert!(matches!(frida_res, Err(PermissionError::PolicyBlocked(_))));
     }
 
     #[test]

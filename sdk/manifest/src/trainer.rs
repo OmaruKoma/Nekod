@@ -64,6 +64,10 @@ pub enum RuntimeKind {
     UnityBridgeV1,
     #[serde(rename = "ue4ss_bridge_v1")]
     Ue4ssBridgeV1,
+    #[serde(rename = "frida_gum_v1")]
+    FridaGumV1,
+    #[serde(rename = "managed_framework_v1")]
+    ManagedFrameworkV1,
     #[serde(rename = "native_provider_v1")]
     NativeProviderV1,
 }
@@ -261,11 +265,13 @@ impl TrainerManifest {
             )));
         }
 
-        if self.runtime.kind == RuntimeKind::NativeProviderV1
-            && !self.has_permission(PermissionScope::RuntimeNativeModule)
+        if matches!(
+            self.runtime.kind,
+            RuntimeKind::NativeProviderV1 | RuntimeKind::FridaGumV1
+        ) && !self.has_permission(PermissionScope::RuntimeNativeModule)
         {
             return Err(ManifestError::InconsistentManifest(
-                "native_provider_v1 runtime requires explicit runtime.native_module permission"
+                "native/dynamic instrumentation runtime requires explicit runtime.native_module permission"
                     .to_owned(),
             ));
         }

@@ -335,11 +335,13 @@ impl ModManifest {
             }
         }
 
-        if self.runtime.kind == RuntimeKind::NativeProviderV1
-            && !self.has_permission(PermissionScope::RuntimeNativeModule)
+        if matches!(
+            self.runtime.kind,
+            RuntimeKind::NativeProviderV1 | RuntimeKind::FridaGumV1
+        ) && !self.has_permission(PermissionScope::RuntimeNativeModule)
         {
             return Err(ManifestError::InconsistentManifest(
-                "native_provider_v1 runtime requires explicit runtime.native_module permission"
+                "native/dynamic instrumentation runtime requires explicit runtime.native_module permission"
                     .to_owned(),
             ));
         }

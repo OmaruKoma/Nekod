@@ -247,6 +247,8 @@
             "ce_subset_v1",
             "unity_bridge_v1",
             "ue4ss_bridge_v1",
+            "frida_gum_v1",
+            "managed_framework_v1",
             "native_provider_v1"
           ]
         },
