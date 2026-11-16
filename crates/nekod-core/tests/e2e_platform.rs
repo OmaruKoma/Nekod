@@ -147,6 +147,7 @@ fn multi_store_example_package_ingestion_consent_profile_and_router_rollback_e2e
             trainer_id: installed.manifest.id.clone(),
             hotkeys,
             saved_feature_states: BTreeMap::new(),
+            presets: BTreeMap::new(),
         })
         .unwrap();
     let loaded_profile = service
@@ -287,6 +288,7 @@ fn e2e_game_scan_manifest_validation_and_sqlite_restart_recovery() {
                 trainer_id: installed.manifest.id,
                 hotkeys,
                 saved_feature_states: BTreeMap::new(),
+                presets: BTreeMap::new(),
             })
             .unwrap();
     }

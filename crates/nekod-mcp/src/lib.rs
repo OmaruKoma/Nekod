@@ -49,6 +49,12 @@ pub const PLANNED_MCP_TOOLS: &[McpToolSpec] = &[
         read_only: true,
         requires_explicit_authorization: false,
     },
+    McpToolSpec {
+        name: "recommend_runtime_adapter",
+        group: McpToolGroup::GameDiscovery,
+        read_only: true,
+        requires_explicit_authorization: false,
+    },
     // Trainer Development
     McpToolSpec {
         name: "create_trainer_manifest",
@@ -74,6 +80,12 @@ pub const PLANNED_MCP_TOOLS: &[McpToolSpec] = &[
         read_only: false,
         requires_explicit_authorization: true,
     },
+    McpToolSpec {
+        name: "forge_nmod_package",
+        group: McpToolGroup::TrainerDevelopment,
+        read_only: false,
+        requires_explicit_authorization: true,
+    },
     // Compatibility
     McpToolSpec {
         name: "check_game_version",
@@ -86,6 +98,12 @@ pub const PLANNED_MCP_TOOLS: &[McpToolSpec] = &[
         group: McpToolGroup::Compatibility,
         read_only: true,
         requires_explicit_authorization: false,
+    },
+    McpToolSpec {
+        name: "verify_forged_mod_package",
+        group: McpToolGroup::Compatibility,
+        read_only: false,
+        requires_explicit_authorization: true,
     },
     McpToolSpec {
         name: "inspect_runtime_diagnostics",
@@ -185,7 +203,7 @@ mod tests {
         let list_val: Value = serde_json::from_str(&list_reply).unwrap();
         let tools = list_val["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), PLANNED_MCP_TOOLS.len());
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 19);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -312,6 +330,108 @@ mod tests {
             .unwrap();
         assert_eq!(release["validated"], true);
         assert!(pkg_dir.join("release-entry-summary.json").is_file());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ai_mod_forge_recommends_forges_nmod_and_enforces_verification_gate() {
+        let (server, root) = test_server("ai_forge");
+        let unity_game_dir = root.join("UnityGame");
+        fs::create_dir_all(unity_game_dir.join("BepInEx").join("core")).unwrap();
+        fs::write(unity_game_dir.join("UnityPlayer.dll"), b"MZ").unwrap();
+        fs::write(unity_game_dir.join("GameAssembly.dll"), b"MZ").unwrap();
+        fs::write(
+            unity_game_dir
+                .join("BepInEx")
+                .join("core")
+                .join("BepInEx.Unity.IL2CPP.dll"),
+            b"MZ",
+        )
+        .unwrap();
+
+        let rec = server
+            .dispatch_tool(
+                "recommend_runtime_adapter",
+                &json!({
+                    "game_id": "sample-unity-game",
+                    "install_dir": unity_game_dir.to_string_lossy()
+                }),
+            )
+            .unwrap();
+        assert_eq!(rec["engine"], "unity_il2cpp");
+        assert_eq!(rec["primary_adapter"], "unity_bridge_v1");
+        assert_eq!(
+            rec["plugin_bucket_strategy"],
+            "on_demand_sha256_bucket_plugin"
+        );
+
+        let nmod_dir = root.join("forged-nmod");
+        let forged = server
+            .dispatch_tool(
+                "forge_nmod_package",
+                &json!({
+                    "authorize_write": true,
+                    "output_dir": nmod_dir.to_string_lossy(),
+                    "mod_id": "dev.example.unity-stamina-forge",
+                    "name": "Forged Infinite Stamina",
+                    "game_id": "sample-unity-game",
+                    "game_name": "Sample Unity Game",
+                    "source_repository": "https://github.com/example/unity-stamina",
+                    "runtime_kind": "unity_bridge_v1",
+                    "mod_kind": "script_mod",
+                    "module_name": "GameAssembly.dll"
+                }),
+            )
+            .unwrap();
+        assert_eq!(forged["runtime_kind"], "unity_bridge_v1");
+        assert_eq!(forged["declared_status"], "experimental");
+        assert!(nmod_dir.join("mod-manifest.json").is_file());
+
+        // Without runtime_rollback_verified, status stays Experimental (AiDraftUnverified).
+        let draft_verify = server
+            .dispatch_tool(
+                "verify_forged_mod_package",
+                &json!({
+                    "authorize_write": true,
+                    "package_dir": nmod_dir.to_string_lossy(),
+                    "game_version": "1.2.0",
+                    "store_platform": "steam",
+                    "runtime_rollback_verified": false
+                }),
+            )
+            .unwrap();
+        assert_eq!(draft_verify["valid"], true);
+        assert_eq!(
+            draft_verify["recorded_compatibility"]["status"],
+            "experimental"
+        );
+        assert_eq!(
+            draft_verify["recorded_compatibility"]["evidence"],
+            "ai_draft_unverified"
+        );
+
+        // With runtime_rollback_verified: true, compatibility is recorded as Verified / AutomatedRuntimeTest.
+        let runtime_verify = server
+            .dispatch_tool(
+                "verify_forged_mod_package",
+                &json!({
+                    "authorize_write": true,
+                    "package_dir": nmod_dir.to_string_lossy(),
+                    "game_version": "1.2.0",
+                    "store_platform": "steam",
+                    "runtime_rollback_verified": true
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime_verify["recorded_compatibility"]["status"],
+            "verified"
+        );
+        assert_eq!(
+            runtime_verify["recorded_compatibility"]["evidence"],
+            "automated_runtime_test"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

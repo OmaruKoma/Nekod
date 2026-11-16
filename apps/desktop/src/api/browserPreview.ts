@@ -280,6 +280,25 @@ export function createBrowserPreviewApi() {
       profiles.set(`${profile.game_id}:${profile.trainer_id}`, profile);
       pushLog("info", "profile", `Saved profile for ${profile.game_id}`);
     },
+    exportProfileJson: async (gameId: string, trainerId: string): Promise<string> => {
+      const existing = profiles.get(`${gameId}:${trainerId}`) ?? {
+        game_id: gameId,
+        trainer_id: trainerId,
+        hotkeys: {},
+        saved_feature_states: {},
+        presets: {},
+      };
+      return JSON.stringify(existing, null, 2);
+    },
+    importProfileJson: async (rawJson: string): Promise<GameProfile> => {
+      const parsed = JSON.parse(rawJson) as GameProfile;
+      if (!parsed.game_id || !parsed.trainer_id) {
+        throw new Error("Imported profile requires game_id and trainer_id");
+      }
+      profiles.set(`${parsed.game_id}:${parsed.trainer_id}`, parsed);
+      pushLog("info", "profile", `Imported profile for ${parsed.game_id}`);
+      return parsed;
+    },
     getDiagnosticLogs: async (): Promise<DiagnosticEvent[]> => [...logs],
     discoverRunningProcesses: async (gameId: string): Promise<ProcessIdentity[]> => [
       {

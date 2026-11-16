@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CommunityTrainerView,
+  CompatibilityRecord,
   CustomGamePathRecord,
   DiagnosticEvent,
   FeatureCommand,
@@ -82,6 +83,13 @@ export default function App() {
   const [repoIdInput, setRepoIdInput] = useState("");
   const [repoUrlInput, setRepoUrlInput] = useState("");
   const [gameEnv, setGameEnv] = useState<GameEnvironmentProfile | null>(null);
+  const [compatRecords, setCompatRecords] = useState<CompatibilityRecord[]>([]);
+  const [profilePresets, setProfilePresets] = useState<
+    Record<string, Record<string, Record<string, unknown>>>
+  >({});
+  const [profileJsonTrainerId, setProfileJsonTrainerId] = useState<string | null>(null);
+  const [profileJsonBox, setProfileJsonBox] = useState("");
+  const [diagnosticBundle, setDiagnosticBundle] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
   async function refreshAll() {
@@ -141,6 +149,8 @@ export default function App() {
     setRunningProcs([]);
     setSelectedPid(null);
     setGameEnv(null);
+    setCompatRecords([]);
+    setProfileJsonTrainerId(null);
     try {
       const env = await nekodApi.inspectGameEnvironment(entry.game.install_dir);
       setGameEnv(env);
@@ -150,17 +160,20 @@ export default function App() {
     if (entry.game.matched_game_id) {
       const gameId = entry.game.matched_game_id;
       try {
-        const [list, procs, community] = await Promise.all([
+        const [list, procs, community, matrix] = await Promise.all([
           nekodApi.listTrainersForGame(gameId, entry.game.store_build_id),
           nekodApi.discoverRunningProcesses(gameId),
           nekodApi.listCommunityTrainersForGame(gameId),
+          nekodApi.queryCompatibilityMatrix(gameId, null, null),
         ]);
         setTrainers(list);
         setRunningProcs(procs);
         setSelectedPid(procs[0]?.pid ?? null);
         setCommunityTrainers(community);
+        setCompatRecords(matrix);
 
         const loadedProfiles: Record<string, Record<string, string>> = {};
+        const loadedPresets: Record<string, Record<string, Record<string, unknown>>> = {};
         await Promise.all(
           list.map(async (trainer) => {
             const prof = await nekodApi.loadProfile(gameId, trainer.trainer_id);
@@ -170,15 +183,18 @@ export default function App() {
               map[f.id] = saved ?? f.default_hotkey ?? "";
             }
             loadedProfiles[trainer.trainer_id] = map;
+            loadedPresets[trainer.trainer_id] = prof?.presets ?? {};
           }),
         );
         setProfilesByTrainer(loadedProfiles);
+        setProfilePresets(loadedPresets);
       } catch (e) {
         setError(String(e));
       }
     } else {
       setTrainers([]);
       setCommunityTrainers([]);
+      setCompatRecords([]);
     }
   }
 
@@ -473,6 +489,16 @@ export default function App() {
     }
   }
 
+  function findDuplicateHotkeys(hotkeys: Record<string, string>): string[] {
+    const counts = new Map<string, number>();
+    for (const raw of Object.values(hotkeys)) {
+      const norm = raw.trim().toLowerCase();
+      if (!norm) continue;
+      counts.set(norm, (counts.get(norm) ?? 0) + 1);
+    }
+    return [...counts.entries()].filter(([, c]) => c > 1).map(([k]) => k);
+  }
+
   async function handleSaveProfile(trainer: TrainerDetailView) {
     const gameId = selectedGame?.game.matched_game_id;
     if (!gameId) return;
@@ -485,9 +511,107 @@ export default function App() {
         hotkeys,
         saved_feature_states:
           activeTrainerId === trainer.trainer_id ? activeToggles : {},
+        presets: profilePresets[trainer.trainer_id] ?? {},
       };
       await nekodApi.saveProfile(profile);
-      setStatusMsg(`Saved hotkey profile for '${trainer.name}'.`);
+      setStatusMsg(`Saved hotkey & preset profile for '${trainer.name}'.`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleApplyPreset(
+    trainer: TrainerDetailView,
+    presetName: "Story Mode" | "No Grind" | "Reset Defaults",
+  ) {
+    const gameId = selectedGame?.game.matched_game_id;
+    if (!gameId) return;
+    try {
+      setError(null);
+      if (presetName === "Reset Defaults") {
+        const defaults: Record<string, string> = {};
+        for (const f of trainer.features) {
+          defaults[f.id] = f.default_hotkey ?? "";
+        }
+        setProfilesByTrainer((prev) => ({ ...prev, [trainer.trainer_id]: defaults }));
+        if (activeSessionId && activeTrainerId === trainer.trainer_id) {
+          for (const f of trainer.features) {
+            if (f.control_type === "toggle" && activeToggles[f.id]) {
+              await nekodApi.applyTrainerFeature(activeSessionId, {
+                feature_id: f.id,
+                value: { type: "toggle", value: false },
+              });
+            }
+          }
+          setActiveToggles({});
+        }
+        setStatusMsg(`Restored default hotkeys & toggles for '${trainer.name}'.`);
+        return;
+      }
+
+      const presetState: Record<string, unknown> = {};
+      for (const f of trainer.features) {
+        if (f.control_type === "toggle") {
+          const enable = presetName === "Story Mode" ? f.risk_level === "low" : true;
+          presetState[f.id] = { type: "toggle", value: enable };
+          if (activeSessionId && activeTrainerId === trainer.trainer_id) {
+            await nekodApi.applyTrainerFeature(activeSessionId, {
+              feature_id: f.id,
+              value: { type: "toggle", value: enable },
+            });
+            setActiveToggles((prev) => ({ ...prev, [f.id]: enable }));
+          }
+        }
+      }
+      const nextTrainerPresets = {
+        ...(profilePresets[trainer.trainer_id] ?? {}),
+        [presetName]: presetState,
+      };
+      setProfilePresets((prev) => ({
+        ...prev,
+        [trainer.trainer_id]: nextTrainerPresets,
+      }));
+      await nekodApi.saveProfile({
+        game_id: gameId,
+        trainer_id: trainer.trainer_id,
+        hotkeys: profilesByTrainer[trainer.trainer_id] ?? {},
+        saved_feature_states: activeTrainerId === trainer.trainer_id ? activeToggles : {},
+        presets: nextTrainerPresets,
+      });
+      setStatusMsg(`Applied & saved preset '${presetName}' for '${trainer.name}'.`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleExportProfile(trainer: TrainerDetailView) {
+    const gameId = selectedGame?.game.matched_game_id;
+    if (!gameId) return;
+    try {
+      setError(null);
+      const json = await nekodApi.exportProfileJson(gameId, trainer.trainer_id);
+      setProfileJsonTrainerId(trainer.trainer_id);
+      setProfileJsonBox(json);
+      setStatusMsg(`Exported portable JSON profile for '${trainer.name}'.`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleImportProfile(trainer: TrainerDetailView) {
+    if (!profileJsonBox.trim()) return;
+    try {
+      setError(null);
+      const imported = await nekodApi.importProfileJson(profileJsonBox);
+      setProfilesByTrainer((prev) => ({
+        ...prev,
+        [trainer.trainer_id]: imported.hotkeys,
+      }));
+      setProfilePresets((prev) => ({
+        ...prev,
+        [trainer.trainer_id]: imported.presets ?? {},
+      }));
+      setStatusMsg(`Imported JSON profile for '${imported.trainer_id}'.`);
     } catch (e) {
       setError(String(e));
     }
@@ -888,7 +1012,65 @@ export default function App() {
                     </div>
 
                     <div className="stack">
-                      <strong>Features ({t.features.length})</strong>
+                      <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
+                        <div className="row">
+                          <strong>Features ({t.features.length})</strong>
+                          {findDuplicateHotkeys(profilesByTrainer[t.trainer_id] ?? {}).length > 0 && (
+                            <span className="badge unverified">
+                              Hotkey Conflict:{" "}
+                              {findDuplicateHotkeys(profilesByTrainer[t.trainer_id] ?? {}).join(", ")}
+                            </span>
+                          )}
+                        </div>
+                        <div className="row">
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() => void handleApplyPreset(t, "Story Mode")}
+                          >
+                            Story Mode
+                          </button>
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() => void handleApplyPreset(t, "No Grind")}
+                          >
+                            No Grind
+                          </button>
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() => void handleApplyPreset(t, "Reset Defaults")}
+                          >
+                            Reset Defaults
+                          </button>
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() => void handleExportProfile(t)}
+                          >
+                            Export/Import Profile
+                          </button>
+                        </div>
+                      </div>
+                      {profileJsonTrainerId === t.trainer_id && (
+                        <div className="card stack" style={{ background: "var(--surface-alt)" }}>
+                          <strong>Portable Profile JSON ({t.trainer_id})</strong>
+                          <textarea
+                            className="text-input"
+                            rows={6}
+                            value={profileJsonBox}
+                            onChange={(e) => setProfileJsonBox(e.target.value)}
+                          />
+                          <div className="row">
+                            <button className="btn" onClick={() => void handleImportProfile(t)}>
+                              Import JSON Into Profile
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => setProfileJsonTrainerId(null)}
+                            >
+                              Close
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       {t.features.map((f) => {
                         const isOn = Boolean(activeToggles[f.id]);
                         return (
@@ -974,6 +1156,40 @@ export default function App() {
                   </div>
                 );
               })
+            )}
+
+            {selectedGame.game.matched_game_id && (
+              <div className="card stack">
+                <h3 style={{ margin: 0 }}>
+                  Compatibility Matrix &amp; Plugin Bucket ({compatRecords.length})
+                </h3>
+                {compatRecords.length === 0 ? (
+                  <p className="muted" style={{ margin: 0 }}>
+                    No tested build matrix records recorded yet for this title. Optional companion
+                    plugins and runtime workers resolve on demand with SHA-256 verification.
+                  </p>
+                ) : (
+                  <div className="stack">
+                    {compatRecords.map((rec) => (
+                      <div key={rec.record_id} className="feature-row">
+                        <div>
+                          <div className="row">
+                            <strong>{rec.mod_id}</strong>
+                            <span className="badge">v{rec.mod_version}</span>
+                            <span className="badge">{rec.runtime_adapter}</span>
+                            <span className="badge">{rec.status}</span>
+                          </div>
+                          <div className="muted">
+                            Build {rec.game_version} ({rec.store_platform}) &middot; Evidence:{" "}
+                            {rec.evidence}
+                            {rec.notes ? ` · ${rec.notes}` : ""}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
 
             {selectedGame.game.matched_game_id && (
@@ -1330,19 +1546,59 @@ export default function App() {
           <div className="stack">
             <div className="header-row">
               <h2 style={{ margin: 0 }}>Diagnostics &amp; Audit Logs</h2>
-              <button
-                className="btn btn-secondary"
-                onClick={async () => {
-                  try {
-                    setLogs(await nekodApi.getDiagnosticLogs());
-                  } catch (e) {
-                    setError(String(e));
-                  }
-                }}
-              >
-                Refresh
-              </button>
+              <div className="row">
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    const summary = JSON.stringify(
+                      {
+                        generated_at: new Date().toISOString(),
+                        security_policy: policy,
+                        active_session: sessionDiag,
+                        logs,
+                      },
+                      null,
+                      2,
+                    );
+                    setDiagnosticBundle(summary);
+                    setStatusMsg("Generated inspectable diagnostic bundle JSON below.");
+                  }}
+                >
+                  Export Diagnostic Bundle
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={async () => {
+                    try {
+                      setLogs(await nekodApi.getDiagnosticLogs());
+                    } catch (e) {
+                      setError(String(e));
+                    }
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
             </div>
+            {diagnosticBundle && (
+              <div className="card stack">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <strong>Diagnostic Bundle (JSON)</strong>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => setDiagnosticBundle(null)}
+                  >
+                    Hide Bundle
+                  </button>
+                </div>
+                <textarea
+                  className="text-input"
+                  rows={8}
+                  readOnly
+                  value={diagnosticBundle}
+                />
+              </div>
+            )}
             <div className="card">
               {logs.length === 0 ? (
                 <p className="muted" style={{ margin: 0 }}>

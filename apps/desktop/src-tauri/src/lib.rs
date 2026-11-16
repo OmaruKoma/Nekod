@@ -149,6 +149,26 @@ fn save_profile(state: State<'_, AppState>, profile: GameProfile) -> Result<(), 
 }
 
 #[tauri::command]
+fn export_profile_json(
+    state: State<'_, AppState>,
+    game_id: String,
+    trainer_id: String,
+) -> Result<String, String> {
+    state
+        .core
+        .export_profile_json(&game_id, &trainer_id)
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn import_profile_json(
+    state: State<'_, AppState>,
+    raw_json: String,
+) -> Result<GameProfile, String> {
+    state.core.import_profile_json(&raw_json).map_err(map_err)
+}
+
+#[tauri::command]
 fn get_diagnostic_logs(state: State<'_, AppState>) -> Vec<DiagnosticEvent> {
     state.core.get_diagnostic_logs()
 }
@@ -315,6 +335,8 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         update_security_policy,
         load_profile,
         save_profile,
+        export_profile_json,
+        import_profile_json,
         get_diagnostic_logs,
         discover_running_processes,
         start_trainer_session,

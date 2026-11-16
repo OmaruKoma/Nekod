@@ -16,6 +16,27 @@ pub struct GameProfile {
     pub trainer_id: String,
     pub hotkeys: BTreeMap<String, String>,
     pub saved_feature_states: BTreeMap<String, FeatureValue>,
+    #[serde(default)]
+    pub presets: BTreeMap<String, BTreeMap<String, FeatureValue>>,
+}
+
+impl GameProfile {
+    /// Serializes the profile into portable formatted JSON for community/player sharing.
+    pub fn to_portable_json(&self) -> Result<String, ProfileError> {
+        serde_json::to_string_pretty(self).map_err(|e| ProfileError::Storage(e.to_string()))
+    }
+
+    /// Parses and validates an imported portable profile JSON document.
+    pub fn from_portable_json(raw: &str) -> Result<Self, ProfileError> {
+        let profile: Self =
+            serde_json::from_str(raw).map_err(|e| ProfileError::Storage(e.to_string()))?;
+        if profile.game_id.trim().is_empty() || profile.trainer_id.trim().is_empty() {
+            return Err(ProfileError::Storage(
+                "imported profile requires non-empty game_id and trainer_id".to_owned(),
+            ));
+        }
+        Ok(profile)
+    }
 }
 
 /// Custom local game folder persisted by the player.
@@ -81,6 +102,7 @@ impl SqliteProfileStore {
                 trainer_id TEXT NOT NULL,
                 hotkeys_json TEXT NOT NULL,
                 feature_states_json TEXT NOT NULL,
+                presets_json TEXT NOT NULL DEFAULT '{}',
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (game_id, trainer_id)
             );
@@ -96,6 +118,10 @@ impl SqliteProfileStore {
             ",
         )
         .map_err(|e| ProfileError::Storage(e.to_string()))?;
+        let _ = conn.execute(
+            "ALTER TABLE profiles ADD COLUMN presets_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        );
         Ok(())
     }
 
@@ -209,26 +235,29 @@ impl ProfileStore for SqliteProfileStore {
             .conn
             .lock()
             .map_err(|_| ProfileError::Storage("database mutex poisoned".to_owned()))?;
-        let row: Option<(String, String)> = conn
+        let row: Option<(String, String, String)> = conn
             .query_row(
-                "SELECT hotkeys_json, feature_states_json FROM profiles WHERE game_id = ?1 AND trainer_id = ?2",
+                "SELECT hotkeys_json, feature_states_json, presets_json FROM profiles WHERE game_id = ?1 AND trainer_id = ?2",
                 params![game_id, trainer_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(|e| ProfileError::Storage(e.to_string()))?;
 
         match row {
-            Some((hotkeys_json, states_json)) => {
+            Some((hotkeys_json, states_json, presets_json)) => {
                 let hotkeys = serde_json::from_str(&hotkeys_json)
                     .map_err(|e| ProfileError::Storage(e.to_string()))?;
                 let saved_feature_states = serde_json::from_str(&states_json)
+                    .map_err(|e| ProfileError::Storage(e.to_string()))?;
+                let presets = serde_json::from_str(&presets_json)
                     .map_err(|e| ProfileError::Storage(e.to_string()))?;
                 Ok(Some(GameProfile {
                     game_id: game_id.to_owned(),
                     trainer_id: trainer_id.to_owned(),
                     hotkeys,
                     saved_feature_states,
+                    presets,
                 }))
             }
             None => Ok(None),
@@ -240,19 +269,28 @@ impl ProfileStore for SqliteProfileStore {
             .map_err(|e| ProfileError::Storage(e.to_string()))?;
         let states_json = serde_json::to_string(&profile.saved_feature_states)
             .map_err(|e| ProfileError::Storage(e.to_string()))?;
+        let presets_json = serde_json::to_string(&profile.presets)
+            .map_err(|e| ProfileError::Storage(e.to_string()))?;
 
         let conn = self
             .conn
             .lock()
             .map_err(|_| ProfileError::Storage("database mutex poisoned".to_owned()))?;
         conn.execute(
-            "INSERT INTO profiles (game_id, trainer_id, hotkeys_json, feature_states_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, unixepoch())
+            "INSERT INTO profiles (game_id, trainer_id, hotkeys_json, feature_states_json, presets_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
              ON CONFLICT(game_id, trainer_id) DO UPDATE SET
                 hotkeys_json = excluded.hotkeys_json,
                 feature_states_json = excluded.feature_states_json,
+                presets_json = excluded.presets_json,
                 updated_at = unixepoch()",
-            params![profile.game_id, profile.trainer_id, hotkeys_json, states_json],
+            params![
+                profile.game_id,
+                profile.trainer_id,
+                hotkeys_json,
+                states_json,
+                presets_json
+            ],
         )
         .map_err(|e| ProfileError::Storage(e.to_string()))?;
         Ok(())
@@ -271,11 +309,17 @@ mod tests {
         let mut states = BTreeMap::new();
         states.insert("infinite-health".to_owned(), FeatureValue::Toggle(false));
 
+        let mut story_mode = BTreeMap::new();
+        story_mode.insert("infinite-health".to_owned(), FeatureValue::Toggle(true));
+        let mut presets = BTreeMap::new();
+        presets.insert("Story Mode".to_owned(), story_mode);
+
         let profile = GameProfile {
             game_id: "sample-singleplayer-rpg".to_owned(),
             trainer_id: "dev.example.sample-singleplayer-rpg".to_owned(),
             hotkeys,
             saved_feature_states: states,
+            presets,
         };
         store.save_profile(&profile).unwrap();
 
@@ -287,6 +331,10 @@ mod tests {
             .unwrap()
             .expect("profile exists");
         assert_eq!(loaded, profile);
+
+        let portable = loaded.to_portable_json().unwrap();
+        let reimported = GameProfile::from_portable_json(&portable).unwrap();
+        assert_eq!(reimported, profile);
 
         store
             .add_custom_game_path("D:\\Games\\SampleRPG", Some("Sample RPG"))

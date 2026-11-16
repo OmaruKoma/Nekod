@@ -236,8 +236,17 @@ This document records significant architectural choices, the alternatives consid
 
 ---
 
+## ADR-021: On-Demand Plugin Bucket Distribution for Isolated Runtime Workers & Companion Bridge Plugins
+
+- **Status:** Accepted (`V2-M4` / `V2-M5`)
+- **Context:** `FridaGumRuntime` (`frida_gum_v1`) requires an isolated local worker process, and `UnityBridgeRuntime` / `Ue4ssBridgeRuntime` / `ManagedFrameworkRuntime` communicate with lightweight in-loader companion plugins over loopback IPC. Bundling these binaries into the core Nekod installer would bloat the player client and trigger false-positive AV heuristics.
+- **Decision:** Distribute isolated runtime workers and companion bridge plugins as versioned, SHA-256-pinned plugin packages in a dedicated **Nekod Plugin Bucket** (`DependencyKind::RuntimeBridge` with `DependencyRedistribution::OfficialUpstreamFetch`), fetched and verified on demand by `RuntimeDependencyManager` and staged/rolled back via `DeploymentLedger`.
+- **Consequences:** Core player installations remain lightweight, auditable, and zero-bloat; optional dynamic/loader plugins obey the same cryptographic SHA-256 verification and LIFO rollback guarantees as third-party mod recipes.
+
+---
+
 ## Summary of Unresolved Engineering Questions
 
 The full register of unresolved questions, trade-offs, and impact timelines lives in [`docs/unresolved-questions.md`](docs/unresolved-questions.md). All initial **U1**–**U11** architectural questions now have accepted ADRs:
 
-*(Resolved in P0–P5: **U1**–**U11**; Platform Expansion ADR-019 and `.nmod` Bucket Distribution ADR-020 recorded for V1.1+/V2 evolution.)*
+*(Resolved in P0–P5: **U1**–**U11**; Platform Expansion ADR-019, `.nmod` Bucket Distribution ADR-020, and Plugin Bucket Distribution ADR-021 recorded for V1.1+/V2 evolution.)*

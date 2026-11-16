@@ -166,8 +166,8 @@ Game
 | 阶段 | 重点任务 | 当前状态 |
 | :--- | :--- | :--- |
 | **基础基线 (P0–P5 + V1.1-S1)** | 六层架构、SQLite 核心、Win32/Linux 声明式后端、`wasm_sandbox_v1` 宿主、`DeploymentLedger`、`.CT` 静态转译、`adapter_ipc_v1` | **已完成并测试通过** |
-| **M1 — 核心协议重构** | 重新定义 `ModManifest`（v2 Schema）、扩展 `RuntimeProvider` 适配器接口与 `Mod Package` 规范（兼容 v1） | **下一步重点** |
-| **M2 — 依赖与兼容数据库** | `Runtime Dependency Manager`、游戏引擎/Loader 探测增强、`Compatibility Database` 数据模型与存储 | **已规划** |
-| **M3 — 传统与通用引擎桥接** | 受限 CE `.CT` 脚本子集执行器、`Unity Runtime Bridge`（Mono / IL2CPP）、`UE4SS` 桥接管理 | **已规划** |
-| **M4 — 动态插桩与专有生态** | 可选隔离 `Frida Gum` Runtime、`REFramework` / `ScriptHook` 等游戏专用适配器 | **已规划** |
-| **M5 — AI Mod Forge 闭环** | 扩充 `nekod-mcp` 游戏分析、Runtime 推荐、自动化生成与测试验证工具链 + 桌面 UI 体验升级 | **已规划** |
+| **M1 — 核心协议重构** | 重新定义 `ModManifest`（v2 Schema）、扩展 `RuntimeProvider` 适配器接口与 `Mod Package` 规范（兼容 v1） | **已完成并测试通过** |
+| **M2 — 依赖与兼容数据库** | `Runtime Dependency Manager`、游戏引擎/Loader 探测增强、`Compatibility Database` 数据模型与存储 | **已完成并测试通过** |
+| **M3 — 传统与通用引擎桥接** | 受限 CE `.CT` 脚本子集执行器、`Unity Runtime Bridge`（Mono / IL2CPP）、`UE4SS` 桥接管理 | **已完成并测试通过** |
+| **M4 — 动态插桩与专有生态** | 可选隔离 `Frida Gum` Runtime、`REFramework` / `ScriptHook` 等游戏专用适配器（按插件 Bucket 按需分发，ADR-021） | **已完成并测试通过** |
+| **M5 — AI Mod Forge 闭环** | 扩充 `nekod-mcp` 游戏分析、Runtime 推荐、自动化生成与测试验证工具链 + 桌面 UI 体验升级 | **已完成并测试通过** |

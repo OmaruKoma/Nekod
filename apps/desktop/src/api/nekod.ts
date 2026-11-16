@@ -97,6 +97,7 @@ export interface GameProfile {
   trainer_id: string;
   hotkeys: Record<string, string>;
   saved_feature_states: Record<string, unknown>;
+  presets?: Record<string, Record<string, unknown>>;
 }
 
 export interface ProcessIdentity {
@@ -188,7 +189,14 @@ export interface TrainerUpdateInfo {
 }
 
 export interface DetectedLoader {
-  kind: "bep_in_ex_mono" | "bep_in_ex_il2cpp" | "melon_loader" | "ue4ss" | "re_framework";
+  kind:
+    | "bep_in_ex_mono"
+    | "bep_in_ex_il2cpp"
+    | "melon_loader"
+    | "ue4ss"
+    | "re_framework"
+    | "script_hook_v"
+    | "script_hook_rdr2";
   entry_path: string;
   detected_version: string | null;
 }
@@ -253,6 +261,9 @@ const tauriApi = {
   loadProfile: (gameId: string, trainerId: string) =>
     invoke<GameProfile | null>("load_profile", { gameId, trainerId }),
   saveProfile: (profile: GameProfile) => invoke<void>("save_profile", { profile }),
+  exportProfileJson: (gameId: string, trainerId: string) =>
+    invoke<string>("export_profile_json", { gameId, trainerId }),
+  importProfileJson: (rawJson: string) => invoke<GameProfile>("import_profile_json", { rawJson }),
   getDiagnosticLogs: () => invoke<DiagnosticEvent[]>("get_diagnostic_logs"),
   discoverRunningProcesses: (gameId: string) =>
     invoke<ProcessIdentity[]>("discover_running_processes", { gameId }),

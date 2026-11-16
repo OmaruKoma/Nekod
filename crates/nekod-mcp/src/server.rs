@@ -12,16 +12,20 @@ use std::sync::Arc;
 use nekod_core::{NekodAppService, NekodCore};
 use nekod_game_detection::current_target_platform;
 use nekod_manifest::{
-    FeatureCategory, RegistryManifest, RegistryTrainerEntry, RegistryTrainerStatus, TrainerManifest,
+    AuthorInfo, CompatibilityMatrixEntry, CompatibilityStatus, FeatureCategory, FeatureControlType,
+    FeatureRiskLevel, ModCompatibility, ModKind, ModManifest, PackageFormat, PermissionDeclaration,
+    PermissionScope, RegistryManifest, RegistryTrainerEntry, RegistryTrainerStatus, RuntimeKind,
+    RuntimeRequirement, StorePlatformTag, SupportedGameVersion, TargetGameRef, TargetPlatform,
+    TrainerArtifact, TrainerCompatibility, TrainerFeature, TrainerManifest, TrainerPolicy,
 };
-use nekod_trainer_manager::compute_compatibility;
+use nekod_trainer_manager::{CompatibilityEvidence, NewCompatibilityRecord, compute_compatibility};
 use nekod_trainer_sdk::{
     AddressLocator, DeclarativePatchBuilder, ScalarValueType, TrainerManifestBuilder,
     build_trainer_package, sha256_hex_bytes,
 };
 use nekod_validator::{
-    validate_game_manifest_str, validate_registry_manifest_str, validate_trainer_manifest_str,
-    validate_trainer_package_dir,
+    validate_game_manifest_str, validate_mod_manifest_str, validate_nmod_package_dir,
+    validate_registry_manifest_str, validate_trainer_manifest_str, validate_trainer_package_dir,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -252,12 +256,15 @@ impl NekodMcpServer {
             "list_installed_games" => self.tool_list_installed_games(),
             "get_game_info" => self.tool_get_game_info(args),
             "inspect_game_environment" => self.tool_inspect_game_environment(args),
+            "recommend_runtime_adapter" => self.tool_recommend_runtime_adapter(args),
             "create_trainer_manifest" => self.tool_create_trainer_manifest(args),
             "validate_trainer_manifest" => self.tool_validate_trainer_manifest(args),
             "inspect_trainer" => self.tool_inspect_trainer(args),
             "generate_trainer_template" => self.tool_generate_trainer_template(args),
+            "forge_nmod_package" => self.tool_forge_nmod_package(args),
             "check_game_version" => self.tool_check_game_version(args),
             "validate_compatibility" => self.tool_validate_compatibility(args),
+            "verify_forged_mod_package" => self.tool_verify_forged_mod_package(args),
             "inspect_runtime_diagnostics" => self.tool_inspect_runtime_diagnostics(),
             "validate_repository" => self.tool_validate_repository(args),
             "inspect_registry_entry" => self.tool_inspect_registry_entry(args),
@@ -348,6 +355,331 @@ impl NekodMcpServer {
             "store_build_id": detected.game.store_build_id,
             "compatibility_policy": anti_cheat,
             "engine_environment": env_profile
+        }))
+    }
+
+    fn tool_recommend_runtime_adapter(&self, args: &Value) -> Result<Value, McpError> {
+        let game_id = req_str(args, "game_id")?;
+        if let Some(gm) = self
+            .core
+            .list_game_manifests()
+            .map_err(|e| McpError::Execution(e.to_string()))?
+            .into_iter()
+            .find(|g| g.id == game_id)
+            && gm.compatibility_policy.trainer_policy == TrainerPolicy::ProhibitedOnlineCompetitive
+        {
+            return Err(McpError::PolicyRefusal(format!(
+                "refusing runtime adapter recommendation for prohibited competitive game '{game_id}'"
+            )));
+        }
+
+        let install_dir = if let Some(dir) = args.get("install_dir").and_then(Value::as_str) {
+            dir.to_owned()
+        } else {
+            let games = self
+                .core
+                .list_library_games()
+                .map_err(|e| McpError::Execution(e.to_string()))?;
+            games
+                .into_iter()
+                .find(|g| g.game.matched_game_id.as_deref() == Some(game_id))
+                .map(|g| g.game.install_dir)
+                .ok_or_else(|| {
+                    McpError::Execution(format!(
+                        "provide 'install_dir' or register/detect game '{game_id}' first"
+                    ))
+                })?
+        };
+
+        let env = self.core.inspect_installed_game_environment(&install_dir);
+        let compat_records = self
+            .core
+            .query_compatibility_matrix(game_id, None, None)
+            .map_err(|e| McpError::Execution(e.to_string()))?;
+        let primary_adapter = env
+            .recommended_adapters
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "declarative_patch_v1".to_owned());
+
+        Ok(json!({
+            "game_id": game_id,
+            "engine": env.engine,
+            "installed_loaders": env.installed_loaders,
+            "anti_cheat_files_present": env.anti_cheat_files_present,
+            "recommended_adapters": env.recommended_adapters,
+            "primary_adapter": primary_adapter,
+            "plugin_bucket_strategy": "on_demand_sha256_bucket_plugin",
+            "existing_compatibility_records": compat_records
+        }))
+    }
+
+    fn tool_forge_nmod_package(&self, args: &Value) -> Result<Value, McpError> {
+        let output_dir = PathBuf::from(req_str(args, "output_dir")?);
+        let mod_id = args
+            .get("mod_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                args.get("trainer_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .ok_or_else(|| McpError::InvalidParams("missing 'mod_id' (or 'trainer_id')".into()))?;
+        let name = req_str(args, "name")?;
+        let game_id = req_str(args, "game_id")?;
+        let game_name = req_str(args, "game_name")?;
+        let source_repo = req_str(args, "source_repository")?;
+        let runtime_str = args
+            .get("runtime_kind")
+            .and_then(Value::as_str)
+            .unwrap_or("declarative_patch_v1");
+        let mod_kind_str = args
+            .get("mod_kind")
+            .and_then(Value::as_str)
+            .unwrap_or("trainer");
+        let module_name = args
+            .get("module_name")
+            .and_then(Value::as_str)
+            .unwrap_or("Game.exe");
+        let author_name = args
+            .get("author_name")
+            .and_then(Value::as_str)
+            .unwrap_or("AI Mod Forge Contributor");
+
+        if let Some(gm) = self
+            .core
+            .list_game_manifests()
+            .map_err(|e| McpError::Execution(e.to_string()))?
+            .into_iter()
+            .find(|g| g.id == game_id)
+            && gm.compatibility_policy.trainer_policy == TrainerPolicy::ProhibitedOnlineCompetitive
+        {
+            return Err(McpError::PolicyRefusal(format!(
+                "refusing mod forge for prohibited competitive game '{game_id}'"
+            )));
+        }
+
+        let runtime_kind: RuntimeKind =
+            serde_json::from_value(Value::String(runtime_str.to_owned())).map_err(|e| {
+                McpError::InvalidParams(format!("invalid runtime_kind '{runtime_str}': {e}"))
+            })?;
+        if matches!(
+            runtime_kind,
+            RuntimeKind::NativeProviderV1 | RuntimeKind::FridaGumV1
+        ) {
+            return Err(McpError::PolicyRefusal(format!(
+                "AI Mod Forge refuses auto-generating '{runtime_str}' packages without manual engineering workflow"
+            )));
+        }
+        let mod_kind: ModKind = serde_json::from_value(Value::String(mod_kind_str.to_owned()))
+            .map_err(|e| {
+                McpError::InvalidParams(format!("invalid mod_kind '{mod_kind_str}': {e}"))
+            })?;
+
+        let (entrypoint_rel, payload_json) =
+            build_forged_entrypoint_payload(runtime_kind, module_name)?;
+        fs::create_dir_all(&output_dir).map_err(|e| McpError::Execution(e.to_string()))?;
+        let entry_path = output_dir.join(&entrypoint_rel);
+        if let Some(parent) = entry_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| McpError::Execution(e.to_string()))?;
+        }
+        fs::write(&entry_path, payload_json.as_bytes())
+            .map_err(|e| McpError::Execution(e.to_string()))?;
+        let entry_sha256 = sha256_hex_bytes(payload_json.as_bytes());
+        let entry_size = payload_json.len() as u64;
+
+        let trainer_v1 = TrainerManifest {
+            schema_version: Version::new(1, 0, 0),
+            id: mod_id.to_owned(),
+            name: name.to_owned(),
+            version: Version::new(0, 1, 0),
+            description: format!("Forged .nmod draft targeting {game_name} via {runtime_str}."),
+            authors: vec![AuthorInfo {
+                name: author_name.to_owned(),
+                github: None,
+                url: None,
+            }],
+            license: "MIT".to_owned(),
+            source_repository: source_repo.to_owned(),
+            homepage: None,
+            target_game: TargetGameRef {
+                game_id: game_id.to_owned(),
+                game_name: game_name.to_owned(),
+                store_ids: None,
+            },
+            supported_versions: vec![SupportedGameVersion {
+                platform: TargetPlatform::WindowsX64,
+                version_pattern: "*".to_owned(),
+                executable_sha256: None,
+                status: CompatibilityStatus::Experimental,
+            }],
+            runtime: RuntimeRequirement {
+                kind: runtime_kind,
+                api_version: Version::new(1, 0, 0),
+                min_nekod_version: Version::parse("0.1.0-alpha.0").unwrap(),
+                entrypoint: entrypoint_rel.clone(),
+                supported_platforms: vec![TargetPlatform::WindowsX64],
+            },
+            compatibility: TrainerCompatibility {
+                singleplayer_only: true,
+                requires_offline_mode: false,
+                anti_cheat_incompatible: vec![],
+                last_verified_at: None,
+            },
+            permissions: vec![
+                PermissionDeclaration {
+                    scope: PermissionScope::ProcessDiscover,
+                    reason: "Identify target singleplayer game process".to_owned(),
+                    required: true,
+                    constraints: None,
+                },
+                PermissionDeclaration {
+                    scope: PermissionScope::ProcessReadMemory,
+                    reason: "Inspect target game structures or signatures".to_owned(),
+                    required: true,
+                    constraints: None,
+                },
+                PermissionDeclaration {
+                    scope: PermissionScope::ProcessWriteMemory,
+                    reason: "Apply reversible mod changes".to_owned(),
+                    required: true,
+                    constraints: None,
+                },
+            ],
+            features: vec![TrainerFeature {
+                id: "forged-feature".to_owned(),
+                name: "Forged Draft Toggle".to_owned(),
+                description:
+                    "Generated experimental draft feature (requires runtime rollback test)."
+                        .to_owned(),
+                category: FeatureCategory::Player,
+                control_type: FeatureControlType::Toggle,
+                default_hotkey: Some("F1".to_owned()),
+                mutates_memory: true,
+                supports_rollback: true,
+                risk_level: FeatureRiskLevel::Low,
+                value_range: None,
+            }],
+            artifacts: vec![TrainerArtifact {
+                filename: entrypoint_rel.clone(),
+                sha256: entry_sha256.clone(),
+                size_bytes: entry_size,
+                platform: None,
+            }],
+            extensions: None,
+        };
+
+        let mut mod_v2 = ModManifest::from_trainer_v1(&trainer_v1);
+        mod_v2.schema_version = Version::new(2, 0, 0);
+        mod_v2.package_format = PackageFormat::NmodV1;
+        mod_v2.mod_kind = mod_kind;
+        mod_v2.compatibility = ModCompatibility {
+            singleplayer_only: true,
+            requires_offline_mode: false,
+            anti_cheat_incompatible: vec![],
+            last_verified_at: None,
+            compatibility_matrix: vec![CompatibilityMatrixEntry {
+                game_version: "*".to_owned(),
+                store_platform: StorePlatformTag::Any,
+                runtime_adapter: runtime_str.to_owned(),
+                runtime_version: None,
+                status: CompatibilityStatus::Experimental,
+                notes: Some(
+                    "Unverified AI Mod Forge draft (requires runtime verification gate).".into(),
+                ),
+            }],
+        };
+
+        let trainer_json = serde_json::to_string_pretty(&trainer_v1)
+            .map_err(|e| McpError::Execution(e.to_string()))?;
+        let mod_json = serde_json::to_string_pretty(&mod_v2)
+            .map_err(|e| McpError::Execution(e.to_string()))?;
+
+        validate_mod_manifest_str(&mod_json).map_err(|e| McpError::InvalidParams(e.to_string()))?;
+        validate_trainer_manifest_str(&trainer_json)
+            .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+
+        fs::write(
+            output_dir.join("trainer-manifest.json"),
+            trainer_json.as_bytes(),
+        )
+        .map_err(|e| McpError::Execution(e.to_string()))?;
+        fs::write(output_dir.join("mod-manifest.json"), mod_json.as_bytes())
+            .map_err(|e| McpError::Execution(e.to_string()))?;
+
+        let mod_manifest_sha256 = sha256_hex_bytes(mod_json.as_bytes());
+        Ok(json!({
+            "mod_id": mod_v2.id,
+            "output_dir": output_dir,
+            "runtime_kind": runtime_str,
+            "mod_manifest_sha256": mod_manifest_sha256,
+            "entrypoint_file": entrypoint_rel,
+            "declared_status": "experimental"
+        }))
+    }
+
+    fn tool_verify_forged_mod_package(&self, args: &Value) -> Result<Value, McpError> {
+        let package_dir = PathBuf::from(req_str(args, "package_dir")?);
+        let game_version = req_str(args, "game_version")?;
+        let store_str = args
+            .get("store_platform")
+            .and_then(Value::as_str)
+            .unwrap_or("steam");
+        let store_platform: StorePlatformTag =
+            serde_json::from_value(Value::String(store_str.to_owned())).map_err(|e| {
+                McpError::InvalidParams(format!("invalid store_platform '{store_str}': {e}"))
+            })?;
+        let runtime_rollback_verified = args
+            .get("runtime_rollback_verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let (manifest, manifest_sha256) = validate_nmod_package_dir(&package_dir)
+            .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+        let runtime_adapter = serde_json::to_value(manifest.runtime.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("{:?}", manifest.runtime.kind));
+
+        let (status, evidence, notes) = if runtime_rollback_verified {
+            (
+                CompatibilityStatus::Verified,
+                CompatibilityEvidence::AutomatedRuntimeTest,
+                Some("Passed .nmod verification and automated runtime rollback test.".to_owned()),
+            )
+        } else {
+            (
+                CompatibilityStatus::Experimental,
+                CompatibilityEvidence::AiDraftUnverified,
+                Some(
+                    "Static/artifact schema verified only; awaits runtime attach + LIFO rollback test (ADR-019)."
+                        .to_owned(),
+                ),
+            )
+        };
+
+        let recorded = self
+            .core
+            .record_compatibility_result(&NewCompatibilityRecord {
+                game_id: manifest.target_game.game_id.clone(),
+                game_version: game_version.to_owned(),
+                store_platform,
+                runtime_adapter,
+                runtime_version: None,
+                mod_id: manifest.id.clone(),
+                mod_version: manifest.version.to_string(),
+                status,
+                evidence,
+                notes,
+            })
+            .map_err(|e| McpError::Execution(e.to_string()))?;
+
+        Ok(json!({
+            "valid": true,
+            "mod_id": manifest.id,
+            "manifest_sha256": manifest_sha256,
+            "recorded_compatibility": recorded
         }))
     }
 
@@ -907,6 +1239,9 @@ fn tool_metadata_json(spec: &McpToolSpec) -> Value {
         "inspect_game_environment" => {
             "Inspect host platform, install path, and anti-cheat policy for a detected game (read-only)."
         }
+        "recommend_runtime_adapter" => {
+            "Inspect game engine/loaders and compatibility DB to recommend optimal Runtime Adapter & Plugin Bucket strategy (read-only)."
+        }
         "create_trainer_manifest" => {
             "Generate and validate trainer-manifest.json for an existing entrypoint (requires authorize_write: true)."
         }
@@ -919,11 +1254,17 @@ fn tool_metadata_json(spec: &McpToolSpec) -> Value {
         "generate_trainer_template" => {
             "Scaffold a complete declarative_patch_v1 trainer directory with SHA-256 artifacts (requires authorize_write: true)."
         }
+        "forge_nmod_package" => {
+            "Generate an Experimental .nmod source-first mod package scaffold targeting a chosen Runtime Adapter (requires authorize_write: true)."
+        }
         "check_game_version" => {
             "Evaluate trainer supported_versions compatibility against a target game build (read-only)."
         }
         "validate_compatibility" => {
             "Verify GameManifest & TrainerManifest singleplayer/offline/anti-cheat policy compatibility (read-only)."
+        }
+        "verify_forged_mod_package" => {
+            "Verify .nmod manifest & SHA-256 artifacts and record Experimental or AutomatedRuntimeTest compatibility under ADR-019 gate (requires authorize_write: true)."
         }
         "inspect_runtime_diagnostics" => {
             "Read Nekod core security policy state and recent diagnostics (read-only)."
@@ -985,6 +1326,41 @@ fn schema_for_tool(name: &str) -> Value {
             "required": ["game_id"],
             "properties": { "game_id": { "type": "string" } }
         }),
+        "recommend_runtime_adapter" => json!({
+            "type": "object",
+            "required": ["game_id"],
+            "properties": {
+                "game_id": { "type": "string" },
+                "install_dir": { "type": "string" }
+            }
+        }),
+        "forge_nmod_package" => json!({
+            "type": "object",
+            "required": ["authorize_write", "output_dir", "mod_id", "name", "game_id", "game_name", "source_repository"],
+            "properties": {
+                "authorize_write": { "type": "boolean" },
+                "output_dir": { "type": "string" },
+                "mod_id": { "type": "string" },
+                "name": { "type": "string" },
+                "game_id": { "type": "string" },
+                "game_name": { "type": "string" },
+                "source_repository": { "type": "string" },
+                "runtime_kind": { "type": "string" },
+                "mod_kind": { "type": "string" },
+                "module_name": { "type": "string" }
+            }
+        }),
+        "verify_forged_mod_package" => json!({
+            "type": "object",
+            "required": ["authorize_write", "package_dir", "game_version"],
+            "properties": {
+                "authorize_write": { "type": "boolean" },
+                "package_dir": { "type": "string" },
+                "game_version": { "type": "string" },
+                "store_platform": { "type": "string" },
+                "runtime_rollback_verified": { "type": "boolean" }
+            }
+        }),
         "inspect_authorized_game_process" => json!({
             "type": "object",
             "required": ["game_id", "authorize_process_inspection"],
@@ -1021,5 +1397,106 @@ fn schema_for_tool(name: &str) -> Value {
             }
         }),
         _ => json!({ "type": "object", "properties": {} }),
+    }
+}
+
+fn build_forged_entrypoint_payload(
+    kind: RuntimeKind,
+    module_name: &str,
+) -> Result<(String, String), McpError> {
+    match kind {
+        RuntimeKind::DeclarativePatchV1 => {
+            let payload = DeclarativePatchBuilder::new()
+                .byte_patch(
+                    "forged-feature",
+                    AddressLocator::AobPattern {
+                        module: module_name.to_owned(),
+                        pattern: "48 8B 05 ?? ?? ?? ??".to_owned(),
+                        match_index: 0,
+                        offset: 0,
+                    },
+                    Some("90 90".to_owned()),
+                    "90 90",
+                )
+                .build()
+                .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+            let json = serde_json::to_string_pretty(&payload)
+                .map_err(|e| McpError::Execution(e.to_string()))?;
+            Ok(("rules/main.json".to_owned(), json))
+        }
+        RuntimeKind::CeSubsetV1 => Ok((
+            "rules/ce_subset.json".to_owned(),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": "1.0.0",
+                "features": [{
+                    "kind": "auto_assembler_patch",
+                    "feature_id": "forged-feature",
+                    "default_module": module_name,
+                    "script": format!("[ENABLE]\naobscanmodule(MOD,{module_name},48 8B 05 ?? ?? ?? ??)\nMOD:\ndb 90 90\n[DISABLE]\nMOD:\ndb 90 90")
+                }]
+            }))
+            .unwrap(),
+        )),
+        RuntimeKind::UnityBridgeV1 => Ok((
+            "scripts/unity_bridge.json".to_owned(),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": "1.0.0",
+                "flavor": "il2cpp",
+                "loader": "bepinex_il2cpp",
+                "host": "127.0.0.1",
+                "port": 19540,
+                "auth_token": "replace_with_session_token_16",
+                "features": [{
+                    "kind": "toggle_field",
+                    "feature_id": "forged-feature",
+                    "class_name": "PlayerController",
+                    "field_name": "staminaDrain",
+                    "enabled_value": 0.0,
+                    "disabled_value": 1.0
+                }]
+            }))
+            .unwrap(),
+        )),
+        RuntimeKind::Ue4ssBridgeV1 => Ok((
+            "scripts/ue4ss_bridge.json".to_owned(),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": "1.0.0",
+                "engine_version": "5.3",
+                "host": "127.0.0.1",
+                "port": 19541,
+                "auth_token": "replace_with_session_token_16",
+                "features": [{
+                    "kind": "cheat_manager_command",
+                    "feature_id": "forged-feature",
+                    "enable_command": "God",
+                    "disable_command": "God"
+                }]
+            }))
+            .unwrap(),
+        )),
+        RuntimeKind::ManagedFrameworkV1 => Ok((
+            "scripts/framework.json".to_owned(),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": "1.0.0",
+                "framework": "reframework",
+                "ipc": {
+                    "host": "127.0.0.1",
+                    "port": 19542,
+                    "auth_token": "replace_with_session_token_16"
+                },
+                "staged_scripts": [],
+                "features": [{
+                    "kind": "ipc_toggle",
+                    "feature_id": "forged-feature",
+                    "enable_command": "enable_mod",
+                    "disable_command": "disable_mod"
+                }]
+            }))
+            .unwrap(),
+        )),
+        _ => Ok((
+            "rules/entrypoint.json".to_owned(),
+            json!({ "schema_version": "1.0.0" }).to_string(),
+        )),
     }
 }

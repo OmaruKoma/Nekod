@@ -697,6 +697,29 @@ impl NekodAppService {
         Ok(())
     }
 
+    pub fn export_profile_json(
+        &self,
+        game_id: &str,
+        trainer_id: &str,
+    ) -> Result<String, CoreError> {
+        let profile = self
+            .load_profile(game_id, trainer_id)?
+            .unwrap_or_else(|| GameProfile {
+                game_id: game_id.to_owned(),
+                trainer_id: trainer_id.to_owned(),
+                hotkeys: std::collections::BTreeMap::new(),
+                saved_feature_states: std::collections::BTreeMap::new(),
+                presets: std::collections::BTreeMap::new(),
+            });
+        Ok(profile.to_portable_json()?)
+    }
+
+    pub fn import_profile_json(&self, raw_json: &str) -> Result<GameProfile, CoreError> {
+        let profile = GameProfile::from_portable_json(raw_json)?;
+        self.save_profile(&profile)?;
+        Ok(profile)
+    }
+
     pub fn get_diagnostic_logs(&self) -> Vec<DiagnosticEvent> {
         self.logs.lock().map(|g| g.clone()).unwrap_or_default()
     }

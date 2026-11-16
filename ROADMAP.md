@@ -143,6 +143,6 @@ Building on the completed `P0`–`P5` baseline, Nekod is evolving into a unified
 | **V2-M2** | Dependency & Compatibility | `Runtime Dependency Manager` (license-aware loader detection/staging) + multi-dimensional `Compatibility Database` | **Completed** |
 | **V2-M3** | Traditional + Engine Adapters | Constrained CE `.CT` subset evaluator, `Unity Runtime Bridge` (Mono & IL2CPP via BepInEx/MelonLoader), `Unreal Runtime Bridge` (`UE4SS`) | **Completed** |
 | **V2-M4** | Dynamic & Specialized Bridges | Optional isolated `Frida Gum` dynamic instrumentation adapter + `REFramework` / `ScriptHook` managed adapters | **Completed** |
-| **V2-M5** | AI Mod Forge & UI Polish | L6 `nekod-mcp` game/engine analysis → runtime recommendation → mod generation → sandbox/runtime verification pipeline + WeMod-grade desktop UX (`docs/v1.1-roadmap.md`) | **Next** |
+| **V2-M5** | AI Mod Forge & UI Polish | L6 `nekod-mcp` game/engine analysis → runtime recommendation → mod generation → sandbox/runtime verification pipeline + WeMod-grade desktop UX (`docs/v1.1-roadmap.md`) | **Completed** |
 
 See also [`docs/v1.1-roadmap.md`](docs/v1.1-roadmap.md) for player-facing desktop UX improvements and reference trainer examples.
