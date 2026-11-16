@@ -1,8 +1,10 @@
 import type {
   CommunityTrainerView,
+  CompatibilityRecord,
   CustomGamePathRecord,
   DiagnosticEvent,
   FeatureCommand,
+  GameEnvironmentProfile,
   GameProfile,
   LibraryGameView,
   PermissionScope,
@@ -426,5 +428,36 @@ export function createBrowserPreviewApi() {
     ): Promise<void> => {
       pushLog("info", "registry", `Simulated SHA-256 verified install for ${trainerId}`);
     },
+    inspectGameEnvironment: async (installDir: string): Promise<GameEnvironmentProfile> => {
+      const isHollow = installDir.toLowerCase().includes("hollow");
+      return {
+        install_dir: installDir,
+        dir_exists: true,
+        engine: isHollow ? "unity_mono" : "native_unknown",
+        installed_loaders: isHollow
+          ? [{ kind: "bep_in_ex_mono", entry_path: "BepInEx/core", detected_version: "5.4.22" }]
+          : [],
+        anti_cheat_files_present: [],
+        recommended_adapters: isHollow
+          ? ["unity_bridge_v1", "declarative_patch_v1"]
+          : ["declarative_patch_v1", "ce_script_v1"],
+      };
+    },
+    queryCompatibilityMatrix: async (gameId: string): Promise<CompatibilityRecord[]> => [
+      {
+        record_id: 1,
+        game_id: gameId,
+        game_version: "1.2.0",
+        store_platform: "steam",
+        runtime_adapter: "declarative_patch_v1",
+        runtime_version: "1.0.0",
+        mod_id: `dev.example.${gameId}`,
+        mod_version: "1.0.0",
+        status: "verified",
+        evidence: "automated_runtime_test",
+        notes: "Verified rollback & clean attach in preview matrix.",
+        recorded_at: 1763265600,
+      },
+    ],
   };
 }

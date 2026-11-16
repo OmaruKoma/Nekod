@@ -1,5 +1,15 @@
 //! L2 Trainer Manager: SQLite catalog, local trainer package ingestion,
-//! SHA-256 artifact integrity verification, and compatibility matching.
+//! SHA-256 artifact integrity verification, dependency resolution, and compatibility database.
+
+pub mod compatibility_db;
+pub mod dependency_manager;
+
+pub use compatibility_db::{
+    CompatibilityDatabase, CompatibilityEvidence, CompatibilityRecord, NewCompatibilityRecord,
+};
+pub use dependency_manager::{
+    DependencyResolutionReport, DependencyResolutionState, RuntimeDependencyManager,
+};
 
 use std::fs;
 use std::path::{Path, PathBuf};

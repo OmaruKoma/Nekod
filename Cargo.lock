@@ -2209,11 +2209,13 @@ name = "nekod-desktop"
 version = "0.1.0-alpha.0"
 dependencies = [
  "nekod-core",
+ "nekod-game-detection",
  "nekod-manifest",
  "nekod-permission-manager",
  "nekod-profile-manager",
  "nekod-registry-client",
  "nekod-runtime-api",
+ "nekod-trainer-manager",
  "nekod-trainer-runtime",
  "serde",
  "serde_json",
@@ -2311,9 +2313,11 @@ dependencies = [
 name = "nekod-trainer-manager"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "nekod-game-detection",
  "nekod-manifest",
  "nekod-validator",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.1",

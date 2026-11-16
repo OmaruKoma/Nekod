@@ -11,11 +11,12 @@ use std::sync::{Arc, Mutex};
 
 use nekod_game_detection::{
     CustomGameFolder, CustomPathDetector, DetectedGame, DetectionError, EpicDetector, GameDetector,
-    GogDetector, SteamDetector, current_target_platform, match_games_against_manifests,
+    GameEnvironmentProfile, GogDetector, SteamDetector, current_target_platform,
+    inspect_game_directory, match_games_against_manifests,
 };
 use nekod_manifest::{
     CompatibilityStatus, GameManifest, ManifestError, PermissionDeclaration, PermissionScope,
-    TrainerFeature, TrainerManifest, TrainerPolicy, TrustTier,
+    RuntimeDependencySpec, TrainerFeature, TrainerManifest, TrainerPolicy, TrustTier,
 };
 use nekod_permission_manager::{
     EvaluationOutcome, PermissionError, PermissionEvaluator, SecurityPolicyConfig, SqliteGrantStore,
@@ -30,8 +31,9 @@ use nekod_runtime_api::{
     RuntimeSessionId, StartSessionRequest,
 };
 use nekod_trainer_manager::{
-    InstalledTrainer, SqliteTrainerCatalog, TrainerCatalog, TrainerManagerError,
-    compute_compatibility, load_verified_entrypoint_str,
+    CompatibilityDatabase, CompatibilityRecord, DependencyResolutionReport, InstalledTrainer,
+    NewCompatibilityRecord, RuntimeDependencyManager, SqliteTrainerCatalog, TrainerCatalog,
+    TrainerManagerError, compute_compatibility, load_verified_entrypoint_str,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -262,6 +264,8 @@ pub struct NekodAppService {
     profiles: SqliteProfileStore,
     grants: SqliteGrantStore,
     trainers: SqliteTrainerCatalog,
+    compatibility_db: CompatibilityDatabase,
+    dependencies: RuntimeDependencyManager,
     registry: SqliteRegistryCache,
     runtime: Arc<dyn RuntimeProvider>,
     http_transport: Arc<dyn HttpTransport>,
@@ -285,6 +289,8 @@ impl NekodAppService {
         let profiles = SqliteProfileStore::open(dir.join("profiles.db"))?;
         let grants = SqliteGrantStore::open(dir.join("grants.db"))?;
         let trainers = SqliteTrainerCatalog::open(dir.join("trainers.db"))?;
+        let compatibility_db = CompatibilityDatabase::open(dir.join("compatibility.db"))?;
+        let dependencies = RuntimeDependencyManager::new(dir.join("deps_cache"))?;
         let registry = SqliteRegistryCache::open(dir.join("registry.db"))?;
         let http_transport = Arc::new(ReqwestHttpTransport::new()?);
 
@@ -292,6 +298,8 @@ impl NekodAppService {
             profiles,
             grants,
             trainers,
+            compatibility_db,
+            dependencies,
             registry,
             runtime,
             http_transport,
@@ -325,12 +333,16 @@ impl NekodAppService {
         let profiles = SqliteProfileStore::open_in_memory()?;
         let grants = SqliteGrantStore::open_in_memory()?;
         let trainers = SqliteTrainerCatalog::open_in_memory()?;
+        let compatibility_db = CompatibilityDatabase::open_in_memory()?;
+        let dependencies = RuntimeDependencyManager::new(packages_dir.join(".deps_cache"))?;
         let registry = SqliteRegistryCache::open_in_memory()?;
 
         Ok(Self {
             profiles,
             grants,
             trainers,
+            compatibility_db,
+            dependencies,
             registry,
             runtime,
             http_transport,
@@ -1070,6 +1082,65 @@ impl NekodAppService {
             ),
         );
         Ok(installed)
+    }
+
+    /// Inspects a game directory for engine architecture, installed loaders, and anti-cheat markers.
+    pub fn inspect_installed_game_environment(
+        &self,
+        install_dir: impl AsRef<Path>,
+    ) -> GameEnvironmentProfile {
+        inspect_game_directory(install_dir)
+    }
+
+    /// Evaluates declared `ModManifest.dependencies` against the inspected game directory and local cache.
+    pub fn evaluate_mod_dependencies(
+        &self,
+        dependencies: &[RuntimeDependencySpec],
+        install_dir: Option<&Path>,
+    ) -> Vec<DependencyResolutionReport> {
+        let env = install_dir.map(inspect_game_directory);
+        self.dependencies
+            .evaluate_dependencies(dependencies, env.as_ref())
+    }
+
+    /// Stages a SHA-256-verified upstream dependency archive into Nekod's managed cache.
+    pub fn stage_verified_upstream_dependency(
+        &self,
+        dependency: &RuntimeDependencySpec,
+        bytes: &[u8],
+    ) -> Result<PathBuf, CoreError> {
+        Ok(self
+            .dependencies
+            .stage_verified_upstream_bytes(dependency, bytes)?)
+    }
+
+    /// Persists a multi-dimensional compatibility observation (rejecting unverified AI `Verified` claims).
+    pub fn record_compatibility_result(
+        &self,
+        entry: &NewCompatibilityRecord,
+    ) -> Result<CompatibilityRecord, CoreError> {
+        let saved = self.compatibility_db.record_entry(entry)?;
+        self.record_log(
+            "info",
+            "compatibility",
+            format!(
+                "Recorded {:?} compatibility for '{}@{}' ({:?})",
+                saved.status, saved.mod_id, saved.mod_version, saved.evidence
+            ),
+        );
+        Ok(saved)
+    }
+
+    /// Queries compatibility matrix entries for `game_id`.
+    pub fn query_compatibility_matrix(
+        &self,
+        game_id: &str,
+        mod_id: Option<&str>,
+        game_version: Option<&str>,
+    ) -> Result<Vec<CompatibilityRecord>, CoreError> {
+        Ok(self
+            .compatibility_db
+            .query_entries(game_id, mod_id, game_version)?)
     }
 }
 

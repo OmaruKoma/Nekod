@@ -334,6 +334,10 @@ impl NekodMcpServer {
             .find(|m| m.id == game_id)
             .map(|m| m.compatibility_policy.clone());
 
+        let env_profile = self
+            .core
+            .inspect_installed_game_environment(&detected.game.install_dir);
+
         Ok(json!({
             "game_id": game_id,
             "host_platform": platform,
@@ -342,7 +346,8 @@ impl NekodMcpServer {
             "executable_path": detected.game.executable_path,
             "executable_exists": exe_exists,
             "store_build_id": detected.game.store_build_id,
-            "compatibility_policy": anti_cheat
+            "compatibility_policy": anti_cheat,
+            "engine_environment": env_profile
         }))
     }
 

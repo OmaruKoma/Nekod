@@ -7,11 +7,13 @@ use nekod_core::{
     CommunityTrainerView, DiagnosticEvent, LibraryGameView, NekodAppService, TrainerDetailView,
     TrainerPermissionState, TrainerUpdateInfo,
 };
+use nekod_game_detection::GameEnvironmentProfile;
 use nekod_manifest::{PermissionScope, TrustTier};
 use nekod_permission_manager::SecurityPolicyConfig;
 use nekod_profile_manager::{CustomGamePathRecord, GameProfile};
 use nekod_registry_client::{RegistrySourceState, RegistrySyncReport};
 use nekod_runtime_api::{FeatureCommand, ProcessIdentity, RuntimeDiagnostics, RuntimeSessionId};
+use nekod_trainer_manager::CompatibilityRecord;
 use nekod_trainer_runtime::CompositeRuntimeRouter;
 use tauri::{Manager, State};
 
@@ -269,6 +271,27 @@ fn install_or_update_trainer_from_registry(
         .map_err(map_err)
 }
 
+#[tauri::command]
+fn inspect_game_environment(
+    state: State<'_, AppState>,
+    install_dir: String,
+) -> GameEnvironmentProfile {
+    state.core.inspect_installed_game_environment(install_dir)
+}
+
+#[tauri::command]
+fn query_compatibility_matrix(
+    state: State<'_, AppState>,
+    game_id: String,
+    mod_id: Option<String>,
+    game_version: Option<String>,
+) -> Result<Vec<CompatibilityRecord>, String> {
+    state
+        .core
+        .query_compatibility_matrix(&game_id, mod_id.as_deref(), game_version.as_deref())
+        .map_err(map_err)
+}
+
 impl AppState {
     pub fn new(core: NekodAppService) -> Self {
         Self { core }
@@ -305,6 +328,8 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         list_community_trainers_for_game,
         check_trainer_updates,
         install_or_update_trainer_from_registry,
+        inspect_game_environment,
+        query_compatibility_matrix,
     ]
 }
 

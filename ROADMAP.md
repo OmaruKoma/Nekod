@@ -140,8 +140,8 @@ Building on the completed `P0`–`P5` baseline, Nekod is evolving into a unified
 | :--- | :--- | :--- | :--- |
 | **V1.1-S1** | Bridge & Importer Foundations | `.CT -> declarative_patch_v1` static converter (`nekod-validator import-ct`), `DeploymentLedger` disk rollback, loopback `adapter_ipc_v1` (`retroarch_udp_v1`) | **Completed** |
 | **V2-M1** | Core Protocol Refactor (`.nmod`) | `ModManifest` v2 (`mod_kind`: trainer/script/plugin/asset/config/patch/emulator), source-first `.nmod` package format (ADR-020), `RuntimeProvider` adapter capabilities & v1 upgrader | **Completed** |
-| **V2-M2** | Dependency & Compatibility | `Runtime Dependency Manager` (license-aware loader detection/staging) + multi-dimensional `Compatibility Database` | **Next** |
-| **V2-M3** | Traditional + Engine Adapters | Constrained CE `.CT` subset evaluator, `Unity Runtime Bridge` (Mono & IL2CPP via BepInEx/MelonLoader), `Unreal Runtime Bridge` (`UE4SS`) | **Planned** |
+| **V2-M2** | Dependency & Compatibility | `Runtime Dependency Manager` (license-aware loader detection/staging) + multi-dimensional `Compatibility Database` | **Completed** |
+| **V2-M3** | Traditional + Engine Adapters | Constrained CE `.CT` subset evaluator, `Unity Runtime Bridge` (Mono & IL2CPP via BepInEx/MelonLoader), `Unreal Runtime Bridge` (`UE4SS`) | **Next** |
 | **V2-M4** | Dynamic & Specialized Bridges | Optional isolated `Frida Gum` dynamic instrumentation adapter + `REFramework` / `ScriptHook` managed adapters | **Planned** |
 | **V2-M5** | AI Mod Forge & UI Polish | L6 `nekod-mcp` game/engine analysis → runtime recommendation → mod generation → sandbox/runtime verification pipeline + WeMod-grade desktop UX (`docs/v1.1-roadmap.md`) | **Planned** |
 

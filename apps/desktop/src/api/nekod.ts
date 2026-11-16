@@ -187,6 +187,42 @@ export interface TrainerUpdateInfo {
   trust_tier: TrustTier;
 }
 
+export interface DetectedLoader {
+  kind: "bep_in_ex_mono" | "bep_in_ex_il2cpp" | "melon_loader" | "ue4ss" | "re_framework";
+  entry_path: string;
+  detected_version: string | null;
+}
+
+export interface GameEnvironmentProfile {
+  install_dir: string;
+  dir_exists: boolean;
+  engine:
+    | "unity_mono"
+    | "unity_il2cpp"
+    | "unreal_engine"
+    | "re_engine"
+    | "godot"
+    | "native_unknown";
+  installed_loaders: DetectedLoader[];
+  anti_cheat_files_present: string[];
+  recommended_adapters: string[];
+}
+
+export interface CompatibilityRecord {
+  record_id: number;
+  game_id: string;
+  game_version: string;
+  store_platform: string;
+  runtime_adapter: string;
+  runtime_version: string | null;
+  mod_id: string;
+  mod_version: string;
+  status: CompatibilityStatus;
+  evidence: string;
+  notes: string | null;
+  recorded_at: number;
+}
+
 const tauriApi = {
   rescanGames: () => invoke<LibraryGameView[]>("rescan_games"),
   listLibraryGames: () => invoke<LibraryGameView[]>("list_library_games"),
@@ -253,6 +289,18 @@ const tauriApi = {
     invoke<void>("install_or_update_trainer_from_registry", {
       repositoryId,
       trainerId,
+    }),
+  inspectGameEnvironment: (installDir: string) =>
+    invoke<GameEnvironmentProfile>("inspect_game_environment", { installDir }),
+  queryCompatibilityMatrix: (
+    gameId: string,
+    modId: string | null,
+    gameVersion: string | null,
+  ) =>
+    invoke<CompatibilityRecord[]>("query_compatibility_matrix", {
+      gameId,
+      modId,
+      gameVersion,
     }),
 };
 

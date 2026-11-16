@@ -1,12 +1,17 @@
 //! L2 Game Detection (Steam VDF/ACF, Epic `.item`, GOG `.info`, & custom directory discovery).
 
 pub mod custom;
+pub mod engine;
 pub mod epic;
 pub mod gog;
 pub mod steam;
 pub mod vdf;
 
 pub use custom::{CustomGameFolder, CustomPathDetector};
+pub use engine::{
+    DetectedLoader, GameEngineKind, GameEnvironmentProfile, InstalledLoaderKind,
+    inspect_game_directory,
+};
 pub use epic::EpicDetector;
 pub use gog::GogDetector;
 pub use steam::{SteamDetector, current_target_platform, match_games_against_manifests};

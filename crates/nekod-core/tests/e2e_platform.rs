@@ -634,3 +634,136 @@ fn e2e_runtime_failure_recovery_rollback_conflict_and_process_exit_reattach() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn e2e_v2_m2_engine_inspection_dependency_staging_and_compat_matrix() {
+    use nekod_game_detection::{GameEngineKind, InstalledLoaderKind};
+    use nekod_manifest::{
+        CompatibilityStatus, DependencyKind, DependencyRedistribution, PinnedUpstreamSource,
+        RuntimeDependencySpec, StorePlatformTag,
+    };
+    use nekod_trainer_manager::{
+        CompatibilityEvidence, DependencyResolutionState, NewCompatibilityRecord, sha256_hex,
+    };
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("nekod_e2e_v2_m2_{}_{}", std::process::id(), nanos));
+    let data_dir = root.join("data");
+    let unity_game_dir = root.join("UnityGame");
+    fs::create_dir_all(unity_game_dir.join("Game_Data").join("Managed")).unwrap();
+    fs::write(unity_game_dir.join("UnityPlayer.dll"), b"MZ").unwrap();
+
+    let upstream_zip = b"BEPINEX_MONO_5_4_22_MOCK_ARCHIVE";
+    let dep = RuntimeDependencySpec {
+        dependency_id: "bepinex-mono".to_owned(),
+        kind: DependencyKind::ModLoader,
+        version_req: "^5.4.0".to_owned(),
+        optional: false,
+        redistribution: DependencyRedistribution::OfficialUpstreamFetch,
+        upstream: Some(PinnedUpstreamSource {
+            url: "https://github.com/BepInEx/BepInEx/releases/download/v5.4.22/BepInEx.zip"
+                .to_owned(),
+            sha256: sha256_hex(upstream_zip),
+            license: "LGPL-2.1".to_owned(),
+        }),
+    };
+
+    {
+        let service = NekodAppService::open_in_dir(
+            &data_dir,
+            Arc::new(CompositeRuntimeRouter::with_default_providers()),
+        )
+        .unwrap();
+
+        // 1. Inspect Unity Mono game folder (prior to BepInEx install).
+        let env = service.inspect_installed_game_environment(&unity_game_dir);
+        assert_eq!(env.engine, GameEngineKind::UnityMono);
+        assert!(env.installed_loaders.is_empty());
+        assert!(
+            env.recommended_adapters
+                .contains(&"unity_bridge_v1".to_owned())
+        );
+
+        // 2. Evaluate dependencies -> missing locally -> stage SHA-256 verified upstream -> satisfied.
+        let before =
+            service.evaluate_mod_dependencies(std::slice::from_ref(&dep), Some(&unity_game_dir));
+        assert!(matches!(
+            before[0].state,
+            DependencyResolutionState::RequiresUserUpstreamFetch { .. }
+        ));
+        service
+            .stage_verified_upstream_dependency(&dep, upstream_zip)
+            .unwrap();
+        let after_cache =
+            service.evaluate_mod_dependencies(std::slice::from_ref(&dep), Some(&unity_game_dir));
+        assert!(matches!(
+            after_cache[0].state,
+            DependencyResolutionState::SatisfiedByLocalCache { .. }
+        ));
+
+        // 3. Install BepInEx directly in game folder -> SatisfiedByGameLoader overrides.
+        fs::create_dir_all(unity_game_dir.join("BepInEx").join("core")).unwrap();
+        fs::write(
+            unity_game_dir
+                .join("BepInEx")
+                .join("core")
+                .join("BepInEx.dll"),
+            b"MZ",
+        )
+        .unwrap();
+        let env2 = service.inspect_installed_game_environment(&unity_game_dir);
+        assert_eq!(
+            env2.installed_loaders[0].kind,
+            InstalledLoaderKind::BepInExMono
+        );
+        let after_loader =
+            service.evaluate_mod_dependencies(std::slice::from_ref(&dep), Some(&unity_game_dir));
+        assert!(matches!(
+            after_loader[0].state,
+            DependencyResolutionState::SatisfiedByGameLoader { .. }
+        ));
+
+        // 4. Record verified compatibility tuple (and enforce AI-draft Verified rejection).
+        let ai_bad = NewCompatibilityRecord {
+            game_id: "sample-unity-game".to_owned(),
+            game_version: "1.0.4".to_owned(),
+            store_platform: StorePlatformTag::Steam,
+            runtime_adapter: "unity_bridge_v1".to_owned(),
+            runtime_version: Some("5.4.22".to_owned()),
+            mod_id: "dev.example.unity-qol".to_owned(),
+            mod_version: "1.0.0".to_owned(),
+            status: CompatibilityStatus::Verified,
+            evidence: CompatibilityEvidence::AiDraftUnverified,
+            notes: None,
+        };
+        assert!(service.record_compatibility_result(&ai_bad).is_err());
+
+        let mut verified = ai_bad;
+        verified.evidence = CompatibilityEvidence::AutomatedRuntimeTest;
+        service.record_compatibility_result(&verified).unwrap();
+    }
+
+    // 5. Reopen persistent SQLite store and verify compatibility matrix survived restart.
+    {
+        let reopened = NekodAppService::open_in_dir(
+            &data_dir,
+            Arc::new(CompositeRuntimeRouter::with_default_providers()),
+        )
+        .unwrap();
+        let records = reopened
+            .query_compatibility_matrix(
+                "sample-unity-game",
+                Some("dev.example.unity-qol"),
+                Some("1.0.4"),
+            )
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, CompatibilityStatus::Verified);
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}

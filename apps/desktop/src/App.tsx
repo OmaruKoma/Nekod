@@ -4,6 +4,7 @@ import {
   CustomGamePathRecord,
   DiagnosticEvent,
   FeatureCommand,
+  GameEnvironmentProfile,
   GameProfile,
   LibraryGameView,
   PermissionScope,
@@ -80,6 +81,7 @@ export default function App() {
   >({});
   const [repoIdInput, setRepoIdInput] = useState("");
   const [repoUrlInput, setRepoUrlInput] = useState("");
+  const [gameEnv, setGameEnv] = useState<GameEnvironmentProfile | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
   async function refreshAll() {
@@ -138,6 +140,13 @@ export default function App() {
     setError(null);
     setRunningProcs([]);
     setSelectedPid(null);
+    setGameEnv(null);
+    try {
+      const env = await nekodApi.inspectGameEnvironment(entry.game.install_dir);
+      setGameEnv(env);
+    } catch {
+      // Non-fatal if install directory is temporarily inaccessible
+    }
     if (entry.game.matched_game_id) {
       const gameId = entry.game.matched_game_id;
       try {
@@ -668,6 +677,26 @@ export default function App() {
               )}
               {selectedGame.game.store_build_id && (
                 <div className="muted">Steam Build ID: {selectedGame.game.store_build_id}</div>
+              )}
+              {gameEnv && (
+                <div className="row" style={{ marginTop: 10 }}>
+                  <span className="badge community">Engine: {gameEnv.engine}</span>
+                  {gameEnv.installed_loaders.map((loader) => (
+                    <span key={loader.entry_path} className="badge official">
+                      Loader: {loader.kind}
+                    </span>
+                  ))}
+                  {gameEnv.recommended_adapters.map((ad) => (
+                    <span key={ad} className="badge">
+                      Adapter: {ad}
+                    </span>
+                  ))}
+                  {gameEnv.anti_cheat_files_present.map((ac) => (
+                    <span key={ac} className="badge unverified">
+                      Anti-Cheat Marker: {ac}
+                    </span>
+                  ))}
+                </div>
               )}
             </div>
 

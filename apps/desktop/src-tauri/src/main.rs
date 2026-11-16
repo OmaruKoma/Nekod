@@ -208,7 +208,29 @@ mod tests {
         );
         assert!(missing_pkg.is_err());
 
-        // 7. Remove custom path & verify diagnostic audit logs captured workflow.
+        // 7. Verify V2-M2 engine directory inspection & compatibility matrix IPC endpoints.
+        let env = invoke_json(
+            &webview,
+            "inspect_game_environment",
+            serde_json::json!({ "installDir": custom_game_dir.to_string_lossy() }),
+        )
+        .expect("inspect_game_environment");
+        assert_eq!(env["dir_exists"], true);
+        assert_eq!(env["engine"], "native_unknown");
+
+        let matrix = invoke_json(
+            &webview,
+            "query_compatibility_matrix",
+            serde_json::json!({
+                "gameId": "sample-singleplayer-rpg",
+                "modId": null,
+                "gameVersion": null
+            }),
+        )
+        .expect("query_compatibility_matrix");
+        assert!(matrix.as_array().unwrap().is_empty());
+
+        // 8. Remove custom path & verify diagnostic audit logs captured workflow.
         let after_remove = invoke_json(
             &webview,
             "remove_custom_game_path",

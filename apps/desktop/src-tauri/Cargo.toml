@@ -15,11 +15,13 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 nekod-core.workspace = true
+nekod-game-detection.workspace = true
 nekod-manifest.workspace = true
 nekod-permission-manager.workspace = true
 nekod-profile-manager.workspace = true
 nekod-registry-client.workspace = true
 nekod-runtime-api.workspace = true
+nekod-trainer-manager.workspace = true
 nekod-trainer-runtime.workspace = true
 serde.workspace = true
 tauri = { version = "2.11", features = [] }
