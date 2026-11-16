@@ -1,5 +1,7 @@
 # Nekod
 
+> **Work in Progress (WIP):** Nekod is currently under active early development (`v0.1.0-alpha.0`). The core P0–P5 architecture, Tauri 2 desktop foundation, declarative runtime, `.CT` static importer, `DeploymentLedger`, and `adapter_ipc_v1` are implemented and verified; `.nmod` source-first packaging (`ADR-020`), `ModManifest` v2, multi-engine adapters (`Unity`/`UE4SS`/`Frida`), and AI Mod Forge (`V2-M1`–`V2-M5`) are actively in progress (see [`ROADMAP.md`](ROADMAP.md) & [`docs/runtime-engine-ecosystem.md`](docs/runtime-engine-ecosystem.md)).
+
 **Modding games, together.**  
 *Open-source Community Mod Platform — Discover, create, manage, and share game modifications.*
 

@@ -20,7 +20,7 @@ members = [
 version = "0.1.0-alpha.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/nekod-org/Nekod"
+repository = "https://github.com/OmaruKoma/Nekod"
 rust-version = "1.85"
 
 [workspace.dependencies]
