@@ -84,7 +84,7 @@ cargo run -p nekod-mcp
 ```
 
 - **Architecture & Decisions:** [`ARCHITECTURE.md`](ARCHITECTURE.md), [`TECHNICAL_DECISIONS.md`](TECHNICAL_DECISIONS.md)
-- **Roadmap:** [`ROADMAP.md`](ROADMAP.md), [`docs/v1.1-roadmap.md`](docs/v1.1-roadmap.md)
+- **Roadmap & Engine Plans:** [`ROADMAP.md`](ROADMAP.md), [`docs/v1.1-roadmap.md`](docs/v1.1-roadmap.md), [`docs/runtime-engine-ecosystem.md`](docs/runtime-engine-ecosystem.md)
 - **CI & Releases:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml)
 - **Manifest Specifications:**
   - [`docs/specs/game-manifest.md`](docs/specs/game-manifest.md)
