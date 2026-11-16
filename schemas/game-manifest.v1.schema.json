@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nekod.dev/schemas/v1/game-manifest.schema.json",
+  "title": "Nekod Game Manifest v1",
+  "description": "Canonical description of a game, its executables, known builds, and compatibility policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "platforms",
+    "store_ids",
+    "executables",
+    "known_versions",
+    "compatibility_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "description": "Game manifest schema semantic version (major version 1)."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "description": "Unique canonical kebab-case game slug (e.g. 'hollow-knight', 'skyrim-special-edition')."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "short_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "platforms": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/TargetPlatform"
+      }
+    },
+    "store_ids": {
+      "$ref": "#/$defs/StoreIdentifiers"
+    },
+    "executables": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/ExecutableSignature"
+      }
+    },
+    "known_versions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/KnownGameVersion"
+      }
+    },
+    "compatibility_policy": {
+      "$ref": "#/$defs/GameCompatibilityPolicy"
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Reserved non-executable metadata for forward-compatible extensions."
+    }
+  },
+  "$defs": {
+    "TargetPlatform": {
+      "type": "string",
+      "enum": [
+        "windows-x64",
+        "windows-arm64",
+        "linux-x64",
+        "linux-arm64",
+        "steamos-x64"
+      ]
+    },
+    "BinaryArch": {
+      "type": "string",
+      "enum": ["x86_64", "x86", "aarch64"]
+    },
+    "AntiCheatKind": {
+      "type": "string",
+      "enum": [
+        "easy_anti_cheat",
+        "battleye",
+        "vanguard",
+        "vac",
+        "denuvo_anti_cheat",
+        "custom"
+      ]
+    },
+    "RelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 260,
+      "pattern": "^[A-Za-z0-9._][A-Za-z0-9._/ -]*$",
+      "not": {
+        "pattern": "(^|/)\\.\\.?(/|$)|//"
+      }
+    },
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "StoreIdentifiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "steam_app_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "epic_catalog_item_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gog_product_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "xbox_product_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itch_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "custom_install_hints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelativePath"
+          }
+        }
+      }
+    },
+    "ExecutableSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "relative_path", "process_name", "architecture"],
+      "properties": {
+        "platform": {
+          "$ref": "#/$defs/TargetPlatform"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/RelativePath"
+        },
+        "process_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "architecture": {
+          "$ref": "#/$defs/BinaryArch"
+        },
+        "product_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company_name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "KnownGameVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version_id", "display_version", "platform"],
+      "properties": {
+        "version_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "display_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "platform": {
+          "$ref": "#/$defs/TargetPlatform"
+        },
+        "store_build_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executable_sha256": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      }
+    },
+    "GameCompatibilityPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["multiplayer_mode", "anti_cheat_detected", "trainer_policy"],
+      "properties": {
+        "multiplayer_mode": {
+          "type": "string",
+          "enum": [
+            "singleplayer_only",
+            "coop_offline_capable",
+            "online_multiplayer",
+            "competitive_online"
+          ]
+        },
+        "anti_cheat_detected": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/AntiCheatKind"
+          }
+        },
+        "trainer_policy": {
+          "type": "string",
+          "enum": [
+            "allowed_singleplayer",
+            "restricted_offline_only",
+            "prohibited_online_competitive"
+          ]
+        }
+      }
+    }
+  }
+}

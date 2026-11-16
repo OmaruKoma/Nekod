@@ -1,0 +1,29 @@
+# CI Workflow Template for Nekod-Community Registry Index PRs
+name: Validate Community Registry Index
+
+on:
+  pull_request:
+    paths:
+      - "registries/*.json"
+      - "games/*.json"
+
+jobs:
+  validate-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nekod-validator
+        run: cargo install --git https://github.com/nekod-org/Nekod --locked nekod-validator
+
+      - name: Validate GameManifests and RegistryManifests
+        run: |
+          set -euo pipefail
+          for f in games/*.json; do
+            nekod-validator game "$f"
+          done
+          for f in registries/*.json; do
+            nekod-validator registry "$f"
+          done

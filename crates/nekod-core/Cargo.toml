@@ -1,0 +1,24 @@
+[package]
+name = "nekod-core"
+description = "L2 modular monolith application core coordinating games, trainers, permissions, profiles, registries, and runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nekod-game-detection.workspace = true
+nekod-manifest.workspace = true
+nekod-permission-manager.workspace = true
+nekod-profile-manager.workspace = true
+nekod-registry-client.workspace = true
+nekod-runtime-api.workspace = true
+nekod-trainer-manager.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+nekod-trainer-runtime.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

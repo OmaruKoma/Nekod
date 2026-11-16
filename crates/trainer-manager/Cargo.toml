@@ -1,0 +1,16 @@
+[package]
+name = "nekod-trainer-manager"
+description = "L2 local trainer catalog, compatibility matching, and artifact verification."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nekod-manifest.workspace = true
+nekod-validator.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

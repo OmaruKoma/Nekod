@@ -1,0 +1,12 @@
+[package]
+name = "nekod-runtime-api"
+description = "UI-independent L4 Runtime API protocol between Nekod Application Core and Trainer Runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nekod-manifest.workspace = true
+serde.workspace = true
+thiserror.workspace = true

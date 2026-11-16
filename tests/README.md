@@ -1,0 +1,10 @@
+# Workspace Integration & Protocol Tests
+
+Integration and end-to-end test suites live alongside their owning workspace crates so `cargo test --workspace` executes every layer cleanly:
+
+- **L4 Protocol & L5 Validator:** [`sdk/manifest`](../sdk/manifest/src/lib.rs), [`sdk/trainer-sdk`](../sdk/trainer-sdk/src/lib.rs), and [`tools/trainer-validator`](../tools/trainer-validator/src/lib.rs).
+- **L2 Discovery, Permissions, Profiles & Registry:** [`crates/game-detection`](../crates/game-detection/src/lib.rs), [`crates/permission-manager`](../crates/permission-manager/src/lib.rs), [`crates/profile-manager`](../crates/profile-manager/src/lib.rs), and [`crates/registry-client`](../crates/registry-client/src/lib.rs).
+- **L3 Win32 Live Process & Sandbox Runtime:** [`crates/trainer-runtime/tests/win32_live_target.rs`](../crates/trainer-runtime/tests/win32_live_target.rs), [`crates/trainer-runtime/src/linux.rs`](../crates/trainer-runtime/src/linux.rs), and [`crates/trainer-runtime/src/sandbox.rs`](../crates/trainer-runtime/src/sandbox.rs).
+- **L1 Desktop Tauri Window & IPC Roundtrip:** [`apps/desktop/src-tauri/src/lib.rs`](../apps/desktop/src-tauri/src/lib.rs) (verifies main `WebviewWindow` config/instantiation and real Tauri IPC invoke handlers for game scanning, custom folders, manifest registration, local trainer ingestion, permission consent, hotkeys, error recovery, and diagnostics).
+- **L2 Full Cross-Layer Platform E2E:** [`crates/nekod-core/tests/e2e_platform.rs`](../crates/nekod-core/tests/e2e_platform.rs) (multi-store Epic/GOG/custom-path scanning, manifest validation/rejection, SQLite restart persistence, ETag/outage/re-consent/revocation mod lifecycle, rollback conflict protection, mid-session process termination recovery, and `CompositeRuntimeRouter` patch & LIFO rollback).
+- **L6 Live Stdio Binary MCP IPC:** [`crates/nekod-mcp/tests/stdio_ipc.rs`](../crates/nekod-mcp/tests/stdio_ipc.rs) (spawns `nekod-mcp` subprocess over JSON-RPC 2.0 stdin/stdout pipes and verifies authorization + anti-cheat refusals).

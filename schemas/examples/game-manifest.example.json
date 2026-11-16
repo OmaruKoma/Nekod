@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0.0",
+  "id": "sample-singleplayer-rpg",
+  "name": "Sample Singleplayer RPG",
+  "short_name": "SampleRPG",
+  "platforms": ["windows-x64", "steamos-x64"],
+  "store_ids": {
+    "steam_app_id": 999999,
+    "gog_product_id": "1234567890",
+    "custom_install_hints": ["SampleRPG.exe", "Data/version.txt"]
+  },
+  "executables": [
+    {
+      "platform": "windows-x64",
+      "relative_path": "SampleRPG.exe",
+      "process_name": "SampleRPG.exe",
+      "architecture": "x86_64",
+      "product_name": "Sample Singleplayer RPG",
+      "company_name": "Example Studio"
+    }
+  ],
+  "known_versions": [
+    {
+      "version_id": "1.2.0",
+      "display_version": "v1.2.0 (Update 2)",
+      "platform": "windows-x64",
+      "store_build_id": "15000001",
+      "executable_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "notes": "Example baseline build for schema validation."
+    }
+  ],
+  "compatibility_policy": {
+    "multiplayer_mode": "singleplayer_only",
+    "anti_cheat_detected": [],
+    "trainer_policy": "allowed_singleplayer"
+  }
+}

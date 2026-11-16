@@ -1,0 +1,108 @@
+{
+  "schema_version": "1.0.0",
+  "id": "dev.example.sample-singleplayer-rpg",
+  "version": "1.0.0",
+  "name": "Sample RPG Community Trainer",
+  "description": "Declarative example trainer providing quality-of-life toggles for Sample Singleplayer RPG.",
+  "authors": [
+    {
+      "name": "Example Contributor",
+      "github": "example-contributor",
+      "url": "https://github.com/example-contributor"
+    }
+  ],
+  "license": "MIT",
+  "source_repository": "https://github.com/example-contributor/sample-rpg-trainer",
+  "target_game": {
+    "game_id": "sample-singleplayer-rpg",
+    "game_name": "Sample Singleplayer RPG",
+    "store_ids": {
+      "steam_app_id": 999999
+    }
+  },
+  "supported_versions": [
+    {
+      "platform": "windows-x64",
+      "version_pattern": "1.2.0",
+      "executable_sha256": [
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      ],
+      "status": "verified"
+    }
+  ],
+  "runtime": {
+    "kind": "declarative_patch_v1",
+    "api_version": "1.0.0",
+    "min_nekod_version": "0.1.0",
+    "entrypoint": "trainer.json",
+    "supported_platforms": ["windows-x64"]
+  },
+  "permissions": [
+    {
+      "scope": "process.discover",
+      "reason": "Locate the running SampleRPG.exe process.",
+      "required": true
+    },
+    {
+      "scope": "process.read_memory",
+      "reason": "Scan signatures and read current player health and gold values.",
+      "required": true,
+      "constraints": {
+        "allowed_modules": ["SampleRPG.exe"]
+      }
+    },
+    {
+      "scope": "process.write_memory",
+      "reason": "Apply reversible memory patches for enabled trainer toggles.",
+      "required": true,
+      "constraints": {
+        "max_write_bytes": 64,
+        "allowed_modules": ["SampleRPG.exe"]
+      }
+    }
+  ],
+  "features": [
+    {
+      "id": "infinite-health",
+      "name": "Infinite Health",
+      "description": "Prevents player health from decreasing during combat.",
+      "category": "player",
+      "control_type": "toggle",
+      "default_hotkey": "F1",
+      "mutates_memory": true,
+      "supports_rollback": true,
+      "risk_level": "low"
+    },
+    {
+      "id": "set-gold",
+      "name": "Gold Multiplier",
+      "description": "Adjusts gold reward multiplier.",
+      "category": "economy",
+      "control_type": "integer",
+      "default_hotkey": "F2",
+      "value_range": {
+        "min": 1,
+        "max": 10,
+        "step": 1,
+        "default": 2
+      },
+      "mutates_memory": true,
+      "supports_rollback": true,
+      "risk_level": "low"
+    }
+  ],
+  "compatibility": {
+    "singleplayer_only": true,
+    "requires_offline_mode": false,
+    "anti_cheat_incompatible": [],
+    "last_verified_at": "2026-11-15T00:00:00Z"
+  },
+  "artifacts": [
+    {
+      "filename": "trainer.json",
+      "sha256": "d322f917186cf81d48f265b4a88e12bf9d532db7c42a86ff13f2eaad7f82b871",
+      "size_bytes": 851,
+      "platform": "windows-x64"
+    }
+  ]
+}

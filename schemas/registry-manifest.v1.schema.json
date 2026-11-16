@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nekod.dev/schemas/v1/registry-manifest.schema.json",
+  "title": "Nekod Registry Manifest v1",
+  "description": "Metadata index describing an official or community-maintained trainer repository.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository_id",
+    "name",
+    "description",
+    "url",
+    "maintainers",
+    "trust_tier",
+    "channel",
+    "feed_type",
+    "trainers",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "repository_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "url": {
+      "$ref": "#/$defs/HttpsUrl"
+    },
+    "maintainers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/MaintainerInfo"
+      }
+    },
+    "trust_tier": {
+      "type": "string",
+      "enum": ["official", "community_verified", "unverified"]
+    },
+    "channel": {
+      "type": "string",
+      "enum": ["stable", "beta", "nightly"]
+    },
+    "feed_type": {
+      "type": "string",
+      "enum": ["github_releases", "static_index_json"]
+    },
+    "trainers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RegistryTrainerEntry"
+      }
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Reserved non-executable metadata for forward-compatible extensions."
+    }
+  },
+  "$defs": {
+    "SemVer": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "HttpsUrl": {
+      "type": "string",
+      "pattern": "^https://[A-Za-z0-9.-]+(?::[0-9]+)?(?:/.*)?$"
+    },
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "MaintainerInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "github_handle"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "github_handle": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]{1,39}$"
+        },
+        "contact": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "CompatibilitySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "last_verified_game_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "enum": ["verified", "experimental", "broken", "untested"]
+        }
+      }
+    },
+    "RegistryTrainerEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trainer_id",
+        "game_id",
+        "latest_version",
+        "manifest_url",
+        "status"
+      ],
+      "properties": {
+        "trainer_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+        },
+        "game_id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "latest_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "manifest_url": {
+          "$ref": "#/$defs/HttpsUrl"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "release_tag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "deprecated", "archived", "revoked"]
+        },
+        "compatibility_summary": {
+          "$ref": "#/$defs/CompatibilitySummary"
+        }
+      }
+    }
+  }
+}

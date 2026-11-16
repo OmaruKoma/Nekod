@@ -1,0 +1,135 @@
+# Nekod
+
+**Modding games, together.**
+
+Nekod is an open-source, community-driven game trainer platform designed to give ordinary players a simple, polished desktop experience while giving contributors open standards, verifiable manifests, and optional developer tooling to create, maintain, and share trainers independently.
+
+> **Player-first design:** Players never need programming knowledge, reverse-engineering tools, an AI client, or an MCP server to use Nekod.
+
+---
+
+## Core Principles
+
+1. **Player First** — Automatic game discovery, clean feature toggles, hotkeys, and safe rollback out of the box.
+2. **Community Driven** — Any developer can maintain trainers in their own GitHub repository and register metadata with the community index.
+3. **Open Standards** — Independent, versioned JSON Schemas for games, trainers, and registries.
+4. **AI Assisted (Developer-Only & Optional)** — MCP tools, model-independent Agent Skills, and prompts assist contributors without becoming a runtime dependency for players.
+5. **Security First** — Default-deny execution for untrusted modules, explicit permission declarations, process identity/version verification, and auditable runtime logs.
+6. **Extensible Architecture** — Modular Rust core with strict protocol boundaries separating UI, application core, runtime execution, and community ecosystems.
+
+---
+
+## Six-Layer Architecture
+
+| Layer | Name | Responsibility | Primary Location |
+| :--- | :--- | :--- | :--- |
+| **L1** | Desktop Application | Player-facing Tauri 2 + React + TypeScript UI | [`apps/desktop/`](apps/desktop/README.md) |
+| **L2** | Application Core | Modular Rust monolith (games, trainers, profiles, permissions, registry, updates) | [`crates/nekod-core/`](crates/nekod-core/Cargo.toml) |
+| **L3** | Trainer Runtime | Controlled process identification, memory ops, lifecycle, rollback, permission enforcement | [`crates/trainer-runtime/`](crates/trainer-runtime/Cargo.toml) |
+| **L4** | SDK & Protocol | Stable versioned manifests, JSON Schemas, Runtime API, and Trainer SDK | [`sdk/`](sdk/manifest/Cargo.toml), [`schemas/`](schemas/README.md) |
+| **L5** | Community Registry | Hybrid GitHub registry model & CI/local manifest validator | [`community/`](community/README.md), [`tools/trainer-validator/`](tools/trainer-validator/Cargo.toml) |
+| **L6** | AI Developer Tooling | Optional MCP server, Agent Skills, and contributor prompt library | [`crates/nekod-mcp/`](crates/nekod-mcp/Cargo.toml), [`skills/`](skills/README.md), [`prompts/`](prompts/README.md) |
+
+---
+
+## Repository Status
+
+Core platform milestones **P0 – P5** are implemented and verified (see [`ROADMAP.md`](ROADMAP.md), [`TECHNICAL_DECISIONS.md`](TECHNICAL_DECISIONS.md), and the upcoming **[V1.1 WeMod-Alternative Feature Plan](docs/v1.1-roadmap.md)**).
+
+---
+
+## Installation & Quick Start
+
+### For Players (Windows x64)
+
+1. Download `nekod-windows-x64.zip` (and `SHA256SUMS.txt` to verify integrity) from the repository's **Releases** page, or build locally from source below.
+2. Verify the archive digest and extract to a local directory:
+   ```powershell
+   Get-FileHash .\nekod-windows-x64.zip -Algorithm SHA256
+   ```
+3. Launch `nekod-desktop.exe` (requires Windows 10/11 WebView2 Runtime, pre-installed on modern Windows).
+4. **First-time setup (zero account or AI setup required):**
+   - Click **Rescan Library** to auto-detect Steam, Epic, and GOG installs, or add portable folders in **Settings & Security**.
+   - Load community feeds in **Community & Updates**, or import a verified local trainer folder (such as [`examples/sample-singleplayer-rpg/`](examples/sample-singleplayer-rpg/)) under **Local Packages**.
+   - Review the trainer's declared permissions, confirm consent, attach to the running singleplayer game process, and toggle features or hotkeys.
+
+### Building from Source (Players & Contributors)
+
+**Prerequisites:**
+- [Rust](https://rustup.rs/) >= 1.85 (`rustfmt` and `clippy` components)
+- [Node.js](https://nodejs.org/) >= 20
+- **Windows:** Visual Studio Build Tools (C++ workload) + WebView2 Runtime
+- **Linux:** `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`
+
+```bash
+# 1. Build Tauri desktop frontend (React + TypeScript)
+cd apps/desktop && npm install && npm run build && cd ../..
+
+# 2. Format, lint, and run all workspace tests
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# 3. Build optimized release binaries (desktop app, validator CLI, optional MCP server)
+cargo build --release -p nekod-desktop -p nekod-mcp -p nekod-validator
+
+# 4. Run the desktop app directly in development mode
+cd apps/desktop && npm run tauri dev && cd ../..
+
+# 5. Validate a complete declarative trainer package directory
+cargo run -p nekod-validator -- package examples/sample-singleplayer-rpg
+
+# 6. Run optional developer MCP server over stdio (contributors only)
+cargo run -p nekod-mcp
+```
+
+- **Architecture & Decisions:** [`ARCHITECTURE.md`](ARCHITECTURE.md), [`TECHNICAL_DECISIONS.md`](TECHNICAL_DECISIONS.md)
+- **Roadmap:** [`ROADMAP.md`](ROADMAP.md), [`docs/v1.1-roadmap.md`](docs/v1.1-roadmap.md)
+- **CI & Releases:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml)
+- **Manifest Specifications:**
+  - [`docs/specs/game-manifest.md`](docs/specs/game-manifest.md)
+  - [`docs/specs/trainer-manifest.md`](docs/specs/trainer-manifest.md)
+  - [`docs/specs/registry-manifest.md`](docs/specs/registry-manifest.md)
+  - [`docs/specs/declarative-patch.md`](docs/specs/declarative-patch.md)
+- **JSON Schemas:** [`schemas/`](schemas/README.md)
+- **Security & Permissions:** [`SECURITY.md`](SECURITY.md), [`docs/security-and-permission-model.md`](docs/security-and-permission-model.md)
+- **Decision Register:** [`docs/unresolved-questions.md`](docs/unresolved-questions.md)
+
+---
+
+## Workspace Layout
+
+```text
+Nekod/
+├── .github/workflows/       # Workspace CI checks (fmt, clippy, tests, validator, audit)
+├── apps/desktop/            # L1: Tauri 2 + React desktop app (player-only, zero MCP)
+├── crates/
+│   ├── nekod-core/          # L2: Modular application core facade
+│   ├── game-detection/      # L2: Steam, Epic, GOG & custom folder game discovery
+│   ├── trainer-manager/     # L2: Trainer cache, compatibility, SHA-256 verification
+│   ├── trainer-runtime/     # L3: Controlled Win32/Linux backends, PatchLedger, router & sandbox host
+│   ├── registry-client/     # L2: Conditional HTTP (ETag/304) registry client & staging
+│   ├── permission-manager/  # L2: Default-deny policy & hashed grant store
+│   ├── profile-manager/     # L2: User profiles, hotkeys, settings
+│   └── nekod-mcp/           # L6: Optional developer MCP JSON-RPC 2.0 server
+├── sdk/
+│   ├── manifest/            # L4: Typed Game, Trainer, Registry manifest models
+│   ├── runtime-api/         # L4: Stable L2 <-> L3 runtime boundary traits & DTOs
+│   └── trainer-sdk/         # L4: Declarative patch schemas, builders & AOB signature helpers
+├── schemas/                 # L4: Versioned JSON Schemas & valid examples
+├── examples/                # Runnable sample singleplayer trainer package fixture
+├── community/               # L5: Community registry templates & governance docs
+├── tools/trainer-validator/ # L5: Local & CI schema/package validator CLI
+├── skills/                  # L6: 6 model-independent contributor Agent Skills
+├── prompts/                 # L6: Contributor prompt library
+├── docs/                    # Specifications, security model, decision register
+└── tests/                   # Cross-crate integration & protocol test docs
+```
+
+---
+
+## Contributing & License
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for contribution guidelines and [`SECURITY.md`](SECURITY.md) for our security policy and singleplayer-only boundaries.
+
+Licensed under the [MIT License](LICENSE) (see [ADR-009](TECHNICAL_DECISIONS.md#adr-009-repository-license-mit)).

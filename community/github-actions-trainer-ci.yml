@@ -1,0 +1,23 @@
+# Reusable CI Workflow for Independent Nekod Trainer Repositories
+name: Validate Nekod Trainer Package
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+jobs:
+  validate-trainer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nekod-validator
+        run: cargo install --git https://github.com/nekod-org/Nekod --locked nekod-validator
+
+      - name: Validate trainer package manifest, artifacts, and declarative payload
+        run: nekod-validator package .

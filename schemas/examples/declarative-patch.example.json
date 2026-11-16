@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0.0",
+  "features": [
+    {
+      "feature_id": "infinite-health",
+      "operations": [
+        {
+          "kind": "byte_patch",
+          "locator": {
+            "kind": "aob_pattern",
+            "module": "SampleRPG.exe",
+            "pattern": "29 73 10 8B 43 10",
+            "match_index": 0,
+            "offset": 0
+          },
+          "expected_original_bytes": "29 73 10",
+          "patch_bytes": "90 90 90"
+        }
+      ]
+    },
+    {
+      "feature_id": "set-gold",
+      "operations": [
+        {
+          "kind": "write_value",
+          "locator": {
+            "kind": "pointer_chain",
+            "module": "SampleRPG.exe",
+            "base_offset": 4660,
+            "offsets": [16, 32]
+          },
+          "value_type": "i32",
+          "freeze_interval_ms": 100
+        }
+      ]
+    }
+  ]
+}

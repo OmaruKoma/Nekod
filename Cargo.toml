@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop/src-tauri",
+    "sdk/manifest",
+    "sdk/runtime-api",
+    "sdk/trainer-sdk",
+    "crates/permission-manager",
+    "crates/game-detection",
+    "crates/trainer-manager",
+    "crates/trainer-runtime",
+    "crates/registry-client",
+    "crates/profile-manager",
+    "crates/nekod-core",
+    "crates/nekod-mcp",
+    "tools/trainer-validator",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/nekod-org/Nekod"
+rust-version = "1.85"
+
+[workspace.dependencies]
+nekod-manifest = { path = "sdk/manifest" }
+nekod-runtime-api = { path = "sdk/runtime-api" }
+nekod-trainer-sdk = { path = "sdk/trainer-sdk" }
+nekod-permission-manager = { path = "crates/permission-manager" }
+nekod-game-detection = { path = "crates/game-detection" }
+nekod-trainer-manager = { path = "crates/trainer-manager" }
+nekod-trainer-runtime = { path = "crates/trainer-runtime" }
+nekod-registry-client = { path = "crates/registry-client" }
+nekod-profile-manager = { path = "crates/profile-manager" }
+nekod-core = { path = "crates/nekod-core" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+semver = { version = "1.0", features = ["serde"] }
+thiserror = "2.0"
+jsonschema = { version = "0.61", default-features = false }
+rusqlite = { version = "0.39", features = ["bundled"] }
+sha2 = "0.11"
+tracing = "0.1"
+winreg = "0.56"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "default-tls"] }
+nekod-validator = { path = "tools/trainer-validator" }

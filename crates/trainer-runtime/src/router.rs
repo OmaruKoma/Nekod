@@ -1,0 +1,131 @@
+//! Multi-runtime `RuntimeProvider` router dispatching trainer sessions by `RuntimeKind`
+//! without altering L1 UI or L2 Core APIs (ADR-018 / U9).
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use nekod_manifest::RuntimeKind;
+use nekod_runtime_api::{
+    FeatureCommand, ProcessIdentity, RuntimeDiagnostics, RuntimeError, RuntimeProvider,
+    RuntimeSessionId, StartSessionRequest,
+};
+
+use crate::DeclarativeRuntime;
+
+/// Dispatches trainer runtime sessions across registered `RuntimeProvider` engines
+/// keyed by `TrainerManifest.runtime.kind`.
+pub struct CompositeRuntimeRouter {
+    providers: Vec<(RuntimeKind, Arc<dyn RuntimeProvider>)>,
+    session_routes: Mutex<BTreeMap<String, RuntimeKind>>,
+}
+
+impl CompositeRuntimeRouter {
+    /// Creates a router pre-loaded with the default `DeclarativeRuntime` for `declarative_patch_v1`.
+    pub fn with_declarative_default() -> Self {
+        Self::with_declarative(Arc::new(DeclarativeRuntime::new()))
+    }
+
+    /// Creates a router backed by an explicit `declarative_patch_v1` provider.
+    pub fn with_declarative(declarative: Arc<dyn RuntimeProvider>) -> Self {
+        let kind = declarative.kind();
+        Self {
+            providers: vec![(kind, declarative)],
+            session_routes: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Registers an additional `RuntimeProvider` (e.g. `SandboxedWasmRuntime`).
+    pub fn register_provider(&mut self, provider: Arc<dyn RuntimeProvider>) {
+        let kind = provider.kind();
+        if let Some((_, slot)) = self.providers.iter_mut().find(|(k, _)| *k == kind) {
+            *slot = provider;
+        } else {
+            self.providers.push((kind, provider));
+        }
+    }
+
+    fn provider_for(&self, kind: RuntimeKind) -> Result<&Arc<dyn RuntimeProvider>, RuntimeError> {
+        self.providers
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, p)| p)
+            .ok_or(match kind {
+                RuntimeKind::WasmSandboxV1 => {
+                    RuntimeError::NotImplemented("wasm_sandbox_v1 provider not registered")
+                }
+                RuntimeKind::NativeProviderV1 => {
+                    RuntimeError::NotImplemented("native_provider_v1 provider not enabled")
+                }
+                RuntimeKind::DeclarativePatchV1 => {
+                    RuntimeError::NotImplemented("declarative_patch_v1 provider not registered")
+                }
+            })
+    }
+}
+
+impl RuntimeProvider for CompositeRuntimeRouter {
+    fn kind(&self) -> RuntimeKind {
+        RuntimeKind::DeclarativePatchV1
+    }
+
+    fn discover_matching_processes(
+        &self,
+        expected_process_names: &[String],
+    ) -> Result<Vec<ProcessIdentity>, RuntimeError> {
+        let (_, provider) = self.providers.first().ok_or(RuntimeError::NotImplemented(
+            "no runtime providers registered",
+        ))?;
+        provider.discover_matching_processes(expected_process_names)
+    }
+
+    fn start_session(&self, req: StartSessionRequest) -> Result<RuntimeSessionId, RuntimeError> {
+        let kind = req.trainer.runtime.kind;
+        let provider = self.provider_for(kind)?;
+        let session_id = provider.start_session(req)?;
+        self.session_routes
+            .lock()
+            .unwrap()
+            .insert(session_id.0.clone(), kind);
+        Ok(session_id)
+    }
+
+    fn apply_feature(
+        &self,
+        session_id: &RuntimeSessionId,
+        command: FeatureCommand,
+    ) -> Result<(), RuntimeError> {
+        let kind = *self
+            .session_routes
+            .lock()
+            .unwrap()
+            .get(&session_id.0)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))?;
+        self.provider_for(kind)?.apply_feature(session_id, command)
+    }
+
+    fn stop_session(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> Result<RuntimeDiagnostics, RuntimeError> {
+        let kind = self
+            .session_routes
+            .lock()
+            .unwrap()
+            .remove(&session_id.0)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))?;
+        self.provider_for(kind)?.stop_session(session_id)
+    }
+
+    fn diagnostics(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> Result<RuntimeDiagnostics, RuntimeError> {
+        let kind = *self
+            .session_routes
+            .lock()
+            .unwrap()
+            .get(&session_id.0)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))?;
+        self.provider_for(kind)?.diagnostics(session_id)
+    }
+}

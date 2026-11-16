@@ -1,0 +1,450 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nekod.dev/schemas/v1/trainer-manifest.schema.json",
+  "title": "Nekod Trainer Manifest v1",
+  "description": "Authoritative manifest for a game trainer package, its permissions, features, and artifacts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "name",
+    "description",
+    "authors",
+    "license",
+    "source_repository",
+    "target_game",
+    "supported_versions",
+    "runtime",
+    "permissions",
+    "features",
+    "compatibility",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "version": {
+      "$ref": "#/$defs/SemVer"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "authors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/AuthorInfo"
+      }
+    },
+    "license": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "source_repository": {
+      "$ref": "#/$defs/HttpsUrl"
+    },
+    "homepage": {
+      "$ref": "#/$defs/HttpsUrl"
+    },
+    "target_game": {
+      "$ref": "#/$defs/TargetGameRef"
+    },
+    "supported_versions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/SupportedGameVersion"
+      }
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeRequirement"
+    },
+    "permissions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/PermissionDeclaration"
+      }
+    },
+    "features": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/TrainerFeature"
+      }
+    },
+    "compatibility": {
+      "$ref": "#/$defs/TrainerCompatibility"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/TrainerArtifact"
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Reserved non-executable metadata for forward-compatible extensions."
+    }
+  },
+  "$defs": {
+    "SemVer": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "HttpsUrl": {
+      "type": "string",
+      "pattern": "^https://[A-Za-z0-9.-]+(?::[0-9]+)?(?:/.*)?$"
+    },
+    "RelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 260,
+      "pattern": "^[A-Za-z0-9._][A-Za-z0-9._/-]*$",
+      "not": {
+        "pattern": "(^|/)\\.\\.?(/|$)|//"
+      }
+    },
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "TargetPlatform": {
+      "type": "string",
+      "enum": [
+        "windows-x64",
+        "windows-arm64",
+        "linux-x64",
+        "linux-arm64",
+        "steamos-x64"
+      ]
+    },
+    "AntiCheatKind": {
+      "type": "string",
+      "enum": [
+        "easy_anti_cheat",
+        "battleye",
+        "vanguard",
+        "vac",
+        "denuvo_anti_cheat",
+        "custom"
+      ]
+    },
+    "AuthorInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "github": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]{1,39}$"
+        },
+        "url": {
+          "$ref": "#/$defs/HttpsUrl"
+        }
+      }
+    },
+    "TargetGameRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["game_id", "game_name"],
+      "properties": {
+        "game_id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "game_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "store_ids": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "steam_app_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "epic_catalog_item_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "gog_product_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "SupportedGameVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "version_pattern", "status"],
+      "properties": {
+        "platform": {
+          "$ref": "#/$defs/TargetPlatform"
+        },
+        "version_pattern": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "executable_sha256": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Sha256Hex"
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": ["verified", "experimental", "broken", "untested"]
+        }
+      }
+    },
+    "RuntimeRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "api_version",
+        "min_nekod_version",
+        "entrypoint",
+        "supported_platforms"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "declarative_patch_v1",
+            "wasm_sandbox_v1",
+            "native_provider_v1"
+          ]
+        },
+        "api_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "min_nekod_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/RelativePath"
+        },
+        "supported_platforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/TargetPlatform"
+          }
+        }
+      }
+    },
+    "PermissionScope": {
+      "type": "string",
+      "enum": [
+        "process.discover",
+        "process.read_memory",
+        "process.write_memory",
+        "process.allocate_memory",
+        "process.suspend_resume",
+        "filesystem.read_save_dir",
+        "filesystem.write_save_dir",
+        "runtime.native_module"
+      ]
+    },
+    "PermissionConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_write_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "allowed_modules": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "path_scope": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelativePath"
+          }
+        }
+      }
+    },
+    "PermissionDeclaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "reason", "required"],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/PermissionScope"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 500
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "constraints": {
+          "$ref": "#/$defs/PermissionConstraints"
+        }
+      }
+    },
+    "FeatureValueRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max", "step", "default"],
+      "properties": {
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 },
+        "default": { "type": "number" }
+      }
+    },
+    "TrainerFeature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "description",
+        "category",
+        "control_type",
+        "mutates_memory",
+        "supports_rollback",
+        "risk_level"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{1,63}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "player",
+            "inventory",
+            "world",
+            "time",
+            "economy",
+            "camera",
+            "other"
+          ]
+        },
+        "control_type": {
+          "type": "string",
+          "enum": ["toggle", "action", "integer", "float"]
+        },
+        "default_hotkey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "value_range": {
+          "$ref": "#/$defs/FeatureValueRange"
+        },
+        "mutates_memory": {
+          "type": "boolean"
+        },
+        "supports_rollback": {
+          "type": "boolean"
+        },
+        "risk_level": {
+          "type": "string",
+          "enum": ["low", "medium", "high"]
+        }
+      }
+    },
+    "TrainerCompatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "singleplayer_only",
+        "requires_offline_mode",
+        "anti_cheat_incompatible"
+      ],
+      "properties": {
+        "singleplayer_only": {
+          "type": "boolean",
+          "const": true
+        },
+        "requires_offline_mode": {
+          "type": "boolean"
+        },
+        "anti_cheat_incompatible": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/AntiCheatKind"
+          }
+        },
+        "last_verified_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "TrainerArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256", "size_bytes"],
+      "properties": {
+        "filename": {
+          "$ref": "#/$defs/RelativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "platform": {
+          "$ref": "#/$defs/TargetPlatform"
+        }
+      }
+    }
+  }
+}

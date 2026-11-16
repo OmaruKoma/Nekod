@@ -1,0 +1,152 @@
+name: Nekod Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to package (for manual dry-runs)"
+        required: false
+        default: "v0.1.0-alpha.0"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux Tauri system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: |
+          npm install
+          npm run build
+
+      - name: Format, clippy, and test workspace
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Validate repository schemas and sample trainer package
+        run: |
+          cargo run -p nekod-validator -- game schemas/examples/game-manifest.example.json
+          cargo run -p nekod-validator -- trainer schemas/examples/trainer-manifest.example.json
+          cargo run -p nekod-validator -- registry schemas/examples/registry-manifest.example.json
+          cargo run -p nekod-validator -- patch schemas/examples/declarative-patch.example.json
+          cargo run -p nekod-validator -- package examples/sample-singleplayer-rpg
+
+  package-windows:
+    needs: quality-gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: |
+          npm install
+          npm run build
+
+      - name: Build Windows x64 release binaries
+        run: |
+          cargo build --release -p nekod-desktop -p nekod-mcp -p nekod-validator
+
+      - name: Package Windows x64 Tauri bundle (no-sign installer when available)
+        working-directory: apps/desktop
+        run: |
+          npx tauri build --no-bundle
+
+      - name: Stage Windows x64 release archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-release
+          Copy-Item target/release/nekod-desktop.exe dist-release/
+          Copy-Item target/release/nekod-mcp.exe dist-release/
+          Copy-Item target/release/nekod-validator.exe dist-release/
+          Copy-Item LICENSE dist-release/
+          Copy-Item README.md dist-release/
+          Copy-Item SECURITY.md dist-release/
+          Compress-Archive -Path dist-release/* -DestinationPath nekod-windows-x64.zip -Force
+          $hash = (Get-FileHash nekod-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  nekod-windows-x64.zip" | Out-File -Encoding utf8 nekod-windows-x64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nekod-windows-x64
+          path: |
+            nekod-windows-x64.zip
+            nekod-windows-x64.zip.sha256
+
+  package-linux:
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Linux x64 CLI and MCP release binaries
+        run: |
+          cargo build --release -p nekod-mcp -p nekod-validator
+
+      - name: Stage Linux x64 release archive
+        run: |
+          mkdir -p dist-release
+          cp target/release/nekod-mcp dist-release/
+          cp target/release/nekod-validator dist-release/
+          cp LICENSE README.md SECURITY.md dist-release/
+          tar -czf nekod-linux-x64.tar.gz -C dist-release .
+          sha256sum nekod-linux-x64.tar.gz > nekod-linux-x64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nekod-linux-x64
+          path: |
+            nekod-linux-x64.tar.gz
+            nekod-linux-x64.tar.gz.sha256
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [package-windows, package-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Combine SHA256SUMS
+        working-directory: release-artifacts
+        run: |
+          cat *.sha256 > SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-artifacts/nekod-windows-x64.zip
+            release-artifacts/nekod-linux-x64.tar.gz
+            release-artifacts/SHA256SUMS.txt

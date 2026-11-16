@@ -1,0 +1,21 @@
+[package]
+name = "nekod-mcp"
+description = "L6 optional developer-only MCP server for trainer authoring, validation, and diagnostics."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nekod-core.workspace = true
+nekod-game-detection.workspace = true
+nekod-manifest.workspace = true
+nekod-registry-client.workspace = true
+nekod-trainer-manager.workspace = true
+nekod-trainer-runtime.workspace = true
+nekod-trainer-sdk.workspace = true
+nekod-validator.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

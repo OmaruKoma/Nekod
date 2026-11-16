@@ -1,0 +1,29 @@
+[package]
+name = "nekod-trainer-runtime"
+description = "L3 controlled trainer runtime, permission enforcement, and patch rollback ledger."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nekod-manifest.workspace = true
+nekod-runtime-api.workspace = true
+nekod-trainer-sdk.workspace = true
+nekod-validator.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,23 @@
+# Build outputs
+/target/
+**/target/
+dist/
+build/
+
+# Node / Frontend (future apps/desktop)
+node_modules/
+.pnpm-store/
+
+# Local data & runtime logs
+*.db
+*.db-wal
+*.db-shm
+*.log
+.nekod-local/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
