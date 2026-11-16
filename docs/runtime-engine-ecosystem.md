@@ -1,113 +1,156 @@
-# Nekod 多引擎运行时生态扩展设计（Runtime Engine Ecosystem）
+# Nekod 多引擎 Mod 平台与 AI 生产生态架构设计
 
-> **定位与目标：** 将目前散落在网盘与独立工具中的修改生态（Cheat Engine `.CT`、Unity 反射插件、UE4SS、专有框架、模拟器接口以及可选动态插桩）统一收敛至 Nekod 的 **L3/L4 协议与权限边界** 之下——对玩家呈现统一的开关、热键、信任徽章与安全回滚体验；对开发者提供模块化、可扩展的 `RuntimeProvider` 接入规范。
-
----
-
-## 1. 核心设计原则
-
-1. **上层协议统一，底层按引擎分流：**
-   - L1 桌面端（`apps/desktop`）与 L2 核心（`nekod-core`）始终只面向 `sdk/runtime-api` 中的统一抽象（`RuntimeProvider`、`FeatureCommand`、`GrantedPermissions`、`RuntimeDiagnostics`）。
-   - L3（`crates/trainer-runtime`）通过 `CompositeRuntimeRouter` 按 `TrainerManifest.runtime.kind` 路由至对应运行时后端，避免向玩家暴露引擎差异。
-2. **默认拒绝与风险分级（不妥协 `SECURITY.md` 底线）：**
-   - 任何新增引擎都必须显式声明 `PermissionScope`，并在反作弊检测触发或竞技联机政策禁止时立刻中止。
-   - **高敏/高权限扩展不得拖累主客户端信誉与杀软误报**：重型插桩（如 `frida-gum`）或原生脚本执行器应作为按需下载、进程隔离的可选扩展组件，而不是硬编码进主安装包的强制依赖。
-3. **内存与磁盘双维度可回滚：**
-   - 内存级补丁由现有 `PatchLedger` 管理（LIFO + 冲突检测 + PID 复用校验）。
-   - 磁盘部署代理 DLL（如 BepInEx / UE4SS / REFramework）必须引入对称的 **洁净部署账本（`DeploymentLedger`）**，确保停用或卸载时游戏目录零残留。
+> **核心定位升级：**
+> **Nekod — Modding games, together.**  
+> **Open-source Community Mod Platform — Discover, create, manage, and share game modifications.**
+>
+> Nekod 不止于单一的 Trainer 启动器或 WeMod 替代品，而是把分散在 GitHub、网盘、论坛、`.CT` 表格、各类 Mod Loader 与游戏专用脚本生态里的修改能力，统一收敛到同一套开放协议与安全边界下；同时通过 **Player Ecosystem** 与 **Developer / AI Mod Forge** 双生态闭环，既让普通玩家零门槛开箱即用，也让开发者与 AI Agent 能分析游戏、生成 Mod 并经实测验证后发布到社区。
 
 ---
 
-## 2. 现有底座与协议扩展方向
+## 1. 核心架构判断：多引擎 Mod Runtime 平台
 
-当前 `sdk/runtime-api/src/lib.rs` 与 `crates/trainer-runtime/src/router.rs` 已确立 `RuntimeProvider` 与多后端分发机制。面向多引擎生态，规划以下扩展方言：
+Nekod 保留原有的 **L1–L6 六层逻辑架构**，但 **L3 Runtime** 不再局限于单一执行机制，而是升级为 **Unified Runtime Interface 驱动的多引擎适配层**：
 
-| 候选引擎 / 协议 | 规划 `RuntimeKind` / 工具定位 | 安全风险等级 | 核心适用场景 |
-| :--- | :--- | :--- | :--- |
-| **声明式字节/AOB/指针补丁** | `declarative_patch_v1` *(已实现)* | **Tier A（低）** | 常规单机游戏数值锁定、轻量字节补丁 |
-| **WASM 沙箱逻辑** | `wasm_sandbox_v1` *(已内置底座)* | **Tier A（低）** | 需条件分支、状态机计算的跨平台安全脚本 |
-| **外部协议适配器** | `adapter_ipc_v1` *(V1.1 优先)* | **Tier A（低）** | RetroArch UDP / 网络控制接口等零注入模拟器/工具 |
-| **`.CT` 静态转译器** | L5/L6 CLI 工具链 *(V1.1 优先)* | **Tier A（低）** | 将纯 AOB / 字节补丁 / 指针链 `.CT` 离线编译为 `declarative_patch_v1` |
-| **Unity 反射桥接** | `unity_bridge_v1` *(V1.1 重点)* | **Tier B（中）** | Mono / IL2CPP Unity 独立与中型游戏，按类名/字段读写抗版本更新 |
-| **UE4 / UE5 反射桥接** | `ue4ss_bridge_v1` *(V1.1/V1.2)* | **Tier B（中）** | 基于 UE4SS 调用 `UObject` 属性与 `CheatManager` / `UFunction` |
-| **专有成熟框架托管** | `managed_framework_v1` *(V1.2)* | **Tier B–C（中/高）** | REFramework（RE 引擎）、ScriptHook 等现有生态插件的受控托管部署 |
-| **CE `.CT` 受限执行器** | `ce_subset_v1` *(V1.2 评估)* | **Tier C（高）** | 无法静态转译的存量复杂 `.CT`（受限 Auto-Assembler + 裁剪版 Lua 沙箱） |
-| **嵌入式 Frida 动态插桩** | `frida_gum_v1` *(可选隔离包)* | **Tier C（高）** | 跨平台（Windows + Linux/Proton）复杂虚函数/分支逻辑实时 Hook |
+```text
+Nekod Desktop (L1)
+  Game Library · Mods · Trainers · Dependencies · Profiles · Permissions
+       │
+       ▼
+Nekod Core (L2)
+  Game & Engine Detection · Mod Manager · Dependency Manager · Compatibility DB · Security
+       │  (Unified Runtime Interface: sdk/runtime-api)
+       ▼
+CompositeRuntimeRouter (L3)
+  ├── Declarative / CE Script Runtime    (declarative_patch_v1 + .CT 转译/受限子集)
+  ├── Dynamic Instrumentation Runtime    (Frida Gum 可选/隔离后端)
+  ├── Unity Runtime Bridge               (BepInEx / MelonLoader — 区分 Mono 与 IL2CPP)
+  ├── Unreal Engine Runtime Bridge       (UE4SS — UObject / Lua / C++ 反射桥接)
+  └── Game-Specific Runtime Bridge       (REFramework / ScriptHook / RetroArch UDP 等)
+```
 
----
+**关键原则：统一的是管理契约（生命周期、权限、诊断、兼容性），而不是强行把五种底层技术揉成一种实现。**
 
-## 3. 五大方向细化接入方案
+| 统一管理操作 | 声明式 / CE Runtime | Frida Runtime | Unity Bridge | UE Bridge (`UE4SS`) | 专用生态 Bridge |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`attach()`** | 进程校验 & 附加 | 启动 Frida 会话 | 检测 Mono/IL2CPP 与 Loader | 检测 UE 版本 & UE4SS 兼容性 | 校验框架 / 启动回环 IPC |
+| **`activate()`** | 写入内存 Patch / 冻结 | 挂载 JS Hook | 通过受控桥加载字段/方法修改 | 调用 `CheatManager` / 修改 `UObject` | 托管插件部署 / 发送协议命令 |
+| **`deactivate()`** | `PatchLedger` LIFO 字节回滚 | 安全 `detach` 移除 Hook | 还原修改属性 & 卸载受控操作 | 还原 `UObject` / 卸载脚本 | `DeploymentLedger` 洁净还原 / 复位 |
+| **`diagnostics()`** | 内存补丁数、冲突与冻结状态 | Hook 状态 & JS 日志 | Bridge IPC 状态与 Loader 日志 | UE4SS 日志 & 反射绑定状态 | 框架/协议连接与回滚报告 |
+| **`capabilities()`** | `process.*` | Hook / 进程注入高风险权限 | 目录写入 + IPC + 反射作用域 | 目录写入 + UE4SS 依赖 + IPC | 按具体适配器独立声明 |
 
-### 3.1 Cheat Engine `.CT`：静态转译优先 + 受限沙箱兜底
-直接复刻完整 CE（尤其是无限制 `LuaJIT` FFI/IO 与全量 Auto Assembler）维护成本极高且易引入 RCE 风险，因此拆为两阶段：
-1. **阶段一（`.CT -> declarative_patch_v1` 离线编译器）：**
-   - 在 `tools/trainer-validator` 与 `crates/nekod-mcp` 中提供解析器，提取 `.CT` XML 中的内存地址、多级指针偏移、`aobscan` / `aobscanmodule` 特征码与简单 `[ENABLE]`/`[DISABLE]` 字节替换，生成标准化 `trainer.json` 与 `trainer-manifest.json`。
-   - 产物直接享受现有 `PatchLedger` LIFO 回滚与低风险信任模型。
-2. **阶段二（受限 `.CT` 运行时子集 `ce_subset_v1`）：**
-   - 基于纯 Rust `iced-x86` 进行指令边界分析与跳板重定位，仅开放白名单 Auto-Assembler 指令（`aobscanmodule`、`alloc`、`label`、`define`、`registersymbol`、`db`）。
-   - 若内嵌 Lua 脚本，必须运行在剥离 `io` / `os` / `ffi` / `package.loadlib` 的受控沙箱内，仅暴露绑定 `GrantedPermissions` 的内存读写宿主机函数；同时强制要求玩家显式确认 `process.allocate_memory`。
-
-### 3.2 动态插桩：嵌入式 `frida-gum`（可选进程隔离后端）
-* **优势：** 对 Windows + Linux/Proton 复杂分支拦截能力最强，开发者可用 JS 编写高级 Hook 逻辑而无需为每个游戏编译原生 DLL。
-* **防误报与隔离策略：**
-  * 不纳入 `nekod-desktop` 默认发行二进制，避免主程序触发杀软启发式拦截或体积膨胀。
-  * 作为可选扩展后端运行，挂载/卸载阶段必须保障线程安全的 `Interceptor.revert` 与异常恢复；默认对 `Unverified` 来源禁用，仅在高级设置及明确风险确认后启用。
-
-### 3.3 Unity 反射桥接（BepInEx / MelonLoader + 通用受控桥接）
-* **设计思路：** 避免玩家手动下载覆盖游戏目录。由 Nekod 托管维护并签名通用的 **`Nekod.UnityBridge`**（分别适配 Mono 与 Il2CppInterop），随平台安全目录受控部署。
-* **命令白名单约束：**
-  * Manifest 中声明目标类型/字段/方法路径（例如 `PlayerStats.health`、`InventoryManager.AddGold`），Bridge 通过本地命名管道 / IPC 接收 Nekod 核心的 `FeatureCommand`。
-  * 通用 Bridge **只做声明式反射读写与安全调用，不加载未经 SHA-256 校验的第三方任意 C# 程序集**。
-
-### 3.4 虚幻引擎反射桥接（UE4SS 托管底座）
-* **版本化依赖托管：** UE4 / UE5 不同版本间对象数组与名称池布局存在差异，Manifest 允许声明经平台索引校验的 `ue4ss` 基线版本号与游戏配置文件哈希。
-* **统一控制：** Bridge 通过本地 IPC 将引擎内 `CheatManager`、`UObject` 属性修改与 `UFunction` 触发映射为标准的 `toggle` / `action` / `integer` / `float` 控件，玩家无需接触开发者控制台或 Lua 源码。
-
-### 3.5 专有引擎与模拟器协议（REFramework / ScriptHook / RetroArch UDP）
-此类接口划分为两个安全子域分别接入：
-1. **外部 IPC / 网络协议类（如 RetroArch UDP Network Command）：**
-   - 零进程注入、零内存写入，只需通过轻量 `adapter_ipc_v1` 向本地回环端口发送经过白名单校验的状态命令；天然支持跨平台与最低权限运行。
-2. **目录代理 DLL 类（如 REFramework `dinput8.dll`、ScriptHook）：**
-   - 作为可版本校验、可追踪的托管兼容包接入，生命周期完全受控于下文 **DeploymentLedger**。
+> **生态边界原则：** BepInEx、UE4SS、REFramework 本身已是成熟生态。Nekod 负责**发现、版本识别、配置管理、依赖调度与受控调用**，而**不需要把所有上游 Loader 从零重写一遍**。
 
 ---
 
-## 4. 关键基础设施：游戏目录“洁净部署账本”（`DeploymentLedger`）
+## 2. 五类 Runtime Adapter 技术路线与当前进度
 
-BepInEx、UE4SS、REFramework、ScriptHook 等框架必须在游戏安装目录部署代理 DLL 或插件目录。若缺乏统一清理机制，极易出现“卸载客户端后游戏无法启动”的网盘 Mod 通病。因此需要在 L2/L3 之间建立磁盘级 `DeploymentLedger`：
+### 2.1 CE Script Runtime（优先考虑）
+* **目标场景：** 大量存量老游戏、无明显现代引擎特征的原生 C/C++ 游戏，兼容现有 `.CT` 资源而无需玩家额外安装 Cheat Engine。
+* **技术选型与边界：**
+  - `.CT` 不只是普通 XML，还包含 Auto Assembler（`aobscanmodule`、`alloc`、`registersymbol`、`[ENABLE]`/`[DISABLE]`）、Lua 块、符号与复杂地址表达式。
+  - **阶段一（已实现）：** 在 [ct_importer.rs](file:///d:/codespace/Nekod/tools/trainer-validator/src/ct_importer.rs) 提供静态 `.CT -> declarative_patch_v1` 转译器（`nekod-validator import-ct`），将模块偏移、反转后的指针链以及纯 `aobscanmodule` + `db` 字节补丁编译为经过校验的标准包；对 `{$lua}`、`alloc`、`createthread` 等默认拒绝并输出明细。
+  - **阶段二（后续规划）：** 引入 `iced-x86` / 受限 AA 解析与剥离 `io/os/ffi` 的受控 LuaJIT 沙箱，支持常用 `.CT` 脚本子集并逐步扩大兼容性。
 
-1. **部署前快照：** 记录游戏目录原有同名文件（若存在则计算 SHA-256 并移入隔离备份区）。
-2. **强校验投放：** 所有托管运行时文件投放时记录 `(game_id, session_or_package_id, relative_path, deployed_sha256)` 至 SQLite。
-3. **禁止路径逃逸：** 所有部署路径沿用 `validate_relative_path` 严格限制在目标游戏安装根目录内。
-4. **一键卸载与故障自愈：** 玩家停用桥接或清理游戏配置时，按账本逆序删除受管文件并恢复原备份；若发现目标文件已被游戏更新覆盖，只清理受管记录而不盲目删除未知新文件。
+### 2.2 Dynamic Instrumentation Runtime（优先考虑）
+* **目标场景：** 逻辑复杂的函数拦截、带条件分支的动态Hook与跨平台（Windows + Linux/Proton）运行时分析。
+* **技术选型与边界：** `frida-gum`。开发者使用 JavaScript 编写 Hook，无需为每个 Mod 编译独立原生 DLL。
+* **工程约束：** 不能把 `frida-gum` 误解为“随便引个库即可”。其静态链体积、跨平台适配、目标线程安全、`Interceptor.revert` 热卸载生命周期与杀软误报隔离都需要专门工程；应作为 **可选/隔离 Runtime Adapter** 独立发布与按需启用，不强行污染基础发行包体积与信誉。
+
+### 2.3 Unity Runtime Bridge（优先考虑）
+* **目标场景：** 覆盖海量独立/中型 PC 游戏的 Unity 生态，按类/字段/方法名修改，减少游戏小版本补丁带来的失效频率。
+* **技术选型与边界：** 结合 `BepInEx` / `MelonLoader`，且 **必须显式区分 Mono 与 IL2CPP 两套运行环境**，不可假设单套桥接源码通吃两种运行时，同时在兼容性矩阵中追踪游戏版本更新引起的类结构变更。
+
+### 2.4 Unreal Engine Runtime Bridge（建议支持）
+* **目标场景：** UE4 / UE5 中大型游戏，利用 `UObject`、`UFunction` 反射与引擎内置 `CheatManager` 实现高稳定性修改。
+* **技术选型与边界：** `UE4SS`（Lua / C++ 反射系统）。由于 UE 不同构建版本存在结构差异，UE4SS 并非对所有 UE 游戏开箱通用，必须在兼容性数据库中显式标注适用引擎版本、构建特征与已知限制。
+
+### 2.5 Game-Specific Runtime Bridge（生态扩展）
+* **目标场景：** Capcom RE 引擎（`REFramework`）、R 星生态（`ScriptHook`）、主机模拟器外部接口（`RetroArch UDP` 等）。
+* **设计原则：** 每种专有桥接保持独立适配器与独立兼容性声明，绝不强行抽象成僵化的单一 Hook 接口。
+  - **零注入外部协议（已落地阶段 1 底座）：** [adapter_ipc.rs](file:///d:/codespace/Nekod/crates/trainer-runtime/src/adapter_ipc.rs) 已实现 `adapter_ipc_v1`（含仅限 `127.0.0.1`/`localhost` 回环的 `retroarch_udp_v1` 命令执行、白名单动词校验与 LIFO 回滚）。
+  - **目录代理 DLL 类（已有磁盘账本底座）：** [deployment.rs](file:///d:/codespace/Nekod/crates/trainer-runtime/src/deployment.rs) 已实现 `DeploymentLedger`，负责原文件隔离快照备份、SHA-256 投放验证与无冲突卸载还原。
 
 ---
 
-## 5. 分级安全模型映射（Tier A / B / C）
+## 3. 避免打补丁：下一阶段必须补齐的三大核心协议模块
 
-| 安全层级 | 包含运行时 | 授权策略 | 隔离要求 |
-| :--- | :--- | :--- | :--- |
-| **Tier A — 声明式与零注入协议** | `declarative_patch_v1`、`wasm_sandbox_v1`、`adapter_ipc_v1` | 常规用户授权确认；支持社区验证源 | 主核心/WASM 沙箱内运行，默认启用 `PatchLedger` |
-| **Tier B — 官方托管反射桥接** | `unity_bridge_v1`、`ue4ss_bridge_v1`、`managed_framework_v1` | 显式确认目录写入/桥接注入 + 单机与反作弊检查 | 通用 Bridge 由官方/社区校验 SHA-256；配合 `DeploymentLedger` 洁净还原 |
-| **Tier C — 动态插桩与原生脚本** | `ce_subset_v1`、`frida_gum_v1`、`native_provider_v1` | `default-deny`；需高风险显式确认与来源信任约束 | 可选下载扩展包 + 独立辅助进程 / 沙箱裁剪 |
+为了不长期在面向数值修改器的 `TrainerManifest` 上打补丁，平台下一步将从 L4 协议层重构并补齐三大核心模块（对应 [ADR-019](file:///d:/codespace/Nekod/TECHNICAL_DECISIONS.md#adr-019-multi-engine-mod-platform-evolution-modmanifest-runtime-adapters-dependency-manager-and-compatibility-database)）：
+
+### A. `ModManifest` & `Mod Package`（通用 Mod 清单，兼容并涵盖 Trainer）
+将单一 Trainer 清单升级为多形态 **`ModManifest`**：
+* **`trainer`**：数值修改、AOB 补丁、冻结项
+* **`script_mod`**：Lua / JavaScript / 受控脚本 Mod
+* **`plugin_mod`**：Unity / UE / 专有 Loader 托管插件 Mod
+* **`asset_mod`**：模型、纹理、音频等资源替换包（由 `DeploymentLedger` 托管安全还原）
+* **`configuration_mod`**：游戏配置 / INI / 参数调优 Mod
+* **`patch_mod`**：文件级或二进制校验补丁
+* **`emulator_mod`**：模拟器状态与网络命令扩展
+
+> **向后兼容承诺：** 现有 v1 `TrainerManifest`（`schemas/trainer-manifest.v1.schema.json`）将提供自动向上映射为 `mod_kind = "trainer"` 的兼容转换器，确保现有示例与验证链路平滑演进。
+
+### B. `Runtime Dependency Manager`（运行时依赖管理器）
+不同 Mod 依赖不同的前置底座（`bepinex-mono`、`bepinex-il2cpp`、`ue4ss`、`reframework`、`lua-runtime` 等）。依赖管理器负责：
+1. 在 `ModManifest` 中以版本约束声明所需 Runtime / Loader 依赖；
+2. 扫描游戏目录与本地缓存，识别已安装依赖及版本；
+3. 按 **上游许可证、再分发约束与用户显式授权** 决定“自动托管部署”或“引导至官方发布源安装 + 本地校验 SHA-256”，绝不违规打包或静默覆盖不可再分发二进制。
+
+### C. `Compatibility Database`（多维兼容矩阵）
+不再只记录 `Mod -> Game ID` 的粗粒度关系，而是建立精确兼容模型：
+
+```text
+Game
+ ├── Game Version / Build ID
+ ├── Distribution Platform (Steam / Epic / GOG / Custom)
+ ├── Runtime Adapter (Engine + Loader + Version + Runtime Compatibility)
+ └── Mod
+      ├── Mod Version
+      ├── Required Dependencies
+      ├── Required Capabilities (PermissionScope)
+      └── Tested Combinations (Verified / Experimental / Broken + Evidence)
+```
 
 ---
 
-## 6. 分阶段实施路线（V1.1 → V1.2）
+## 4. 双生态协同与 AI Mod Forge 工作流
 
-### 阶段 1：V1.1 底座与高频生态（低风险、最快见效）
-1. 实现 **`.CT -> declarative_patch_v1` 静态转换工具**（优先服务贡献者与本地包导入）。
-2. 实现 **`DeploymentLedger`（磁盘洁净部署账本）** 及回滚单元测试。
-3. 接入首批低注入协议适配器 **`adapter_ipc_v1`（RetroArch UDP 示例）**。
-4. 原型验证 **`unity_bridge_v1`**（Mono 优先，随后补齐 IL2CPP）并接入 `CompositeRuntimeRouter`。
+### 4.1 双生态边界
+* **Player Ecosystem（玩家侧，零 AI 强制依赖）：** 游戏识别 → 引擎/Loader 探测 → 查看兼容矩阵与依赖状态 → 权限透明确认 → 一键启用/更新/回滚。
+* **Developer / AI Ecosystem（开发者与 AI 侧，可选 L6）：** 利用 `crates/nekod-mcp`、`skills/` 与 `prompts/` 分析游戏、选择合适 Runtime、自动制作并验证 Mod 包，最终经人类开发者审校与授权后发布至社区仓库。
 
-### 阶段 2：V1.2 主流 3A 与长尾兼容
-1. 接入 **`ue4ss_bridge_v1`**（版本化 UE4/UE5 依赖与 `UObject` 声明式控制）。
-2. 接入受管专有生态包（REFramework / ScriptHook 托管描述与一键还原）。
-3. 评估落地 **受限 `.CT` 运行时子集（`ce_subset_v1`）** 与 **可选隔离 `frida_gum_v1` 扩展包**。
+### 4.2 AI Mod Forge 流水线与防幻觉门禁
 
-### 验收原则
-每接入一个新的 `RuntimeProvider`，均须满足：
-- 不破坏现有 `apps/desktop`（L1）前端契约与无 AI 离线体验；
-- 具备完整的故障/崩溃/冲突回滚回归测试；
-- 在 `tools/trainer-validator` 与 `schemas/` 中提供对应 versioned JSON Schema 与示例包。
+```text
+输入游戏名称 / 游戏目录 / 进程 / 修改目标
+   ▼
+[1. Game Identification]     匹配 GameManifest / 商店 Build ID
+   ▼
+[2. Game & Engine Analysis]  识别原生 x64 / Unity (Mono vs IL2CPP) / UE4-5 / RE Engine / 模拟器
+   ▼
+[3. Runtime Recommendation]  结合兼容性数据库检索现成 Mod，推荐最优 Runtime Adapter
+   ▼
+[4. Mod & Manifest Forge]    生成或转译 Mod 代码/脚本 + ModManifest + 所需权限声明
+   ▼
+[5. Sandbox Validation]      nekod-validator Schema/安全检查 + 反作弊/单机策略校验
+   ▼
+[6. Compatibility Testing]   真实/沙箱运行时附加、激活、冲突测试与回滚验证（严禁跳过）
+   ▼
+[7. Community Publishing]    开发者人工审校、签名并提交 GitHub Release + Registry 索引
+```
+
+**强制门禁：** AI 分析出的内存地址、签名或脚本在通过第 5 步和第 6 步的**运行时实测与回滚验证**前，禁止自标为 `verified`，必须维持 `experimental` 或 `untested` 状态，并由开发者完成最终确认。
+
+---
+
+## 5. 分阶段实施顺序（不堆叠复杂度）
+
+为避免同时开工五个高复杂度执行引擎导致失控，实施严格遵循“先定核心协议与管理底座，再逐个接入 Runtime”：
+
+| 阶段 | 重点任务 | 当前状态 |
+| :--- | :--- | :--- |
+| **基础基线 (P0–P5 + V1.1-S1)** | 六层架构、SQLite 核心、Win32/Linux 声明式后端、`wasm_sandbox_v1` 宿主、`DeploymentLedger`、`.CT` 静态转译、`adapter_ipc_v1` | **已完成并测试通过** |
+| **M1 — 核心协议重构** | 重新定义 `ModManifest`（v2 Schema）、扩展 `RuntimeProvider` 适配器接口与 `Mod Package` 规范（兼容 v1） | **下一步重点** |
+| **M2 — 依赖与兼容数据库** | `Runtime Dependency Manager`、游戏引擎/Loader 探测增强、`Compatibility Database` 数据模型与存储 | **已规划** |
+| **M3 — 传统与通用引擎桥接** | 受限 CE `.CT` 脚本子集执行器、`Unity Runtime Bridge`（Mono / IL2CPP）、`UE4SS` 桥接管理 | **已规划** |
+| **M4 — 动态插桩与专有生态** | 可选隔离 `Frida Gum` Runtime、`REFramework` / `ScriptHook` 等游戏专用适配器 | **已规划** |
+| **M5 — AI Mod Forge 闭环** | 扩充 `nekod-mcp` 游戏分析、Runtime 推荐、自动化生成与测试验证工具链 + 桌面 UI 体验升级 | **已规划** |

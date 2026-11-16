@@ -132,6 +132,17 @@ Nekod is built incrementally across six phases (`P0`–`P5`). Each phase has exp
 
 ---
 
-## Next Horizon — V1.1
+## Next Horizon — V1.1 & Multi-Engine Mod Platform Evolution
 
-See [`docs/v1.1-roadmap.md`](docs/v1.1-roadmap.md) for the V1.1 feature plan focused on expanding reference trainer examples, plugin/runtime ergonomics, and WeMod-grade desktop UX.
+Building on the completed `P0`–`P5` baseline, Nekod is evolving into a unified **Multi-Engine Mod Runtime & AI-Assisted Mod Forge Platform** (see [ADR-019](TECHNICAL_DECISIONS.md#adr-019-multi-engine-mod-platform-evolution-modmanifest-runtime-adapters-dependency-manager-and-compatibility-database) and [`docs/runtime-engine-ecosystem.md`](docs/runtime-engine-ecosystem.md)):
+
+| Phase | Focus | Core Deliverables | Status |
+| :--- | :--- | :--- | :--- |
+| **V1.1-S1** | Bridge & Importer Foundations | `.CT -> declarative_patch_v1` static converter (`nekod-validator import-ct`), `DeploymentLedger` disk rollback, loopback `adapter_ipc_v1` (`retroarch_udp_v1`) | **Completed** |
+| **V2-M1** | Core Protocol Refactor | `ModManifest` (`mod_kind`: trainer/script/plugin/asset/config/patch/emulator) + `Mod Package` + `RuntimeProvider` adapter capabilities & v1 upgrader | **Next** |
+| **V2-M2** | Dependency & Compatibility | `Runtime Dependency Manager` (license-aware loader detection/staging) + multi-dimensional `Compatibility Database` | **Planned** |
+| **V2-M3** | Traditional + Engine Adapters | Constrained CE `.CT` subset evaluator, `Unity Runtime Bridge` (Mono & IL2CPP via BepInEx/MelonLoader), `Unreal Runtime Bridge` (`UE4SS`) | **Planned** |
+| **V2-M4** | Dynamic & Specialized Bridges | Optional isolated `Frida Gum` dynamic instrumentation adapter + `REFramework` / `ScriptHook` managed adapters | **Planned** |
+| **V2-M5** | AI Mod Forge & UI Polish | L6 `nekod-mcp` game/engine analysis → runtime recommendation → mod generation → sandbox/runtime verification pipeline + WeMod-grade desktop UX (`docs/v1.1-roadmap.md`) | **Planned** |
+
+See also [`docs/v1.1-roadmap.md`](docs/v1.1-roadmap.md) for player-facing desktop UX improvements and reference trainer examples.

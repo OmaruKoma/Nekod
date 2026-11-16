@@ -1,21 +1,24 @@
 # Nekod
 
-**Modding games, together.**
+**Modding games, together.**  
+*Open-source Community Mod Platform — Discover, create, manage, and share game modifications.*
 
-Nekod is an open-source, community-driven game trainer platform designed to give ordinary players a simple, polished desktop experience while giving contributors open standards, verifiable manifests, and optional developer tooling to create, maintain, and share trainers independently.
+Nekod unifies fragmented PC game modification ecosystems—Trainers, Cheat Engine `.CT` tables, script hooks, Unity (`BepInEx` / `MelonLoader`), Unreal (`UE4SS`), game-specific bridges (`REFramework`, `ScriptHook`, `RetroArch UDP`), and AI-assisted creator workflows—under one open, verifiable, security-first platform.
 
-> **Player-first design:** Players never need programming knowledge, reverse-engineering tools, an AI client, or an MCP server to use Nekod.
+> **Dual-Ecosystem Design:**  
+> - **Player Ecosystem (Zero AI Required):** Ordinary players never need an AI model, API key, MCP server, or reverse-engineering knowledge to discover games, manage runtime dependencies, toggle features, or roll back cleanly.  
+> - **Developer & AI Mod Forge (Optional):** Contributors and AI Agents can inspect game directories, recommend runtime adapters, generate/import Mod packages, run automated validation & rollback checks, and publish to community repositories.
 
 ---
 
 ## Core Principles
 
-1. **Player First** — Automatic game discovery, clean feature toggles, hotkeys, and safe rollback out of the box.
-2. **Community Driven** — Any developer can maintain trainers in their own GitHub repository and register metadata with the community index.
-3. **Open Standards** — Independent, versioned JSON Schemas for games, trainers, and registries.
-4. **AI Assisted (Developer-Only & Optional)** — MCP tools, model-independent Agent Skills, and prompts assist contributors without becoming a runtime dependency for players.
-5. **Security First** — Default-deny execution for untrusted modules, explicit permission declarations, process identity/version verification, and auditable runtime logs.
-6. **Extensible Architecture** — Modular Rust core with strict protocol boundaries separating UI, application core, runtime execution, and community ecosystems.
+1. **Player First** — Automatic game & engine discovery, clean feature toggles, hotkeys, managed loader cleanup (`DeploymentLedger`), and safe rollback (`PatchLedger`).
+2. **Unified Mod Management, Heterogeneous Runtimes** — Common lifecycle, capability checks, and compatibility metadata across distinct runtime adapters without forcing one execution model onto every game engine.
+3. **Community Driven** — Any developer can maintain mods and trainers in independent GitHub repositories and register metadata in the community index.
+4. **Open Standards** — Versioned JSON Schemas for games, mods/trainers, compatibility records, and registries.
+5. **AI Mod Forge (Developer-Only & Optional)** — MCP tools, model-independent Agent Skills, and prompts help contributors analyze games and generate verifiable mods while requiring runtime validation and human review before publication.
+6. **Security First** — Default-deny execution for untrusted scripts/modules, explicit permission & license-aware dependency governance, process identity/version checks, and strict anti-cheat/singleplayer boundaries.
 
 ---
 

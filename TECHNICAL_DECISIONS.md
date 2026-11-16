@@ -202,8 +202,26 @@ This document records significant architectural choices, the alternatives consid
 
 ---
 
+## ADR-019: Multi-Engine Mod Platform Evolution (`ModManifest`, Runtime Adapters, Dependency Manager, and Compatibility Database)
+
+- **Status:** Accepted (Architecture Direction for V1.1+ / V2 Protocol Evolution)
+- **Context:** Real-world PC game modification spans far more than Cheat Engine-style numeric trainers: community resources live across `.CT` tables, Frida scripts, Unity (`BepInEx` / `MelonLoader` on Mono & IL2CPP), Unreal (`UE4SS`), and game/emulator bridges (`REFramework`, `ScriptHook`, `RetroArch UDP`), and encompass QoL/script/plugin/asset/config/patch mods as well as trainers. At the same time, L6 AI tooling (`nekod-mcp` + Agent Skills) can act as an optional **AI Mod Forge** that analyzes games and drafts verifiable mod packages—provided runtime verification remains mandatory.
+- **Decision:**
+  1. **Broaden Platform Positioning & Package Model:** Evolve Nekod from a single-focus Trainer Platform into an **Open-source Community Mod Platform** (`Modding games, together.`). Generalize `TrainerManifest` into `ModManifest` supporting `mod_kind` variants (`trainer`, `script_mod`, `plugin_mod`, `asset_mod`, `configuration_mod`, `patch_mod`, `emulator_mod`) while preserving lossless backwards compatibility for existing v1 `TrainerManifest` packages.
+  2. **Five Runtime Adapter Classes Behind Unified Management:** Rather than forcing one execution technology or reimplementing entire upstream mod loaders, define five distinct Runtime Adapter categories behind `RuntimeProvider`:
+     - **CE Script Runtime** (static `.CT -> declarative_patch_v1` converter first; constrained AA/Lua subset later)
+     - **Dynamic Instrumentation Runtime** (`frida-gum` optional/isolated adapter)
+     - **Unity Runtime Bridge** (separate Mono vs. IL2CPP handling across `BepInEx` / `MelonLoader`)
+     - **Unreal Engine Runtime Bridge** (`UE4SS` versioned loader discovery & `UObject`/reflection adapter)
+     - **Game-Specific Runtime Bridge** (independent per-ecosystem adapters such as `REFramework`, `ScriptHook`, and loopback-only `adapter_ipc_v1` for `RetroArch UDP`).
+  3. **Runtime Dependency Manager & Clean Disk Lifecycle:** Model upstream loaders and bridges (`BepInEx`, `UE4SS`, `REFramework`, etc.) as explicit declared dependencies managed through detection, SHA-256 verification, upstream license/redistribution compliance, and `DeploymentLedger` backup/rollback—never blindly bundling license-restricted binaries.
+  4. **Compatibility Database & AI Validation Gate:** Track multi-dimensional compatibility tuples `(game, game_version, store_platform, runtime_adapter, mod_version, dependencies, tested_status)`. AI-assisted generation (`AI Mod Forge`) must pass automated validation and runtime rollback verification before receiving verified status; unverified memory offsets or scripts discovered by AI cannot self-assert compatibility.
+- **Consequences:** Subsequent protocol work will introduce `ModManifest` v2, dependency specifications, compatibility records, and adapter capability metadata cleanly at the L4 boundary instead of continually patching v1 trainer-only structs, while keeping zero AI dependency for ordinary players.
+
+---
+
 ## Summary of Unresolved Engineering Questions
 
 The full register of unresolved questions, trade-offs, and impact timelines lives in [`docs/unresolved-questions.md`](docs/unresolved-questions.md). All initial **U1**–**U11** architectural questions now have accepted ADRs:
 
-*(Resolved in P0–P5: **U1**–**U11**.)*
+*(Resolved in P0–P5: **U1**–**U11**; Platform Expansion ADR-019 recorded for V1.1+/V2 protocol refactor.)*

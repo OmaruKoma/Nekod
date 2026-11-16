@@ -2,14 +2,14 @@
 
 ## 1. Architectural Goals & Constraints
 
-Nekod is a **player-first, open-source community game trainer platform** built around strict separation of concerns, explicit trust boundaries, and protocol stability.
+Nekod is an **open-source community Mod platform** (`Modding games, together.`) built around strict separation of concerns, multi-engine runtime unification at the management boundary, explicit trust boundaries, and protocol stability.
 
 Key architectural constraints:
-1. **No AI dependency for players:** All player workflows (discovery, trainer installation, permission review, feature toggles, rollback, logging) execute deterministically in the local application core and runtime without requiring any LLM, MCP server, or cloud inference.
-2. **Modular monolith before microservices:** Application core domains live in cleanly separated Rust crates inside one workspace and execute inside a unified core service boundary (`nekod-core`) during P1–P3.
-3. **Runtime decoupled from UI:** Presentation (`apps/desktop`) never accesses OS process handles, memory APIs, or filesystem trainer bundles directly. All runtime operations cross the UI-independent `sdk/runtime-api` boundary.
-4. **Default-deny security posture:** Unvalidated manifests are rejected; third-party native executable modules are untrusted and disabled by default; memory-write permissions require explicit user confirmation.
-5. **Singleplayer scope enforcement:** Nekod does not implement anti-cheat bypasses or target competitive online games.
+1. **No AI dependency for players:** All player workflows (game & engine discovery, dependency management, mod installation, permission review, feature toggles, rollback, logging) execute deterministically in the local application core and runtime without requiring any LLM, MCP server, or cloud inference.
+2. **Unified management interface, heterogeneous runtime adapters:** Nekod exposes unified lifecycle, permission, diagnostic, and compatibility contracts across `sdk/runtime-api`, while letting each engine adapter (`Declarative/CE`, `Dynamic Instrumentation`, `Unity Bridge`, `Unreal Bridge`, `Game-Specific Bridge`) handle its own execution semantics and upstream loader discovery.
+3. **Modular monolith before microservices:** Application core domains live in cleanly separated Rust crates inside one workspace and execute inside a unified core service boundary (`nekod-core`), while keeping the `RuntimeProvider` boundary IPC-ready for future subprocess isolation.
+4. **Default-deny security posture:** Unvalidated manifests are rejected; untrusted native modules and scripts are disabled by default; memory-write, allocation, disk deployment, and hook scopes require explicit user consent.
+5. **Singleplayer scope enforcement:** Nekod does not implement anti-cheat bypasses, stealth injection, or target competitive online games.
 
 ---
 
@@ -18,30 +18,31 @@ Key architectural constraints:
 ```text
 +-------------------------------------------------------------------------+
 | L1: Desktop Application (apps/desktop — Tauri 2 + React + TypeScript)   |
-|     Game Library, Trainer Pages, One-Click Toggles, Permission Prompts  |
+|     Game Library · Mods · Trainers · Dependencies · Profiles · Security |
 +------------------------------------+------------------------------------+
                                      | Typed IPC (Commands / Events)
                                      v
 +-------------------------------------------------------------------------+
 | L2: Application Core (crates/nekod-core + Domain Crates)                |
-|  - game-detection      - trainer-manager      - profile-manager         |
-|  - registry-client     - permission-manager   - Update & Config Mgmt    |
+|  - game-detection (stores + engines) - trainer/mod-manager              |
+|  - profile-manager                   - registry-client                  |
+|  - permission-manager                - Dependency & Compatibility Mgmt  |
 +------------------------------------+------------------------------------+
-                                     | L4 Protocol: sdk/runtime-api
+                                     | L4 Protocol: sdk/runtime-api (Unified Runtime Interface)
                                      v
 +-------------------------------------------------------------------------+
-| L3: Trainer Runtime (crates/trainer-runtime)                            |
-|  Process Verification | Memory Engine | Lifecycle | Patch Rollback      |
-|  Permission Enforcement | Execution Logs | Diagnostics                  |
+| L3: Multi-Engine Mod Runtime (crates/trainer-runtime)                   |
+|  CompositeRuntimeRouter · PatchLedger · DeploymentLedger · Diagnostics  |
+|  Adapters: Declarative/CE | Frida | Unity Bridge | UE Bridge | Bridges  |
 +------------------------------------+------------------------------------+
-                                     | OS Process / Memory APIs (Win64 P2)
+                                     | Process / Hook / Loader / Emulator IPC
                                      v
-                        [ Verified Local Game Process ]
+             [ Verified Local Game Process / Mod Loader / Emulator ]
 
 Cross-cutting L4, L5, L6:
-- L4 SDK & Protocol: sdk/manifest, sdk/runtime-api, sdk/trainer-sdk, schemas/
-- L5 Community Registry: Nekod-Community index + independent GitHub repos + trainer-validator
-- L6 AI Developer Tooling (Optional): crates/nekod-mcp, skills/, prompts/
+- L4 SDK & Protocol: sdk/manifest (Trainer/ModManifest), sdk/runtime-api, sdk/trainer-sdk, schemas/
+- L5 Community Registry: Nekod-Community index + Compatibility DB + independent GitHub repos + trainer-validator
+- L6 AI Mod Forge (Optional): crates/nekod-mcp, skills/, prompts/ (Game Analysis -> Mod Generation -> Validation)
 ```
 
 ---
