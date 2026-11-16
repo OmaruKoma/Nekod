@@ -1,4 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { createBrowserPreviewApi } from "./browserPreview";
+
+export const isBrowserPreview =
+  import.meta.env.DEV &&
+  typeof window !== "undefined" &&
+  !("__TAURI_INTERNALS__" in window);
 
 export type TrustTier = "official" | "community_verified" | "unverified";
 export type CompatibilityStatus = "verified" | "experimental" | "broken" | "untested";
@@ -181,7 +187,7 @@ export interface TrainerUpdateInfo {
   trust_tier: TrustTier;
 }
 
-export const nekodApi = {
+const tauriApi = {
   rescanGames: () => invoke<LibraryGameView[]>("rescan_games"),
   listLibraryGames: () => invoke<LibraryGameView[]>("list_library_games"),
   listTrainersForGame: (gameId: string, detectedBuildId: string | null) =>
@@ -249,3 +255,5 @@ export const nekodApi = {
       trainerId,
     }),
 };
+
+export const nekodApi = isBrowserPreview ? createBrowserPreviewApi() : tauriApi;

@@ -15,6 +15,7 @@ import {
   TrainerFeature,
   TrainerUpdateInfo,
   TrustTier,
+  isBrowserPreview,
   nekodApi,
 } from "./api/nekod";
 
@@ -584,6 +585,12 @@ export default function App() {
       </aside>
 
       <main className="content">
+        {isBrowserPreview && (
+          <div className="banner">
+            Browser Preview Mode (port 1420): showing simulated IPC sample data. Launch Tauri Desktop
+            for live Windows x64 process &amp; SQLite runtime.
+          </div>
+        )}
         {error && <div className="error-banner">{error}</div>}
         {statusMsg && <div className="banner">{statusMsg}</div>}
 
