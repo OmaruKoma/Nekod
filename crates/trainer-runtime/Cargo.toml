@@ -12,6 +12,7 @@ nekod-runtime-api.workspace = true
 nekod-trainer-sdk.workspace = true
 nekod-validator.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -24,6 +25,3 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
-
-[dev-dependencies]
-serde_json.workspace = true

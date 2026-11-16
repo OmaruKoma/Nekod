@@ -317,7 +317,7 @@ pub fn run() {
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             let core = NekodAppService::open_in_dir(
                 data_dir,
-                Arc::new(CompositeRuntimeRouter::with_declarative_default()),
+                Arc::new(CompositeRuntimeRouter::with_default_providers()),
             )
             .map_err(|e| std::io::Error::other(e.to_string()))?;
             app.manage(AppState { core });

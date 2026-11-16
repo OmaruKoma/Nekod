@@ -1,6 +1,8 @@
 //! L5 manifest validator combining JSON Schema Draft 2020-12 checks
 //! with semantic and security policy invariants from `nekod-manifest`.
 
+pub mod ct_importer;
+
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;

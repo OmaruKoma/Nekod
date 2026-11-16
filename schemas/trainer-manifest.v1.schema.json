@@ -243,6 +243,7 @@
           "enum": [
             "declarative_patch_v1",
             "wasm_sandbox_v1",
+            "adapter_ipc_v1",
             "native_provider_v1"
           ]
         },

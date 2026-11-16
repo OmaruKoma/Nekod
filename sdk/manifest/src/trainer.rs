@@ -56,6 +56,8 @@ pub enum RuntimeKind {
     DeclarativePatchV1,
     #[serde(rename = "wasm_sandbox_v1")]
     WasmSandboxV1,
+    #[serde(rename = "adapter_ipc_v1")]
+    AdapterIpcV1,
     #[serde(rename = "native_provider_v1")]
     NativeProviderV1,
 }

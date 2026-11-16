@@ -82,8 +82,12 @@ pub(crate) struct ManagedSession {
     pub freeze_thread: Option<JoinHandle<()>>,
 }
 
-/// Validates mandatory L3 preflight security invariants before opening any process handle.
-pub fn validate_session_preflight(req: &StartSessionRequest) -> Result<(), RuntimeError> {
+/// Validates mandatory L3 preflight security invariants for an explicit `expected_kind`
+/// before opening any process handle or attaching an adapter.
+pub fn validate_session_preflight_for_kind(
+    req: &StartSessionRequest,
+    expected_kind: RuntimeKind,
+) -> Result<(), RuntimeError> {
     req.trainer
         .validate_semantic()
         .map_err(|e| RuntimeError::GrantMismatch(e.to_string()))?;
@@ -97,7 +101,7 @@ pub fn validate_session_preflight(req: &StartSessionRequest) -> Result<(), Runti
         ));
     }
 
-    if req.trainer.runtime.kind != RuntimeKind::DeclarativePatchV1 {
+    if req.trainer.runtime.kind != expected_kind {
         return Err(RuntimeError::UntrustedRuntimeBlocked(
             req.trainer.runtime.kind,
             req.granted_permissions.trust_tier,
@@ -142,6 +146,11 @@ pub fn validate_session_preflight(req: &StartSessionRequest) -> Result<(), Runti
     }
 
     Ok(())
+}
+
+/// Validates mandatory L3 preflight security invariants before opening any process handle.
+pub fn validate_session_preflight(req: &StartSessionRequest) -> Result<(), RuntimeError> {
+    validate_session_preflight_for_kind(req, RuntimeKind::DeclarativePatchV1)
 }
 
 /// Checks active processes against known kernel/user-mode anti-cheat services.

@@ -201,6 +201,9 @@ pub enum RuntimeError {
     #[error("patch rollback failed for feature '{feature_id}': {reason}")]
     RollbackFailed { feature_id: String, reason: String },
 
+    #[error("runtime execution error: {0}")]
+    ExecutionFailed(String),
+
     #[error("runtime operation not implemented in current milestone: {0}")]
     NotImplemented(&'static str),
 }

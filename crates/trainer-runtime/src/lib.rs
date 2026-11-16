@@ -5,8 +5,10 @@
 //! declarative patch operations (`byte_patch`, `write_value`), and performs safe
 //! 5-step LIFO rollback via `PatchLedger`.
 
+pub mod adapter_ipc;
 pub mod aob;
 pub mod backend;
+pub mod deployment;
 pub mod ledger;
 pub mod linux;
 pub mod router;
@@ -25,8 +27,14 @@ use nekod_runtime_api::{
     RuntimeSessionId, StartSessionRequest,
 };
 
+pub use adapter_ipc::{
+    AdapterFeatureBinding, AdapterIpcPayload, AdapterIpcRuntime, AdapterProtocol,
+};
 pub use backend::{
     MemoryRegionInfo, ModuleInfo, ProcessAccessMode, ProcessHandle, ProcessMemoryBackend,
+};
+pub use deployment::{
+    DeploymentError, DeploymentLedger, DeploymentRecord, DeploymentState, UndeployReport,
 };
 pub use ledger::{PatchLedger, RollbackReport};
 pub use router::CompositeRuntimeRouter;

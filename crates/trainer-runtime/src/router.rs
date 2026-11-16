@@ -10,7 +10,7 @@ use nekod_runtime_api::{
     RuntimeSessionId, StartSessionRequest,
 };
 
-use crate::DeclarativeRuntime;
+use crate::{AdapterIpcRuntime, DeclarativeRuntime};
 
 /// Dispatches trainer runtime sessions across registered `RuntimeProvider` engines
 /// keyed by `TrainerManifest.runtime.kind`.
@@ -20,9 +20,17 @@ pub struct CompositeRuntimeRouter {
 }
 
 impl CompositeRuntimeRouter {
-    /// Creates a router pre-loaded with the default `DeclarativeRuntime` for `declarative_patch_v1`.
+    /// Creates a router pre-loaded with `DeclarativeRuntime` for `declarative_patch_v1`.
     pub fn with_declarative_default() -> Self {
         Self::with_declarative(Arc::new(DeclarativeRuntime::new()))
+    }
+
+    /// Creates a router pre-loaded with all safe built-in providers (`declarative_patch_v1`
+    /// and zero-injection `adapter_ipc_v1`).
+    pub fn with_default_providers() -> Self {
+        let mut router = Self::with_declarative_default();
+        router.register_provider(Arc::new(AdapterIpcRuntime::new()));
+        router
     }
 
     /// Creates a router backed by an explicit `declarative_patch_v1` provider.
@@ -52,6 +60,9 @@ impl CompositeRuntimeRouter {
             .ok_or(match kind {
                 RuntimeKind::WasmSandboxV1 => {
                     RuntimeError::NotImplemented("wasm_sandbox_v1 provider not registered")
+                }
+                RuntimeKind::AdapterIpcV1 => {
+                    RuntimeError::NotImplemented("adapter_ipc_v1 provider not registered")
                 }
                 RuntimeKind::NativeProviderV1 => {
                     RuntimeError::NotImplemented("native_provider_v1 provider not enabled")
