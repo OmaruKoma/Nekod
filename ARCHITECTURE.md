@@ -93,13 +93,13 @@ Cross-cutting L4, L5, L6:
 - **`sdk/runtime-api`:** UI-independent traits (`RuntimeProvider`), commands (`AttachRequest`, `FeatureCommand`), state snapshots (`SessionState`, `FeatureStatus`), `PatchRecord`, and typed `RuntimeError`s.
 - **`sdk/trainer-sdk`:** Authoring primitives (`TrainerDefinition`, `DeclarativeFeature`, `MemoryPatchOp`) so trainer authors target a stable SDK rather than Nekod internal crates.
 
-### L5 — Community Registry & Ecosystem (`community/`, `tools/trainer-validator/`)
-- **Hybrid Repository Model:**
-  - `Nekod` — Main application, core, runtime, SDK.
-  - `Nekod-Community` — Metadata index aggregating official and independent third-party trainer repositories.
-  - `Nekod-Official-Trainers` — Officially maintained trainers (`TrustTier::Official`).
+### L5 — Community Registry & Decentralized Mod Buckets (`community/`, `tools/trainer-validator/`)
+- **Homebrew/Scoop-Style Recipe Buckets ([ADR-020](TECHNICAL_DECISIONS.md#adr-020-homebrewscoop-style-decentralized-script-buckets--nmod-source-first-package-format)):**
+  - `Nekod` — Main application, core, multi-engine runtime, SDK.
+  - `Nekod-Community` — Metadata index aggregating official and independent third-party GitHub **Mod Buckets** (`RegistryManifest`).
+  - `Nekod-Official-Trainers` — Officially maintained declarative/script packages (`TrustTier::Official`).
   - `Nekod-Skills` & `Nekod-Docs` — Documentation and optional contributor workflows (hosted inside `skills/`, `prompts/`, `docs/` in this monorepo during early development).
-- **Ownership Principle:** `Nekod-Community` stores pointers and verified metadata (`RegistryManifest`), not copies of all third-party trainer binaries. Authors keep full ownership of their GitHub repositories.
+- **Source-First `.nmod` & Ownership Principle:** Instead of acting as a binary re-host mirror for closed-source `.exe` trainers or copyrighted assets, community buckets host human-readable `.nmod` recipes (declarative patches, config rules, lightweight scripts) and pinned upstream loader coordinates (`url` + `sha256` + license metadata). Authors retain full ownership of their GitHub repositories.
 - **Validation Gate:** `tools/trainer-validator` (`nekod-validator`) runs both locally and in GitHub Actions to enforce JSON Schema validity, SemVer rules, permission sanity, and prohibited path/URL patterns before registry inclusion.
 
 ### L6 — AI Developer Tooling (`crates/nekod-mcp`, `skills/`, `prompts/`)

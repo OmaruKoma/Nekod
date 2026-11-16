@@ -220,8 +220,24 @@ This document records significant architectural choices, the alternatives consid
 
 ---
 
+## ADR-020: Homebrew/Scoop-Style Decentralized Script Buckets & `.nmod` Source-First Package Format
+
+- **Status:** Accepted (Architecture Direction for Distribution & Packaging)
+- **Context:** Redistributing third-party closed-source `.exe` trainers or copyrighted game asset archives creates severe copyright, license, malware supply-chain, and PR review bottlenecks. By contrast, package ecosystems such as Homebrew (formulas/taps) and Scoop (JSON app manifests/buckets) prove that lightweight, human-readable text recipes referencing verified upstream download URLs + SHA-256 digests scale openly via Git.
+- **Decision:**
+  1. **Recipe & Script Distribution Over Binary Mirroring:** Nekod operates as a decentralized script/recipe bucket platform rather than a binary mirror for opaque third-party `.exe` trainers or pirated asset packs.
+  2. **`.nmod` Standardized Source-First Format:** Encapsulate mod logic as inspectable declarative configurations + lightweight auditable scripts (JSON/TOML manifests, AOB/pointer/config rules, constrained Lua/JS scripts) packaged in `.nmod` bundles.
+  3. **Upstream Pinned Coordinates:** Required external frameworks/loaders (`BepInEx`, `UE4SS`, `REFramework`, etc.) are referenced via pinned upstream URLs, explicit `sha256` checksums, and upstream license declarations—resolved and verified locally by the Runtime Dependency Manager rather than bundled illegally or blindly trusted.
+- **Consequences:** Resolves four core ecosystem challenges simultaneously:
+  - **Copyright & Licensing Compliance:** No unauthorized redistribution of closed-source trainers or copyrighted assets.
+  - **Supply-Chain Security:** Every recipe and script line is plain-text inspectable and hash-pinned.
+  - **Git PR Reviewability:** Community buckets live cleanly in standard GitHub repositories with line-by-line diffs and CI linting.
+  - **AI Mod Forge Native Fit:** AI Agents naturally generate structured `.nmod` text recipes and scripts that humans and automated validators can audit before publication.
+
+---
+
 ## Summary of Unresolved Engineering Questions
 
 The full register of unresolved questions, trade-offs, and impact timelines lives in [`docs/unresolved-questions.md`](docs/unresolved-questions.md). All initial **U1**–**U11** architectural questions now have accepted ADRs:
 
-*(Resolved in P0–P5: **U1**–**U11**; Platform Expansion ADR-019 recorded for V1.1+/V2 protocol refactor.)*
+*(Resolved in P0–P5: **U1**–**U11**; Platform Expansion ADR-019 and `.nmod` Bucket Distribution ADR-020 recorded for V1.1+/V2 evolution.)*

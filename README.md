@@ -15,7 +15,7 @@ Nekod unifies fragmented PC game modification ecosystems—Trainers, Cheat Engin
 
 1. **Player First** — Automatic game & engine discovery, clean feature toggles, hotkeys, managed loader cleanup (`DeploymentLedger`), and safe rollback (`PatchLedger`).
 2. **Unified Mod Management, Heterogeneous Runtimes** — Common lifecycle, capability checks, and compatibility metadata across distinct runtime adapters without forcing one execution model onto every game engine.
-3. **Community Driven** — Any developer can maintain mods and trainers in independent GitHub repositories and register metadata in the community index.
+3. **Community Recipe Buckets (Homebrew / Scoop Model)** — Independent GitHub buckets host source-first `.nmod` packages (readable declarative configs, AOB/pointer rules, and lightweight scripts) with SHA-256-pinned upstream loader references instead of opaque closed-source `.exe` mirrors ([ADR-020](TECHNICAL_DECISIONS.md#adr-020-homebrewscoop-style-decentralized-script-buckets--nmod-source-first-package-format)).
 4. **Open Standards** — Versioned JSON Schemas for games, mods/trainers, compatibility records, and registries.
 5. **AI Mod Forge (Developer-Only & Optional)** — MCP tools, model-independent Agent Skills, and prompts help contributors analyze games and generate verifiable mods while requiring runtime validation and human review before publication.
 6. **Security First** — Default-deny execution for untrusted scripts/modules, explicit permission & license-aware dependency governance, process identity/version checks, and strict anti-cheat/singleplayer boundaries.

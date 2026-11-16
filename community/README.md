@@ -1,17 +1,21 @@
-# L5 — Community Registry & Ecosystem (`community/`)
+# L5 — Community Registry & Decentralized Mod Buckets (`community/`)
 
-**Status:** Protocol defined in **P0**, Registry client, artifact verification & CI workflow templates active in **P3**
+**Status:** Registry protocol & CI checks active in **P3**; evolving toward Homebrew/Scoop-style `.nmod` recipe buckets ([ADR-020](../TECHNICAL_DECISIONS.md#adr-020-homebrewscoop-style-decentralized-script-buckets--nmod-source-first-package-format))
 
-Nekod uses a hybrid community repository model:
-- `Nekod` — Main desktop application, core, runtime, and SDK.
-- `Nekod-Community` — Metadata index aggregating official and independent third-party trainer repositories via [`RegistryManifest`](../docs/specs/registry-manifest.md) entries.
-- `Nekod-Official-Trainers` — Officially maintained trainers (`official` trust tier).
+Nekod operates as a decentralized **script & recipe bucket ecosystem** (inspired by Homebrew taps and Scoop buckets) rather than a central host mirroring closed-source `.exe` trainers or copyrighted assets:
+- `Nekod` — Main desktop application, core, multi-engine runtime, and SDK.
+- `Nekod-Community` — Metadata index aggregating official and independent GitHub **Mod Buckets** via [`RegistryManifest`](../docs/specs/registry-manifest.md) entries.
+- `Nekod-Official-Trainers` — Officially maintained declarative/script packages (`official` trust tier).
+
+## Core Distribution Principle (Source-First `.nmod` Buckets)
+- **Readable Recipes, Not Opaque `.exe` Mirrors:** Community packages store human-readable `ModManifest` / `TrainerManifest` declarations, AOB/pointer/config rules, and lightweight scripts (Lua/JS), enabling Git line-by-line PR review, supply-chain auditability, and AI Mod Forge generation.
+- **Pinned Upstream Dependencies:** External loaders (`BepInEx`, `UE4SS`, `REFramework`, etc.) are declared with pinned upstream coordinates + SHA-256 checksums + license metadata rather than illegally bundled binaries.
 
 ## Publishing Workflow for Independent Developers
-1. Create a trainer using `sdk/trainer-sdk` or compatible tooling.
-2. Generate `trainer-manifest.json` conforming to [`schemas/trainer-manifest.v1.schema.json`](../schemas/trainer-manifest.v1.schema.json).
+1. Create a package using `sdk/trainer-sdk`, `nekod-validator import-ct`, or AI Mod Forge tooling, targeting `.nmod` source-first conventions.
+2. Generate `trainer-manifest.json` (evolving to `mod-manifest.json` in V2-M1) conforming to versioned JSON Schemas.
 3. Validate locally using `nekod-validator` (`tools/trainer-validator`).
-4. Publish source and SHA-256-verified release artifacts in your own GitHub repository.
+4. Host the text recipe/script package and SHA-256-verified metadata in your own GitHub bucket repository.
 5. Register your repository metadata (`RegistryManifest`) with `Nekod-Community`.
 
 ## Governance Rules

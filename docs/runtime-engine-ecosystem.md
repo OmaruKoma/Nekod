@@ -4,7 +4,24 @@
 > **Nekod — Modding games, together.**  
 > **Open-source Community Mod Platform — Discover, create, manage, and share game modifications.**
 >
-> Nekod 不止于单一的 Trainer 启动器或 WeMod 替代品，而是把分散在 GitHub、网盘、论坛、`.CT` 表格、各类 Mod Loader 与游戏专用脚本生态里的修改能力，统一收敛到同一套开放协议与安全边界下；同时通过 **Player Ecosystem** 与 **Developer / AI Mod Forge** 双生态闭环，既让普通玩家零门槛开箱即用，也让开发者与 AI Agent 能分析游戏、生成 Mod 并经实测验证后发布到社区。
+> **分发哲学（Homebrew / Scoop 模式，见 [ADR-020](../TECHNICAL_DECISIONS.md#adr-020-homebrewscoop-style-decentralized-script-buckets--nmod-source-first-package-format)）：**
+> Nekod 不做第三方闭源 `.exe` 修改器或盗版资源包的“二进制搬运工”，而是转型为 **去中心化脚本配方仓库（Mod Buckets） + 标准化 `.nmod` 源码级打包格式**：
+> 将修改逻辑沉淀为人类可读的声明式配置（AOB / 指针 / 参数规则）+ 轻量脚本（Lua / JS）+ 锁定 SHA-256 的上游官方 Loader 引用，一次性解决 **版权合规、供应链安全、Git PR 逐行审查、AI 自动化生产** 四大核心难题。
+
+---
+
+## 0. `.nmod` 配方包与去中心化 Bucket 模型
+
+```text
+example-game.nmod (标准源级配方包)
+├── mod-manifest.json      # 声明 mod_kind、目标游戏/版本、权限与上游 Loader SHA-256 依赖
+├── rules / patches        # 声明式 AOB、指针链、配置文件调优规则（纯文本可 diff）
+└── scripts/               # 可选轻量 Lua / JS / 受限 AA 脚本（非黑盒二进制 .exe）
+```
+
+1. **版权与许可证合规：** 不镜像盗版纹理/模型/音乐或闭源第三方修改器；需要 `BepInEx` / `UE4SS` / `REFramework` 时，由依赖管理器按 `ModManifest` 中的上游发布地址与 `SHA-256` 在用户本机拉取校验或识别现有安装。
+2. **供应链透明与 Git 协作：** 每个 `.nmod` 都可以放在标准 GitHub 仓库（社区 Bucket）里做轻量文本维护、PR 审查和语义化版本发布。
+3. **AI 天然可生成：** 大模型无需编译不透明二进制，只需要产出结构化 `.nmod` 配置与受控脚本，即可进入 `nekod-validator` 与沙箱验证流水线。
 
 ---
 
