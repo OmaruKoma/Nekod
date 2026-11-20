@@ -1,5 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  Check,
+  ChevronRight,
+  Copy,
+  Cpu,
+  Download,
+  FolderInput,
+  FolderOpen,
+  Globe,
+  Keyboard,
+  Layers,
+  Package,
+  Play,
+  Power,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Search,
+  Settings,
+  Shield,
+  ShieldAlert,
+  SlidersHorizontal,
+  Star,
+  Terminal,
+  Trash2,
+  Volume2,
+  VolumeX,
+  X,
+  Zap,
+} from "lucide-react";
+import {
   BridgeDeploymentStatus,
   CommunityTrainerView,
   CompanionBridgeCatalogEntry,
@@ -89,22 +122,12 @@ function gameMonogram(title: string): string {
   return title.slice(0, 2).toUpperCase() || "GM";
 }
 
-function monogramGradient(seed: string): string {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-  }
-  const hue1 = hash % 360;
-  const hue2 = (hue1 + 42) % 360;
-  return `linear-gradient(135deg, hsl(${hue1}, 52%, 28%) 0%, hsl(${hue2}, 58%, 22%) 100%)`;
-}
-
-function trustBadge(tier: TrustTier) {
-  if (tier === "official") return <span className="badge official">Official</span>;
+function trustTag(tier: TrustTier) {
+  if (tier === "official") return <span className="tag official">Official</span>;
   if (tier === "community_verified") {
-    return <span className="badge community">Community Verified</span>;
+    return <span className="tag community">Verified</span>;
   }
-  return <span className="badge unverified">Unverified</span>;
+  return <span className="tag unverified">Unverified</span>;
 }
 
 export default function App() {
@@ -131,8 +154,9 @@ export default function App() {
   const [logs, setLogs] = useState<DiagnosticEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [copiedPath, setCopiedPath] = useState(false);
 
-  // Direction 1: Sound FX, Auto-Attach, Global Hotkey count & HUD Toasts
+  // Sound FX, Auto-Attach, Global Hotkey count & HUD Toasts
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() =>
     loadStoredBool(SOUND_STORAGE_KEY, true),
   );
@@ -164,7 +188,7 @@ export default function App() {
   const [featureInputs, setFeatureInputs] = useState<Record<string, string>>({});
   const [awaitingPermInject, setAwaitingPermInject] = useState<string | null>(null);
 
-  // Direction 4: Built-in Companion Bridge Bucket & DeploymentLedger state
+  // Built-in Companion Bridge Bucket & DeploymentLedger state
   const [bridgeCatalog, setBridgeCatalog] = useState<CompanionBridgeCatalogEntry[]>(
     [],
   );
@@ -230,6 +254,17 @@ export default function App() {
     }, 3200);
   }
 
+  async function handleCopyInstallPath(path: string) {
+    try {
+      await navigator.clipboard?.writeText(path);
+      setCopiedPath(true);
+      pushHudToast("已复制安装目录路径", "info");
+      window.setTimeout(() => setCopiedPath(false), 1800);
+    } catch {
+      setStatusMsg(`安装路径: ${path}`);
+    }
+  }
+
   function toggleFavorite(gameKey: string) {
     setFavoriteKeys((prev) => {
       const next = new Set(prev);
@@ -270,7 +305,7 @@ export default function App() {
       }
       pushHudToast(
         next
-          ? "🔄 已开启自动附着：检测到已授权游戏启动将自动注入"
+          ? "已开启自动附着：检测到已授权游戏启动将自动注入"
           : "已关闭自动附着模式",
         "info",
       );
@@ -338,7 +373,7 @@ export default function App() {
     void refreshAll(true);
   }, []);
 
-  // Direction 3: Background lightweight check of which library games are currently running
+  // Background lightweight check of which library games are currently running
   useEffect(() => {
     let cancelled = false;
     async function pollRunningLibraryGames() {
@@ -441,6 +476,7 @@ export default function App() {
     setSelectedGame(entry);
     setStatusMsg(null);
     setError(null);
+    setCopiedPath(false);
     setAwaitingPermInject(null);
     setRunningProcs([]);
     setSelectedPid(null);
@@ -536,7 +572,7 @@ export default function App() {
       if (!fromAutoAttach) {
         if (soundEnabled) soundFx.error();
         setError(
-          "未检测到运行中的游戏进程。请先启动游戏（或直接点「▶ 启动游戏并注入」）。",
+          "未检测到运行中的游戏进程。请先启动游戏（或直接点「启动游戏并注入」）。",
         );
       }
       return;
@@ -560,8 +596,8 @@ export default function App() {
       setLogs(await nekodApi.getDiagnosticLogs());
       if (soundEnabled) soundFx.injectSuccess();
       const msg = fromAutoAttach
-        ? `⚡ 已自动注入「${trainer.name}」→ ${proc.process_name} (PID ${proc.pid})`
-        : `⚡ 已注入「${trainer.name}」→ ${proc.process_name} (PID ${proc.pid})`;
+        ? `已自动注入「${trainer.name}」 -> ${proc.process_name} (PID ${proc.pid})`
+        : `已注入「${trainer.name}」 -> ${proc.process_name} (PID ${proc.pid})`;
       setStatusMsg(msg);
       pushHudToast(msg, "ok");
     } catch (e) {
@@ -593,7 +629,7 @@ export default function App() {
     if (trainer.permission_state.status === "requires_confirmation") {
       setAwaitingPermInject(trainer.trainer_id);
       setStatusMsg(
-        `「${trainer.name}」需要您确认声明的运行权限，请在下方权限卡片点击「✓ 确认权限并立即注入」。`,
+        `「${trainer.name}」需要确认声明的运行权限，请在下方点击「确认权限并立即注入」。`,
       );
       return;
     }
@@ -605,12 +641,11 @@ export default function App() {
     await startSessionInternal(trainer, procs, false);
   }
 
-  // Direction 2: Play & Inject (Launch game via Steam URI or validated executable, then auto-attach)
   async function handlePlayAndInject() {
     if (!selectedGame) return;
     if (hasAntiCheatMarkers) {
       if (soundEnabled) soundFx.error();
-      setError("检测到反作弊保护标记，无法对该游戏启用「启动并注入」。");
+      setError("检测到反作弊保护标记，无法对该游戏启用「启动游戏并注入」。");
       return;
     }
     try {
@@ -630,7 +665,7 @@ export default function App() {
         setAwaitingPermInject(selectedTrainer.trainer_id);
       }
       if (soundEnabled) soundFx.toggleOn();
-      const note = `🚀 已启动游戏 (${launched.target})，正在等待进程出现后自动注入...`;
+      const note = `已启动游戏 (${launched.target})，正在等待进程出现后自动注入...`;
       setStatusMsg(note);
       pushHudToast(note, "info");
     } catch (e) {
@@ -641,7 +676,6 @@ export default function App() {
     }
   }
 
-  // Direction 1 & 2: Auto-Attach polling loop when Auto-Attach is ON or Play & Inject is waiting
   const autoAttachRef = useRef({
     selectedGame,
     selectedTrainer,
@@ -749,7 +783,7 @@ export default function App() {
       setActiveToggles({});
       setLogs(await nekodApi.getDiagnosticLogs());
       if (soundEnabled) soundFx.uninject();
-      const msg = `⏏ 已解除注入并按 LIFO 顺序完成回滚（冲突: ${diag.rollback_conflicts}，失败: ${diag.rollback_failures}）`;
+      const msg = `已解除注入并按 LIFO 顺序完成回滚（冲突: ${diag.rollback_conflicts}，失败: ${diag.rollback_failures}）`;
       setStatusMsg(msg);
       pushHudToast(msg, "info");
     } catch (e) {
@@ -760,7 +794,6 @@ export default function App() {
     }
   }
 
-  // Direction 4: Zero-path-typing auto deploy from Built-in Companion Bridge Bucket!
   async function handleAutoDeployBridge(customOverride: string | null = null) {
     if (!selectedGame) return;
     try {
@@ -785,7 +818,7 @@ export default function App() {
       }
       setLogs(await nekodApi.getDiagnosticLogs());
       if (soundEnabled) soundFx.injectSuccess();
-      const msg = `📦 已自动识别 ${ENGINE_LABELS[next.engine]} 并部署伴生桥接 (${next.active_files.join(", ")})`;
+      const msg = `已自动识别 ${ENGINE_LABELS[next.engine]} 并部署伴生桥接 (${next.active_files.join(", ")})`;
       setStatusMsg(msg);
       pushHudToast(msg, "ok");
     } catch (e) {
@@ -801,7 +834,7 @@ export default function App() {
     const src = bridgeSourceInput.trim();
     const target = bridgeTargetInput.trim();
     if (!src || !target) {
-      setError("请填写本地源插件路径与目标相对路径，或直接点「一键自动部署」。");
+      setError("请填写本地源插件路径与目标相对路径，或直接点击「一键自动部署」。");
       return;
     }
     try {
@@ -848,7 +881,7 @@ export default function App() {
       }
       setLogs(await nekodApi.getDiagnosticLogs());
       if (soundEnabled) soundFx.uninject();
-      const msg = `🧹 已解除伴生桥接：移除 ${summary.removed_count} 个文件，还原 ${summary.restored_originals} 个原文件（冲突: ${summary.conflicts}）`;
+      const msg = `已解除伴生桥接：移除 ${summary.removed_count} 个文件，还原 ${summary.restored_originals} 个原文件（冲突: ${summary.conflicts}）`;
       setStatusMsg(msg);
       pushHudToast(msg, "info");
     } catch (e) {
@@ -911,13 +944,13 @@ export default function App() {
         }
         const suffix = triggeredHotkey ? ` (${triggeredHotkey})` : "";
         pushHudToast(
-          `${nextToggleVal ? "●" : "○"} ${feature.name} ${nextToggleVal ? "已开启" : "已关闭"}${suffix}`,
+          `${feature.name} ${nextToggleVal ? "已开启" : "已关闭"}${suffix}`,
           nextToggleVal ? "ok" : "info",
         );
       } else {
         if (soundEnabled) soundFx.toggleOn();
         const suffix = triggeredHotkey ? ` (${triggeredHotkey})` : "";
-        pushHudToast(`✓ 已执行：${feature.name}${suffix}`, "ok");
+        pushHudToast(`已执行：${feature.name}${suffix}`, "ok");
       }
       const [diag, logList] = await Promise.all([
         nekodApi.getSessionDiagnostics(activeSessionId),
@@ -938,7 +971,6 @@ export default function App() {
     }
   }
 
-  // Direction 1: Sync active trainer hotkeys to OS-level GlobalHotkeyService & listen for events
   useEffect(() => {
     if (!activeSessionId || !activeTrainerId) {
       void nekodApi.syncGlobalHotkeys([]).then(setGlobalHotkeyCount);
@@ -1299,7 +1331,6 @@ export default function App() {
     }
   }
 
-  // Fallback in-window hotkey handler (works in Browser Preview and when focused)
   useEffect(() => {
     if (!activeSessionId || !activeTrainerId || !isBrowserPreview) return;
     const trainer = trainers.find((t) => t.trainer_id === activeTrainerId);
@@ -1343,7 +1374,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeSessionId, activeTrainerId, trainers, profilesByTrainer, activeToggles]);
 
-  // Direction 3: Smart sorted & filtered Game List (Injected -> Running -> Favorites -> Alpha)
   const filteredGames = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = games.filter((g) => {
@@ -1410,69 +1440,122 @@ export default function App() {
         selectedGame.game.executable_path),
   );
 
+  const mergedMetaItems = useMemo(() => {
+    if (!selectedGame) return [];
+    const items: string[] = [
+      selectedGame.game.store_source.toUpperCase(),
+      selectedGame.game.platform,
+    ];
+    if (selectedGame.game.store_build_id) {
+      items.push(`Build ${selectedGame.game.store_build_id}`);
+    }
+    if (gameEnv) {
+      items.push(ENGINE_LABELS[gameEnv.engine]);
+      if (gameEnv.installed_loaders.length > 0) {
+        const loadersText = gameEnv.installed_loaders
+          .map((l) =>
+            l.detected_version ? `${l.kind} ${l.detected_version}` : l.kind,
+          )
+          .join(", ");
+        items.push(loadersText);
+      }
+    }
+    if (bridgeStatus?.deployed) {
+      items.push(`桥接已部署 (${bridgeStatus.active_files.length})`);
+    }
+    return items;
+  }, [selectedGame, gameEnv, bridgeStatus]);
+
+  function switchSecondaryTab(next: Exclude<NavTab, "workbench">) {
+    if (tab === next && selectedGame) {
+      setTab("workbench");
+    } else {
+      setTab(next);
+    }
+  }
+
   return (
     <div className="workbench-shell">
-      {/* ==================== LEFT PANE: 游戏列表 ==================== */}
+      {/* ==================== LEFT SIDEBAR ==================== */}
       <aside className="game-sidebar">
         <div className="sidebar-top">
           <div className="brand-row">
-            <div>
+            <div className="brand-group">
               <h1 className="brand-title">Nekod</h1>
-              <p className="brand-sub">Modding games, together.</p>
+              <span className="brand-tag">v0.1</span>
             </div>
             <button
-              className="btn btn-secondary btn-sm"
+              className="icon-btn"
               disabled={busyAction === "rescan"}
               onClick={() => void handleRescan()}
-              title="重新扫描 Steam 与自定义游戏目录"
+              title="重新扫描游戏目录"
+              aria-label="重新扫描游戏目录"
             >
-              {busyAction === "rescan" ? "扫描中..." : "刷新"}
+              <RefreshCw
+                size={14}
+                strokeWidth={1.5}
+                className={busyAction === "rescan" ? "spin" : ""}
+                aria-hidden="true"
+              />
             </button>
           </div>
-          <input
-            className="search-input sidebar-search"
-            placeholder="搜索游戏列表..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+
+          <div className="search-wrap">
+            <Search
+              size={14}
+              strokeWidth={1.5}
+              className="search-icon"
+              aria-hidden="true"
+            />
+            <input
+              className="sidebar-search"
+              placeholder="筛选游戏..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="segmented-wrap">
+          <div className="segmented-control" role="tablist" aria-label="游戏列表筛选">
+            <button
+              className={`segmented-btn ${sidebarFilter === "all" ? "active" : ""}`}
+              onClick={() => setSidebarFilter("all")}
+            >
+              <span>全部</span>
+              <span className="seg-count">{games.length}</span>
+            </button>
+            <button
+              className={`segmented-btn ${sidebarFilter === "favorites" ? "active" : ""}`}
+              onClick={() => setSidebarFilter("favorites")}
+            >
+              <span>收藏</span>
+              <span className="seg-count">{favoriteKeys.size}</span>
+            </button>
+            <button
+              className={`segmented-btn ${sidebarFilter === "running" ? "active" : ""}`}
+              onClick={() => setSidebarFilter("running")}
+            >
+              <span>运行</span>
+              <span className="seg-count">{runningGameKeys.size}</span>
+            </button>
+          </div>
         </div>
 
         <div className="sidebar-section-header">
           <span>游戏列表 ({filteredGames.length})</span>
           {activeSessionId ? (
-            <span style={{ color: "var(--ok)", fontWeight: 700 }}>● 注入中</span>
-          ) : runningGameKeys.size > 0 ? (
-            <span style={{ color: "#38bdf8", fontWeight: 700 }}>
-              ● {runningGameKeys.size} 运行中
+            <span className="sidebar-live-label">
+              <span className="status-dot ok" />
+              <span>已注入</span>
             </span>
           ) : null}
         </div>
 
-        <div className="filter-chips">
-          <button
-            className={`filter-chip ${sidebarFilter === "all" ? "active" : ""}`}
-            onClick={() => setSidebarFilter("all")}
-          >
-            全部
-          </button>
-          <button
-            className={`filter-chip ${sidebarFilter === "favorites" ? "active" : ""}`}
-            onClick={() => setSidebarFilter("favorites")}
-          >
-            ★ 收藏 ({favoriteKeys.size})
-          </button>
-          <button
-            className={`filter-chip ${sidebarFilter === "running" ? "active" : ""}`}
-            onClick={() => setSidebarFilter("running")}
-          >
-            ● 运行 ({runningGameKeys.size})
-          </button>
-        </div>
-
         <div className="game-list">
           {filteredGames.length === 0 ? (
-            <div className="muted" style={{ padding: "12px 6px", lineHeight: 1.5 }}>
-              当前筛选下没有匹配游戏。可切换「全部」，或在下方「设置安全」添加自定义游戏目录。
+            <div className="muted" style={{ padding: "10px 6px" }}>
+              当前筛选下无匹配游戏。可切换至「全部」或在设置中添加游戏目录。
             </div>
           ) : (
             filteredGames.map((item) => {
@@ -1491,7 +1574,9 @@ export default function App() {
               return (
                 <div
                   key={item.library_key}
-                  className={`game-list-item ${isSelected ? "active" : ""}`}
+                  className={`game-list-item ${isSelected ? "active" : ""} ${
+                    isInjected ? "is-injected" : ""
+                  }`}
                   role="button"
                   tabIndex={0}
                   onClick={() => void openGame(item, true)}
@@ -1510,12 +1595,7 @@ export default function App() {
                         alt={item.game.title}
                       />
                     ) : (
-                      <div
-                        className="game-thumb-monogram"
-                        style={{
-                          background: monogramGradient(item.game.title),
-                        }}
-                      >
+                      <div className="game-thumb-monogram">
                         {gameMonogram(item.game.title)}
                       </div>
                     )}
@@ -1529,50 +1609,43 @@ export default function App() {
                               ? "bridge-ready"
                               : ""
                       }`}
-                      title={
-                        isInjected
-                          ? "已注入运行中"
-                          : isRunning
-                            ? "游戏进程运行中"
-                            : isBridgeDeployed
-                              ? "已部署伴生桥接"
-                              : "未运行"
-                      }
                     />
                   </div>
                   <div className="game-list-meta">
                     <div className="game-list-title">{item.game.title}</div>
                     <div className="game-list-sub">
                       <span>{item.game.store_source.toUpperCase()}</span>
-                      <span>&middot;</span>
-                      <span>{item.trainer_count} 模组</span>
+                      <span>·</span>
+                      <span>{item.trainer_count} mod</span>
                       {isInjected && (
                         <>
-                          <span>&middot;</span>
-                          <span style={{ color: "#86efac", fontWeight: 600 }}>
-                            已注入
-                          </span>
+                          <span>·</span>
+                          <span className="game-list-state-ok">injected</span>
                         </>
                       )}
                       {!isInjected && isRunning && (
                         <>
-                          <span>&middot;</span>
-                          <span style={{ color: "#7dd3fc", fontWeight: 600 }}>
-                            运行中
-                          </span>
+                          <span>·</span>
+                          <span className="game-list-state-run">running</span>
                         </>
                       )}
                     </div>
                   </div>
                   <button
                     className={`fav-btn ${isFav ? "starred" : ""}`}
-                    title={isFav ? "取消收藏置顶" : "收藏置顶"}
+                    title={isFav ? "取消收藏" : "收藏置顶"}
+                    aria-label={isFav ? "取消收藏" : "收藏置顶"}
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleFavorite(item.library_key);
                     }}
                   >
-                    {isFav ? "★" : "☆"}
+                    <Star
+                      size={14}
+                      strokeWidth={1.5}
+                      fill={isFav ? "currentColor" : "none"}
+                      aria-hidden="true"
+                    />
                   </button>
                 </div>
               );
@@ -1580,34 +1653,32 @@ export default function App() {
           )}
         </div>
 
-        <nav className="bottom-nav" aria-label="Secondary navigation">
+        {/* Bottom Single-Column Compact Vertical Navigation */}
+        <nav className="sidebar-nav" aria-label="Secondary navigation">
           <button
-            className={`nav-pill span-2 ${tab === "workbench" ? "active" : ""}`}
-            onClick={() => setTab("workbench")}
+            className={`sidebar-nav-item ${tab === "community" ? "active" : ""}`}
+            onClick={() => switchSecondaryTab("community")}
           >
-            模组工作台
+            <Globe size={15} strokeWidth={1.5} aria-hidden="true" />
+            <span>社区源</span>
+            {updates.length > 0 && (
+              <span className="sidebar-nav-badge">{updates.length}</span>
+            )}
           </button>
           <button
-            className={`nav-pill ${tab === "community" ? "active" : ""}`}
-            onClick={() => setTab("community")}
+            className={`sidebar-nav-item ${tab === "import" ? "active" : ""}`}
+            onClick={() => switchSecondaryTab("import")}
           >
-            社区源{updates.length > 0 ? ` (${updates.length})` : ""}
+            <FolderInput size={15} strokeWidth={1.5} aria-hidden="true" />
+            <span>本地导入</span>
           </button>
           <button
-            className={`nav-pill ${tab === "import" ? "active" : ""}`}
-            onClick={() => setTab("import")}
-          >
-            本地导入
-          </button>
-          <button
-            className={`nav-pill ${tab === "settings" ? "active" : ""}`}
-            onClick={() => setTab("settings")}
-          >
-            设置安全
-          </button>
-          <button
-            className={`nav-pill ${tab === "logs" ? "active" : ""}`}
+            className={`sidebar-nav-item ${tab === "logs" ? "active" : ""}`}
             onClick={async () => {
+              if (tab === "logs" && selectedGame) {
+                setTab("workbench");
+                return;
+              }
               setTab("logs");
               try {
                 setLogs(await nekodApi.getDiagnosticLogs());
@@ -1616,7 +1687,15 @@ export default function App() {
               }
             }}
           >
-            诊断日志
+            <Terminal size={15} strokeWidth={1.5} aria-hidden="true" />
+            <span>诊断日志</span>
+          </button>
+          <button
+            className={`sidebar-nav-item ${tab === "settings" ? "active" : ""}`}
+            onClick={() => switchSecondaryTab("settings")}
+          >
+            <Settings size={15} strokeWidth={1.5} aria-hidden="true" />
+            <span>设置安全</span>
           </button>
         </nav>
       </aside>
@@ -1627,206 +1706,309 @@ export default function App() {
           <div className="top-banners">
             {isBrowserPreview && (
               <div className="banner">
-                浏览器预览模式：展示模拟数据；运行 Tauri 桌面端可连接真实 Steam 封面缓存、Windows 全局热键与游戏进程。
+                <span>
+                  浏览器预览模式：当前展示模拟 IPC 数据；运行 Tauri 桌面端可连接真实 Windows 进程、Steam 封面与全局热键。
+                </span>
               </div>
             )}
-            {error && <div className="error-banner">{error}</div>}
-            {statusMsg && <div className="banner">{statusMsg}</div>}
+            {error && (
+              <div className="error-banner">
+                <span>{error}</span>
+                <button
+                  className="icon-btn"
+                  onClick={() => setError(null)}
+                  aria-label="关闭错误提示"
+                >
+                  <X size={14} strokeWidth={1.5} />
+                </button>
+              </div>
+            )}
+            {statusMsg && (
+              <div className="banner">
+                <span>{statusMsg}</span>
+                <button
+                  className="icon-btn"
+                  onClick={() => setStatusMsg(null)}
+                  aria-label="关闭状态提示"
+                >
+                  <X size={14} strokeWidth={1.5} />
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {/* ==================== WORKBENCH ==================== */}
         {tab === "workbench" && !selectedGame && (
           <div className="empty-state">
-            <h2 style={{ margin: 0, color: "var(--text)" }}>选择一款游戏开始</h2>
-            <p style={{ margin: 0, maxWidth: 420 }}>
-              点击左侧「游戏列表」中的任意游戏，即可在上方查看游戏信息并一键启动/注入/解除注入 Mod，在下方直接控制模组功能。
-            </p>
-            <button className="btn" onClick={() => void handleRescan()}>
-              立即扫描游戏库
+            <SlidersHorizontal size={20} strokeWidth={1.5} aria-hidden="true" />
+            <div style={{ color: "var(--text-primary)", fontWeight: 500 }}>
+              从左侧选择一款游戏
+            </div>
+            <div className="muted" style={{ maxWidth: 400 }}>
+              选定游戏后可在顶部一键启动、注入或卸载模组，并在下方管理具体功能与伴生桥接。
+            </div>
+            <button className="btn btn-primary" onClick={() => void handleRescan()}>
+              <RefreshCw size={14} strokeWidth={1.5} aria-hidden="true" />
+              <span>扫描本地游戏库</span>
             </button>
           </div>
         )}
 
         {tab === "workbench" && selectedGame && (
           <>
-            {/* ---------- TOP-RIGHT: 游戏信息 Hero Banner ---------- */}
+            {/* ---------- TOP-RIGHT: Hero Header ---------- */}
             <header className="game-hero">
-              {selectedArtwork?.header_data_uri && (
+              {selectedArtwork?.header_data_uri ? (
                 <div
                   className="game-hero-bg"
                   style={{
                     backgroundImage: `url("${selectedArtwork.header_data_uri}")`,
                   }}
                 />
+              ) : (
+                <div className="game-hero-fallback" />
               )}
               <div className="game-hero-scrim" />
 
               <div className="game-hero-main">
                 <div className="game-hero-info">
-                  <div className="row">
+                  <div className="game-hero-title-row">
                     <h2 className="game-hero-title">{selectedGame.game.title}</h2>
                     <button
-                      className={`fav-btn ${favoriteKeys.has(selectedGame.library_key) ? "starred" : ""}`}
+                      className={`fav-btn ${
+                        favoriteKeys.has(selectedGame.library_key) ? "starred" : ""
+                      }`}
                       onClick={() => toggleFavorite(selectedGame.library_key)}
-                      title="收藏置顶"
+                      title={
+                        favoriteKeys.has(selectedGame.library_key)
+                          ? "取消收藏"
+                          : "收藏置顶"
+                      }
+                      aria-label="切换收藏"
                     >
-                      {favoriteKeys.has(selectedGame.library_key) ? "★" : "☆"}
+                      <Star
+                        size={15}
+                        strokeWidth={1.5}
+                        fill={
+                          favoriteKeys.has(selectedGame.library_key)
+                            ? "currentColor"
+                            : "none"
+                        }
+                      />
                     </button>
-                    <span className="badge">
-                      {selectedGame.game.store_source.toUpperCase()}
-                    </span>
-                    <span className="badge">{selectedGame.game.platform}</span>
-                    {selectedGame.game.store_build_id && (
-                      <span className="badge">
-                        Build {selectedGame.game.store_build_id}
-                      </span>
-                    )}
                   </div>
-                  <div
-                    className="game-hero-path"
-                    title={selectedGame.game.install_dir}
-                  >
-                    {selectedGame.game.install_dir}
-                  </div>
-                  <div className="row" style={{ marginTop: 8 }}>
-                    {gameEnv && (
-                      <span className="badge community">
-                        引擎: {ENGINE_LABELS[gameEnv.engine]}
-                      </span>
-                    )}
-                    {gameEnv?.installed_loaders.map((loader) => (
-                      <span key={loader.entry_path} className="badge official">
-                        加载器: {loader.kind}
-                        {loader.detected_version
-                          ? ` ${loader.detected_version}`
-                          : ""}
+
+                  {/* Single merged borderless monospace metadata row */}
+                  <div className="meta-line">
+                    {mergedMetaItems.map((item, idx) => (
+                      <span key={`${item}-${idx}`} className="row" style={{ gap: 6 }}>
+                        {idx > 0 && <span className="meta-sep">·</span>}
+                        <span
+                          className={
+                            item.startsWith("桥接已部署") ? "meta-ok" : undefined
+                          }
+                        >
+                          {item}
+                        </span>
                       </span>
                     ))}
-                    {bridgeStatus?.deployed && (
-                      <span className="status-pill bridge">
-                        ● 伴生桥接已部署 ({bridgeStatus.active_files.length})
-                      </span>
+                    {hasAntiCheatMarkers && (
+                      <>
+                        <span className="meta-sep">·</span>
+                        <span className="meta-warn">
+                          <AlertTriangle size={14} strokeWidth={1.5} />
+                          <span>
+                            反作弊: {gameEnv?.anti_cheat_files_present.join(", ")}
+                          </span>
+                        </span>
+                      </>
                     )}
-                    {gameEnv?.anti_cheat_files_present.map((ac) => (
-                      <span key={ac} className="badge unverified">
-                        ⚠ 反作弊保护: {ac}
+                  </div>
+
+                  {/* Standalone muted install directory with hover highlight & click-to-copy */}
+                  <div>
+                    <button
+                      className="path-copy-btn"
+                      onClick={() =>
+                        void handleCopyInstallPath(selectedGame.game.install_dir)
+                      }
+                      title="点击复制安装目录路径"
+                    >
+                      <FolderOpen size={14} strokeWidth={1.5} aria-hidden="true" />
+                      <span className="path-copy-text">
+                        {selectedGame.game.install_dir}
                       </span>
-                    ))}
+                      {copiedPath ? (
+                        <Check
+                          size={14}
+                          strokeWidth={1.5}
+                          className="path-copy-icon"
+                          style={{ color: "var(--ok)", opacity: 1 }}
+                        />
+                      ) : (
+                        <Copy
+                          size={14}
+                          strokeWidth={1.5}
+                          className="path-copy-icon"
+                        />
+                      )}
+                    </button>
                   </div>
                 </div>
 
-                {/* Primary Hero Controls: Play & Inject + 一键注入 / 解除注入 + 一键伴生桥接 */}
+                {/* Converged Button Hierarchy */}
                 <div className="game-hero-actions">
                   <div className="hero-btn-row">
-                    {!isSelectedGameInjected && canLaunchSelectedGame && (
-                      <button
-                        className="btn-play"
-                        disabled={
-                          busyAction === "launch" ||
-                          hasAntiCheatMarkers ||
-                          (activeSessionId !== null && !isSelectedGameInjected)
-                        }
-                        onClick={() => void handlePlayAndInject()}
-                        title="启动游戏并在检测到进程后自动注入已授权 Mod"
-                      >
-                        {busyAction === "launch"
-                          ? "启动中..."
-                          : "▶ 启动游戏并注入"}
-                      </button>
-                    )}
-
                     {!isSelectedGameInjected ? (
-                      <button
-                        className="btn-inject"
-                        disabled={
-                          !selectedTrainer ||
-                          hasAntiCheatMarkers ||
-                          busyAction === "inject" ||
-                          (activeSessionId !== null && !isSelectedGameInjected)
-                        }
-                        onClick={() =>
-                          selectedTrainer &&
-                          void handleOneClickInject(selectedTrainer)
-                        }
-                      >
-                        {busyAction === "inject"
-                          ? "正在注入..."
-                          : "⚡ 一键注入 Mod"}
-                      </button>
+                      canLaunchSelectedGame ? (
+                        <>
+                          <button
+                            className="btn btn-primary"
+                            disabled={
+                              busyAction === "launch" ||
+                              hasAntiCheatMarkers ||
+                              (activeSessionId !== null && !isSelectedGameInjected)
+                            }
+                            onClick={() => void handlePlayAndInject()}
+                            title="启动游戏并在检测到进程后自动注入已授权 Mod"
+                          >
+                            <Play size={14} strokeWidth={1.5} aria-hidden="true" />
+                            <span>
+                              {busyAction === "launch"
+                                ? "启动中..."
+                                : "启动游戏并注入"}
+                            </span>
+                          </button>
+
+                          <button
+                            className="btn btn-outline"
+                            disabled={
+                              !selectedTrainer ||
+                              hasAntiCheatMarkers ||
+                              busyAction === "inject" ||
+                              (activeSessionId !== null && !isSelectedGameInjected)
+                            }
+                            onClick={() =>
+                              selectedTrainer &&
+                              void handleOneClickInject(selectedTrainer)
+                            }
+                          >
+                            <Zap size={14} strokeWidth={1.5} aria-hidden="true" />
+                            <span>
+                              {busyAction === "inject"
+                                ? "注入中..."
+                                : "一键注入 Mod"}
+                            </span>
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          className="btn btn-primary"
+                          disabled={
+                            !selectedTrainer ||
+                            hasAntiCheatMarkers ||
+                            busyAction === "inject" ||
+                            (activeSessionId !== null && !isSelectedGameInjected)
+                          }
+                          onClick={() =>
+                            selectedTrainer &&
+                            void handleOneClickInject(selectedTrainer)
+                          }
+                        >
+                          <Zap size={14} strokeWidth={1.5} aria-hidden="true" />
+                          <span>
+                            {busyAction === "inject"
+                              ? "注入中..."
+                              : "一键注入 Mod"}
+                          </span>
+                        </button>
+                      )
                     ) : (
                       <button
-                        className="btn-uninject"
+                        className="btn btn-danger-outline"
                         disabled={busyAction === "uninject"}
                         onClick={() => void handleUninject()}
                       >
-                        {busyAction === "uninject"
-                          ? "正在回滚..."
-                          : "⏏ 解除注入"}
+                        <Power size={14} strokeWidth={1.5} aria-hidden="true" />
+                        <span>
+                          {busyAction === "uninject" ? "回滚中..." : "解除注入"}
+                        </span>
                       </button>
                     )}
 
                     {bridgeAvailable &&
                       (bridgeStatus?.deployed ? (
                         <button
-                          className="btn btn-danger"
+                          className="btn btn-danger-outline"
                           disabled={busyAction === "undeploy-bridge"}
                           onClick={() => void handleUndeployBridge()}
-                          title="按 DeploymentLedger 安全卸载伴生桥接文件"
+                          title="按 DeploymentLedger 卸载游戏目录中的伴生桥接文件"
                         >
-                          {busyAction === "undeploy-bridge"
-                            ? "卸载中..."
-                            : "🧹 解除桥接文件"}
+                          <Trash2 size={14} strokeWidth={1.5} aria-hidden="true" />
+                          <span>
+                            {busyAction === "undeploy-bridge"
+                              ? "卸载中..."
+                              : "解除桥接"}
+                          </span>
                         </button>
                       ) : (
                         <button
-                          className="btn btn-secondary"
+                          className="btn btn-ghost"
                           disabled={
                             busyAction === "deploy-bridge" || hasAntiCheatMarkers
                           }
                           onClick={() => void handleAutoDeployBridge(null)}
-                          title="自动匹配当前引擎（Mono/IL2CPP/UE4SS/REFramework）并一键部署，免手填路径"
+                          title="自动识别引擎并一键部署伴生桥接"
                         >
-                          {busyAction === "deploy-bridge"
-                            ? "部署中..."
-                            : "📦 一键部署伴生桥接"}
+                          <Package size={14} strokeWidth={1.5} aria-hidden="true" />
+                          <span>
+                            {busyAction === "deploy-bridge"
+                              ? "部署中..."
+                              : "部署伴生桥接"}
+                          </span>
                         </button>
                       ))}
                   </div>
 
-                  {/* Quick Companion Toggles: Auto-Attach + Sound FX + Global Hotkey Status */}
-                  <div className="row">
+                  {/* Secondary Icon Toggles */}
+                  <div className="hero-secondary-row">
                     <button
-                      className={`toggle-chip ${autoAttachEnabled ? "on" : ""}`}
+                      className={`icon-toggle ${autoAttachEnabled ? "on" : ""}`}
                       onClick={toggleAutoAttach}
                       title="检测到已授权游戏进程启动时自动注入"
                     >
-                      🔄 自动注入：{autoAttachEnabled ? "开" : "关"}
+                      <RefreshCw size={14} strokeWidth={1.5} aria-hidden="true" />
+                      <span>自动注入</span>
                     </button>
                     <button
-                      className={`toggle-chip ${soundEnabled ? "on" : ""}`}
+                      className={`icon-toggle ${soundEnabled ? "on" : ""}`}
                       onClick={toggleSoundEnabled}
-                      title="开关/注入提示音效"
+                      title="开关与注入提示音效"
                     >
-                      {soundEnabled ? "🔊 提示音：开" : "🔇 提示音：关"}
+                      {soundEnabled ? (
+                        <Volume2 size={14} strokeWidth={1.5} aria-hidden="true" />
+                      ) : (
+                        <VolumeX size={14} strokeWidth={1.5} aria-hidden="true" />
+                      )}
+                      <span>提示音</span>
                     </button>
                     {isSelectedGameInjected && globalHotkeyCount > 0 && (
-                      <span className="status-pill live">
-                        ⌨ 全局热键已激活 ({globalHotkeyCount})
+                      <span className="hotkey-status-text">
+                        <Keyboard size={14} strokeWidth={1.5} aria-hidden="true" />
+                        <span>{globalHotkeyCount} hotkeys</span>
                       </span>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Compact Process & Status Bar inside Game Info Header */}
+              {/* Compact Process Bar */}
               <div className="game-hero-bar">
-                <div className="row">
+                <div className="proc-bar-left">
                   {selectedGame.game.matched_game_id && (
                     <>
-                      <span className="muted" style={{ fontWeight: 600 }}>
-                        目标进程：
-                      </span>
+                      <Cpu size={14} strokeWidth={1.5} aria-hidden="true" />
                       {runningProcs.length > 0 ? (
                         <select
                           className="select-input"
@@ -1842,32 +2024,34 @@ export default function App() {
                         </select>
                       ) : (
                         <span className="muted">
-                          未运行（点击「▶ 启动游戏并注入」或手动启动游戏）
+                          未检测到进程（可点击「启动游戏并注入」或手动启动游戏）
                         </span>
                       )}
                       <button
-                        className="btn btn-secondary btn-sm"
+                        className="icon-btn"
                         onClick={() =>
                           void scanRunningProcesses(
                             selectedGame.game.matched_game_id!,
                           )
                         }
                         disabled={activeSessionId !== null}
+                        title="扫描运行中的游戏进程"
+                        aria-label="扫描运行中的游戏进程"
                       >
-                        扫描进程
+                        <RefreshCw size={14} strokeWidth={1.5} />
                       </button>
                     </>
                   )}
                 </div>
 
-                <div className="row">
+                <div className="proc-status-inline">
                   {waitingLaunchGameKey === selectedGame.library_key &&
                     !isSelectedGameInjected && (
-                      <span className="status-pill bridge">
-                        🚀 等待游戏进程出现后自动注入...
+                      <span className="row" style={{ gap: 6 }}>
+                        <span className="status-dot" />
+                        <span>等待进程出现后自动注入...</span>
                         <button
-                          className="btn btn-secondary btn-sm"
-                          style={{ marginLeft: 6, padding: "2px 7px" }}
+                          className="btn btn-ghost btn-sm"
                           onClick={() => setWaitingLaunchGameKey(null)}
                         >
                           取消
@@ -1875,25 +2059,29 @@ export default function App() {
                       </span>
                     )}
                   {isSelectedGameInjected && sessionDiag ? (
-                    <>
-                      <span className="status-pill live">
-                        ● 已注入 {activeProcessLabel ?? sessionDiag.session_id} ·
-                        补丁 {sessionDiag.active_patches} · 锁定{" "}
-                        {sessionDiag.active_freeze_features}
+                    <span className="row" style={{ gap: 8 }}>
+                      <span className="status-dot ok" />
+                      <span style={{ color: "var(--text-primary)" }}>
+                        {activeProcessLabel ?? sessionDiag.session_id}
                       </span>
+                      <span className="meta-sep">·</span>
+                      <span>patches {sessionDiag.active_patches}</span>
+                      <span className="meta-sep">·</span>
+                      <span>freezes {sessionDiag.active_freeze_features}</span>
                       <button
-                        className="btn btn-secondary btn-sm"
+                        className="icon-btn"
                         onClick={() => void handleRefreshDiagnostics()}
+                        title="刷新会话状态"
+                        aria-label="刷新会话状态"
                       >
-                        刷新状态
+                        <RefreshCw size={14} strokeWidth={1.5} />
                       </button>
-                    </>
+                    </span>
                   ) : activeSessionId && !isSelectedGameInjected ? (
-                    <span className="status-pill">
-                      另一款游戏正在注入中
+                    <span className="row" style={{ gap: 8 }}>
+                      <span className="muted">另一款游戏正在注入中</span>
                       <button
-                        className="btn btn-danger btn-sm"
-                        style={{ marginLeft: 8 }}
+                        className="btn btn-danger-outline btn-sm"
                         onClick={() => void handleUninject()}
                       >
                         解除另一会话
@@ -1901,8 +2089,8 @@ export default function App() {
                     </span>
                   ) : (
                     selectedGame.game.matched_game_id && (
-                      <span className="muted">
-                        ID: <code>{selectedGame.game.matched_game_id}</code>
+                      <span className="muted mono">
+                        {selectedGame.game.matched_game_id}
                       </span>
                     )
                   )}
@@ -1910,20 +2098,22 @@ export default function App() {
               </div>
             </header>
 
-            {/* ---------- BOTTOM-RIGHT: 模组的功能 ---------- */}
+            {/* ---------- BOTTOM-RIGHT: Mod Workspace ---------- */}
             <section className="mod-workspace">
               {trainers.length === 0 ? (
-                <div className="card stack">
-                  <h3 style={{ margin: 0 }}>模组的功能</h3>
-                  <p className="muted" style={{ margin: 0 }}>
-                    当前游戏还没有安装本地模组。您可以展开下方「社区可用模组」一键安装，或切换到左侧底部「本地导入」导入本地模组包。
-                  </p>
+                <div className="section-flat" style={{ paddingTop: 18 }}>
+                  <div className="feature-heading">
+                    <h3>模组功能</h3>
+                  </div>
+                  <div className="muted">
+                    当前游戏尚未安装本地模组。可展开下方「社区可用模组」一键安装，或切换至「本地导入」导入本地模组包。
+                  </div>
                 </div>
               ) : (
                 selectedTrainer && (
                   <>
-                    {/* Mod Selector Tabs */}
-                    <div className="row" style={{ justifyContent: "space-between" }}>
+                    {/* Underline Mod Selector Tabs */}
+                    <div className="mod-tab-bar">
                       <div className="mod-tabs">
                         {trainers.map((t) => {
                           const isTabSelected =
@@ -1940,30 +2130,24 @@ export default function App() {
                                 setAwaitingPermInject(null);
                               }}
                             >
-                              {isTabActive && (
-                                <span
-                                  className="game-status-dot injected"
-                                  style={{ marginTop: 0 }}
-                                />
-                              )}
+                              {isTabActive && <span className="status-dot ok" />}
                               <span>{t.name}</span>
-                              <span className="badge">v{t.version}</span>
-                              {trustBadge(t.trust_tier)}
+                              <span className="muted mono">v{t.version}</span>
                             </button>
                           );
                         })}
                       </div>
-                      <div className="row">
-                        <span className="badge">
-                          兼容性: {selectedTrainer.compatibility_status}
-                        </span>
+
+                      <div className="mod-meta-inline">
+                        {trustTag(selectedTrainer.trust_tier)}
+                        <span>compat:{selectedTrainer.compatibility_status}</span>
                         {selectedTrainer.revoked && (
-                          <span className="badge unverified">已被社区源吊销</span>
+                          <span className="tag unverified">revoked</span>
                         )}
                       </div>
                     </div>
 
-                    {/* Inline Permission Gate (Default-Deny preserved!) */}
+                    {/* Inline Permission Gate (Default-Deny preserved) */}
                     {(selectedTrainer.permission_state.status ===
                       "requires_confirmation" ||
                       selectedTrainer.permission_state.status === "blocked" ||
@@ -1973,21 +2157,28 @@ export default function App() {
                           className="row"
                           style={{ justifyContent: "space-between" }}
                         >
-                          <strong>
-                            🔒 注入前权限确认（Default-Deny 安全机制）
-                          </strong>
+                          <div className="row" style={{ gap: 6 }}>
+                            <ShieldAlert
+                              size={15}
+                              strokeWidth={1.5}
+                              style={{ color: "var(--warn)" }}
+                            />
+                            <strong>注入前权限确认 (Default-Deny)</strong>
+                          </div>
                           {selectedTrainer.permission_state.status ===
                             "blocked" && (
-                            <span className="badge unverified">
+                            <span className="tag unverified">
                               已阻止：{selectedTrainer.permission_state.reason}
                             </span>
                           )}
                         </div>
-                        <div className="stack" style={{ gap: 6 }}>
+                        <div className="stack" style={{ gap: 4 }}>
                           {selectedTrainer.permissions.map((p) => (
                             <div key={p.scope} className="muted">
-                              &bull; <strong>{PERMISSION_LABELS[p.scope]}</strong>{" "}
-                              (<code>{p.scope}</code>)：{p.reason}
+                              <span style={{ color: "var(--text-primary)" }}>
+                                {PERMISSION_LABELS[p.scope]}
+                              </span>{" "}
+                              <span className="mono">({p.scope})</span>：{p.reason}
                             </div>
                           ))}
                         </div>
@@ -1995,8 +2186,7 @@ export default function App() {
                           "requires_confirmation" && (
                           <div className="row">
                             <button
-                              className="btn-inject"
-                              style={{ padding: "8px 16px", fontSize: 13 }}
+                              className="btn btn-primary btn-sm"
                               disabled={busyAction === "approve"}
                               onClick={() =>
                                 void handleApprovePermissions(
@@ -2005,10 +2195,11 @@ export default function App() {
                                 )
                               }
                             >
-                              ✓ 确认权限并立即注入
+                              <Check size={14} strokeWidth={1.5} />
+                              <span>确认权限并立即注入</span>
                             </button>
                             <button
-                              className="btn btn-secondary"
+                              className="btn btn-outline btn-sm"
                               disabled={busyAction === "approve"}
                               onClick={() =>
                                 void handleApprovePermissions(
@@ -2024,22 +2215,20 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Feature Toolbar + 2-Column Feature Control Grid */}
-                    <div className="card stack">
-                      <div
-                        className="row"
-                        style={{ justifyContent: "space-between" }}
-                      >
+                    {/* Flat Feature Section */}
+                    <div className="section-flat">
+                      <div className="feature-toolbar">
                         <div>
-                          <div className="row">
-                            <h3 style={{ margin: 0 }}>
-                              模组的功能 ({selectedTrainer.features.length})
-                            </h3>
+                          <div className="feature-heading">
+                            <h3>模组功能</h3>
+                            <span className="muted mono">
+                              ({selectedTrainer.features.length})
+                            </span>
                             {findDuplicateHotkeys(
                               profilesByTrainer[selectedTrainer.trainer_id] ?? {},
                             ).length > 0 && (
-                              <span className="badge unverified">
-                                快捷键冲突：
+                              <span className="tag unverified">
+                                快捷键冲突:{" "}
                                 {findDuplicateHotkeys(
                                   profilesByTrainer[selectedTrainer.trainer_id] ??
                                     {},
@@ -2047,14 +2236,14 @@ export default function App() {
                               </span>
                             )}
                           </div>
-                          <div className="muted" style={{ marginTop: 4 }}>
+                          <div className="muted" style={{ marginTop: 2 }}>
                             {selectedTrainer.description}
                           </div>
                         </div>
 
-                        <div className="row">
+                        <div className="row" style={{ gap: 6 }}>
                           <button
-                            className="btn btn-secondary btn-sm"
+                            className="btn btn-ghost btn-sm"
                             onClick={() =>
                               void handleApplyPreset(
                                 selectedTrainer,
@@ -2065,7 +2254,7 @@ export default function App() {
                             Story Mode
                           </button>
                           <button
-                            className="btn btn-secondary btn-sm"
+                            className="btn btn-ghost btn-sm"
                             onClick={() =>
                               void handleApplyPreset(selectedTrainer, "No Grind")
                             }
@@ -2073,72 +2262,80 @@ export default function App() {
                             No Grind
                           </button>
                           <button
-                            className="btn btn-secondary btn-sm"
+                            className="btn btn-ghost btn-sm"
                             onClick={() =>
                               void handleApplyPreset(
                                 selectedTrainer,
                                 "Reset Defaults",
                               )
                             }
+                            title="恢复默认开关与热键"
                           >
-                            重置默认
+                            <RotateCcw size={14} strokeWidth={1.5} />
+                            <span>重置</span>
                           </button>
                           <button
-                            className="btn btn-secondary btn-sm"
+                            className="btn btn-ghost btn-sm"
                             onClick={() => void handleSaveProfile(selectedTrainer)}
+                            title="保存当前配置"
                           >
-                            保存配置
+                            <Save size={14} strokeWidth={1.5} />
+                            <span>保存</span>
                           </button>
                           <button
-                            className="btn btn-secondary btn-sm"
+                            className="btn btn-ghost btn-sm"
                             onClick={() =>
                               void handleExportProfile(selectedTrainer)
                             }
                           >
-                            导入/导出 JSON
+                            <span>JSON</span>
                           </button>
                         </div>
                       </div>
 
                       {!isSelectedTrainerInjected && (
-                        <div className="banner" style={{ marginBottom: 0 }}>
-                          点击右上角「▶ 启动游戏并注入」或「⚡ 一键注入 Mod」后，即可实时开关功能并启用游戏内全局快捷键（带提示音）；退出前点击「⏏ 解除注入」即可无痕回滚。
+                        <div className="muted" style={{ padding: "2px 0" }}>
+                          点击右上角「启动游戏并注入」或「一键注入 Mod」后即可切换开关并激活全局快捷键。
                         </div>
                       )}
 
                       {profileJsonTrainerId === selectedTrainer.trainer_id && (
-                        <div
-                          className="card stack"
-                          style={{ background: "var(--surface-alt)" }}
-                        >
-                          <strong>
-                            可移植配置 JSON ({selectedTrainer.trainer_id})
-                          </strong>
+                        <div className="surface-panel stack">
+                          <div
+                            className="row"
+                            style={{ justifyContent: "space-between" }}
+                          >
+                            <span className="mono">
+                              profile.json ({selectedTrainer.trainer_id})
+                            </span>
+                            <button
+                              className="icon-btn"
+                              onClick={() => setProfileJsonTrainerId(null)}
+                              aria-label="关闭 JSON 编辑器"
+                            >
+                              <X size={14} strokeWidth={1.5} />
+                            </button>
+                          </div>
                           <textarea
-                            className="text-input"
+                            className="text-input mono"
                             rows={6}
                             value={profileJsonBox}
                             onChange={(e) => setProfileJsonBox(e.target.value)}
                           />
                           <div className="row">
                             <button
-                              className="btn btn-sm"
+                              className="btn btn-outline btn-sm"
                               onClick={() =>
                                 void handleImportProfile(selectedTrainer)
                               }
                             >
                               导入 JSON 配置
                             </button>
-                            <button
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => setProfileJsonTrainerId(null)}
-                            >
-                              关闭
-                            </button>
                           </div>
                         </div>
                       )}
 
+                      {/* Flat Hairline-Separated Feature Grid */}
                       <div className="feature-grid">
                         {selectedTrainer.features.map((f) => {
                           const isOn =
@@ -2147,30 +2344,26 @@ export default function App() {
                           return (
                             <div
                               key={f.id}
-                              className={`feature-card ${isOn ? "enabled" : ""}`}
+                              className={`feature-cell ${isOn ? "enabled" : ""}`}
                             >
-                              <div className="feature-card-top">
+                              <div className="feature-cell-head">
                                 <div>
-                                  <div className="row" style={{ gap: 6 }}>
-                                    <strong>{f.name}</strong>
-                                    <span className="badge">
+                                  <div className="feature-title-row">
+                                    <span className="feature-name">{f.name}</span>
+                                    <span className="feature-type-tag">
                                       {f.control_type}
                                     </span>
                                   </div>
-                                  <div
-                                    className="muted"
-                                    style={{ marginTop: 4 }}
-                                  >
+                                  <div className="feature-desc">
                                     {f.description}
                                   </div>
                                 </div>
                               </div>
 
-                              <div className="feature-card-controls">
+                              <div className="feature-cell-controls">
                                 <input
-                                  className="search-input"
-                                  style={{ width: 96, padding: "6px 8px" }}
-                                  placeholder="热键 (F1)"
+                                  className="hotkey-input"
+                                  placeholder="热键"
                                   aria-label={`Hotkey for ${f.name}`}
                                   value={
                                     profilesByTrainer[selectedTrainer.trainer_id]?.[
@@ -2191,37 +2384,40 @@ export default function App() {
                                   }
                                 />
 
-                                <div className="row">
+                                <div className="row" style={{ gap: 6 }}>
                                   {f.control_type === "toggle" && (
                                     <button
-                                      className={
-                                        isOn
-                                          ? "btn btn-ok btn-sm"
-                                          : "btn btn-secondary btn-sm"
-                                      }
+                                      type="button"
+                                      role="switch"
+                                      aria-checked={isOn}
+                                      className={`switch-btn ${isOn ? "on" : ""}`}
                                       disabled={!isSelectedTrainerInjected}
                                       onClick={() => void handleApplyFeature(f)}
                                     >
-                                      {isOn ? "● 已开启（关闭）" : "开启"}
+                                      <span>{isOn ? "开启" : "关闭"}</span>
+                                      <span className="switch-track">
+                                        <span className="switch-thumb" />
+                                      </span>
                                     </button>
                                   )}
                                   {f.control_type === "action" && (
                                     <button
-                                      className="btn btn-secondary btn-sm"
+                                      className="btn btn-outline btn-sm"
                                       disabled={!isSelectedTrainerInjected}
                                       onClick={() => void handleApplyFeature(f)}
                                     >
-                                      立即执行
+                                      执行
                                     </button>
                                   )}
                                   {(f.control_type === "integer" ||
                                     f.control_type === "float") && (
                                     <>
                                       <input
-                                        className="search-input"
+                                        className="text-input mono"
                                         style={{
-                                          width: 96,
-                                          padding: "6px 8px",
+                                          width: 88,
+                                          height: 26,
+                                          padding: "2px 7px",
                                         }}
                                         type="number"
                                         step={
@@ -2229,7 +2425,7 @@ export default function App() {
                                             ? "1"
                                             : "any"
                                         }
-                                        placeholder="数值"
+                                        placeholder="0"
                                         disabled={!isSelectedTrainerInjected}
                                         value={featureInputs[f.id] ?? ""}
                                         onChange={(e) =>
@@ -2240,7 +2436,7 @@ export default function App() {
                                         }
                                       />
                                       <button
-                                        className="btn btn-sm"
+                                        className="btn btn-outline btn-sm"
                                         disabled={!isSelectedTrainerInjected}
                                         onClick={() =>
                                           void handleApplyFeature(f)
@@ -2261,337 +2457,399 @@ export default function App() {
                 )
               )}
 
-              {/* Direction 4 Drawer: Built-in Companion Bridge Bucket + Manual Override */}
-              <details className="drawer">
-                <summary>
-                  <span>
-                    🧩 内置伴生桥接资源桶 (DeploymentLedger ·{" "}
-                    {bridgeStatus?.deployed
-                      ? "已部署"
-                      : bridgeStatus?.matched_bridge
-                        ? `自动匹配：${bridgeStatus.matched_bridge.display_name}`
-                        : "按引擎自动匹配"}
-                    )
-                  </span>
-                  <span className="muted">展开 / 收起</span>
-                </summary>
-                <div className="drawer-body">
-                  {bridgeStatus?.matched_bridge ? (
-                    <div className="feature-row">
-                      <div>
-                        <div className="row">
-                          <strong>{bridgeStatus.matched_bridge.display_name}</strong>
-                          <span className="badge">
-                            v{bridgeStatus.matched_bridge.version}
-                          </span>
-                          <span
-                            className={`badge ${bridgeStatus.matched_bridge.ready_locally ? "official" : "unverified"}`}
-                          >
-                            {bridgeStatus.matched_bridge.ready_locally
-                              ? `本地就绪 (${bridgeStatus.matched_bridge.source_kind})`
-                              : "需本地构建"}
-                          </span>
-                        </div>
-                        <div className="muted" style={{ marginTop: 4 }}>
-                          目标路径：
-                          <code>
+              {/* Lightweight 1px-Separated Accordions */}
+              <div className="accordion-list">
+                <details className="drawer">
+                  <summary>
+                    <span className="drawer-summary-left">
+                      <Package size={14} strokeWidth={1.5} aria-hidden="true" />
+                      <span>内置伴生桥接资源桶 (DeploymentLedger)</span>
+                    </span>
+                    <span className="row" style={{ gap: 6 }}>
+                      <span className="muted mono">
+                        {bridgeStatus?.deployed
+                          ? "deployed"
+                          : bridgeStatus?.matched_bridge
+                            ? bridgeStatus.matched_bridge.id
+                            : "idle"}
+                      </span>
+                      <ChevronRight
+                        size={14}
+                        strokeWidth={1.5}
+                        className="drawer-chevron"
+                      />
+                    </span>
+                  </summary>
+                  <div className="drawer-body">
+                    {bridgeStatus?.matched_bridge ? (
+                      <div className="flat-row">
+                        <div>
+                          <div className="row">
+                            <span style={{ fontWeight: 500 }}>
+                              {bridgeStatus.matched_bridge.display_name}
+                            </span>
+                            <span className="mono muted">
+                              v{bridgeStatus.matched_bridge.version}
+                            </span>
+                            <span
+                              className={`tag ${
+                                bridgeStatus.matched_bridge.ready_locally
+                                  ? "official"
+                                  : "unverified"
+                              }`}
+                            >
+                              {bridgeStatus.matched_bridge.ready_locally
+                                ? bridgeStatus.matched_bridge.source_kind
+                                : "build_required"}
+                            </span>
+                          </div>
+                          <div className="muted mono" style={{ marginTop: 3 }}>
                             {bridgeStatus.matched_bridge.target_relative_path}
-                          </code>
-                          {bridgeStatus.matched_bridge.sha256
-                            ? ` · SHA-256: ${bridgeStatus.matched_bridge.sha256.slice(0, 16)}…`
-                            : ""}
+                            {bridgeStatus.matched_bridge.sha256
+                              ? ` · sha256:${bridgeStatus.matched_bridge.sha256.slice(0, 12)}`
+                              : ""}
+                          </div>
+                        </div>
+                        <div className="row">
+                          {!bridgeStatus.deployed ? (
+                            <button
+                              className="btn btn-outline btn-sm"
+                              disabled={
+                                busyAction === "deploy-bridge" ||
+                                hasAntiCheatMarkers
+                              }
+                              onClick={() => void handleAutoDeployBridge(null)}
+                            >
+                              <Download size={14} strokeWidth={1.5} />
+                              <span>一键自动部署</span>
+                            </button>
+                          ) : (
+                            <button
+                              className="btn btn-danger-outline btn-sm"
+                              disabled={busyAction === "undeploy-bridge"}
+                              onClick={() => void handleUndeployBridge()}
+                            >
+                              <Trash2 size={14} strokeWidth={1.5} />
+                              <span>卸载并还原</span>
+                            </button>
+                          )}
                         </div>
                       </div>
-                      <div className="row">
-                        {!bridgeStatus.deployed ? (
-                          <button
-                            className="btn btn-sm"
-                            disabled={
-                              busyAction === "deploy-bridge" ||
-                              hasAntiCheatMarkers
-                            }
-                            onClick={() => void handleAutoDeployBridge(null)}
-                          >
-                            一键自动部署
-                          </button>
-                        ) : (
-                          <button
-                            className="btn btn-danger btn-sm"
-                            disabled={busyAction === "undeploy-bridge"}
-                            onClick={() => void handleUndeployBridge()}
-                          >
-                            一键解除并还原
-                          </button>
-                        )}
+                    ) : (
+                      <div className="muted">
+                        当前游戏引擎（
+                        {bridgeStatus
+                          ? ENGINE_LABELS[bridgeStatus.engine]
+                          : "未知"}
+                        ）无需伴生桥接，或可在下方手动指定自定义插件路径。
                       </div>
-                    </div>
-                  ) : (
-                    <div className="muted">
-                      当前游戏引擎（
-                      {bridgeStatus
-                        ? ENGINE_LABELS[bridgeStatus.engine]
-                        : "未知"}
-                      ）不需要伴生桥接，或可在下方手动指定自定义插件路径。
-                    </div>
-                  )}
+                    )}
 
-                  {bridgeStatus && bridgeStatus.active_files.length > 0 && (
-                    <div className="muted">
-                      当前账本跟踪的已部署文件：{" "}
-                      {bridgeStatus.active_files.map((f) => (
-                        <code key={f} style={{ marginRight: 8 }}>
-                          {f}
-                        </code>
-                      ))}
-                    </div>
-                  )}
+                    {bridgeStatus && bridgeStatus.active_files.length > 0 && (
+                      <div className="muted mono">
+                        账本记录文件: {bridgeStatus.active_files.join(", ")}
+                      </div>
+                    )}
 
-                  <details className="drawer">
-                    <summary>
-                      <span>查看全部内置伴生桥接清单 ({bridgeCatalog.length})</span>
-                      <span className="muted">Unity Mono / IL2CPP / UE4SS / RE / Godot</span>
-                    </summary>
-                    <div className="drawer-body">
-                      {bridgeCatalog.map((b) => (
-                        <div key={b.id} className="feature-row">
-                          <div>
-                            <div className="row">
-                              <strong>{b.display_name}</strong>
-                              <span className="badge">
-                                {ENGINE_LABELS[b.engine]}
-                              </span>
-                              <span
-                                className={`badge ${b.ready_locally ? "official" : "unverified"}`}
-                              >
-                                {b.ready_locally ? "已就绪" : "待构建"}
-                              </span>
-                            </div>
-                            <div className="muted">
-                              {b.description} &middot; 目标：
-                              <code>{b.target_relative_path}</code>
+                    <details className="drawer">
+                      <summary>
+                        <span className="drawer-summary-left">
+                          <Layers size={14} strokeWidth={1.5} />
+                          <span>全部内置伴生桥接清单 ({bridgeCatalog.length})</span>
+                        </span>
+                        <ChevronRight
+                          size={14}
+                          strokeWidth={1.5}
+                          className="drawer-chevron"
+                        />
+                      </summary>
+                      <div className="drawer-body" style={{ paddingLeft: 16 }}>
+                        {bridgeCatalog.map((b) => (
+                          <div key={b.id} className="flat-row">
+                            <div>
+                              <div className="row">
+                                <span style={{ fontWeight: 500 }}>
+                                  {b.display_name}
+                                </span>
+                                <span className="mono muted">
+                                  {ENGINE_LABELS[b.engine]}
+                                </span>
+                                <span
+                                  className={`tag ${
+                                    b.ready_locally ? "official" : "unverified"
+                                  }`}
+                                >
+                                  {b.ready_locally ? "ready" : "missing"}
+                                </span>
+                              </div>
+                              <div className="muted mono" style={{ marginTop: 2 }}>
+                                {b.target_relative_path}
+                              </div>
                             </div>
                           </div>
+                        ))}
+                      </div>
+                    </details>
+
+                    <div className="row">
+                      <input
+                        className="text-input mono"
+                        style={{ flex: 1 }}
+                        placeholder="手动源路径（可选）"
+                        value={bridgeSourceInput}
+                        onChange={(e) => setBridgeSourceInput(e.target.value)}
+                      />
+                      <input
+                        className="text-input mono"
+                        style={{ flex: 1 }}
+                        placeholder="游戏内目标相对路径"
+                        value={bridgeTargetInput}
+                        onChange={(e) => setBridgeTargetInput(e.target.value)}
+                      />
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        disabled={
+                          busyAction === "deploy-bridge" || hasAntiCheatMarkers
+                        }
+                        onClick={() => void handleManualDeployBridge()}
+                      >
+                        手动部署
+                      </button>
+                    </div>
+                  </div>
+                </details>
+
+                {selectedTrainer && (
+                  <details className="drawer">
+                    <summary>
+                      <span className="drawer-summary-left">
+                        <Shield size={14} strokeWidth={1.5} aria-hidden="true" />
+                        <span>
+                          权限明细与撤销 ({selectedTrainer.permissions.length})
+                        </span>
+                      </span>
+                      <span className="row" style={{ gap: 6 }}>
+                        <span className="muted mono">
+                          {selectedTrainer.permission_state.status}
+                        </span>
+                        <ChevronRight
+                          size={14}
+                          strokeWidth={1.5}
+                          className="drawer-chevron"
+                        />
+                      </span>
+                    </summary>
+                    <div className="drawer-body">
+                      {selectedTrainer.permissions.map((p) => (
+                        <div key={p.scope} className="muted">
+                          <span style={{ color: "var(--text-primary)" }}>
+                            {PERMISSION_LABELS[p.scope]}
+                          </span>{" "}
+                          <span className="mono">({p.scope})</span>：{p.reason}
+                        </div>
+                      ))}
+                      {selectedTrainer.permission_state.status === "approved" &&
+                        !activeSessionId && (
+                          <div>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={() =>
+                                void handleRevokePermissions(selectedTrainer)
+                              }
+                            >
+                              撤销该模组授权
+                            </button>
+                          </div>
+                        )}
+                    </div>
+                  </details>
+                )}
+
+                {sessionDiag && sessionDiag.recent_events.length > 0 && (
+                  <details className="drawer" open={isSelectedGameInjected}>
+                    <summary>
+                      <span className="drawer-summary-left">
+                        <Activity size={14} strokeWidth={1.5} aria-hidden="true" />
+                        <span>实时注入会话事件 ({sessionDiag.session_id})</span>
+                      </span>
+                      <span className="row" style={{ gap: 6 }}>
+                        <span className="muted mono">
+                          {sessionDiag.state} · conflicts{" "}
+                          {sessionDiag.rollback_conflicts}
+                        </span>
+                        <ChevronRight
+                          size={14}
+                          strokeWidth={1.5}
+                          className="drawer-chevron"
+                        />
+                      </span>
+                    </summary>
+                    <div className="drawer-body">
+                      {sessionDiag.recent_events.slice(-8).map((ev, idx) => (
+                        <div key={idx} className="muted mono">
+                          {ev}
                         </div>
                       ))}
                     </div>
                   </details>
+                )}
 
-                  <div className="muted" style={{ marginTop: 4 }}>
-                    高级手动覆盖（仅自定义调试插件时需要）：
-                  </div>
-                  <div className="row">
-                    <input
-                      className="text-input"
-                      style={{ flex: 1 }}
-                      placeholder="本地源插件路径"
-                      value={bridgeSourceInput}
-                      onChange={(e) => setBridgeSourceInput(e.target.value)}
-                    />
-                    <input
-                      className="text-input"
-                      style={{ flex: 1 }}
-                      placeholder="游戏内目标相对路径"
-                      value={bridgeTargetInput}
-                      onChange={(e) => setBridgeTargetInput(e.target.value)}
-                    />
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      disabled={
-                        busyAction === "deploy-bridge" || hasAntiCheatMarkers
-                      }
-                      onClick={() => void handleManualDeployBridge()}
-                    >
-                      手动部署
-                    </button>
-                  </div>
-                </div>
-              </details>
-
-              {selectedTrainer && (
-                <details className="drawer">
-                  <summary>
-                    <span>
-                      🔒 权限明细与撤销 ({selectedTrainer.permissions.length} 项权限)
-                    </span>
-                    <span className="muted">
-                      {selectedTrainer.permission_state.status === "approved"
-                        ? "已授权"
-                        : selectedTrainer.permission_state.status}
-                    </span>
-                  </summary>
-                  <div className="drawer-body">
-                    {selectedTrainer.permissions.map((p) => (
-                      <div key={p.scope} className="muted">
-                        &bull; <strong>{PERMISSION_LABELS[p.scope]}</strong> (
-                        <code>{p.scope}</code>)：{p.reason}
-                      </div>
-                    ))}
-                    <div className="row">
-                      {selectedTrainer.permission_state.status === "approved" &&
-                        !activeSessionId && (
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() =>
-                              void handleRevokePermissions(selectedTrainer)
-                            }
-                          >
-                            撤销该模组授权
-                          </button>
-                        )}
-                    </div>
-                  </div>
-                </details>
-              )}
-
-              {sessionDiag && sessionDiag.recent_events.length > 0 && (
-                <details className="drawer" open={isSelectedGameInjected}>
-                  <summary>
-                    <span>
-                      📜 实时注入会话事件 ({sessionDiag.session_id} ·{" "}
-                      {sessionDiag.state})
-                    </span>
-                    <span className="muted">
-                      冲突 {sessionDiag.rollback_conflicts} / 失败{" "}
-                      {sessionDiag.rollback_failures}
-                    </span>
-                  </summary>
-                  <div className="drawer-body">
-                    {sessionDiag.recent_events.slice(-8).map((ev, idx) => (
-                      <div key={idx} className="muted">
-                        &bull; {ev}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              )}
-
-              {selectedGame.game.matched_game_id && (
-                <details className="drawer">
-                  <summary>
-                    <span>📊 兼容矩阵 ({compatRecords.length})</span>
-                    <span className="muted">展开 / 收起</span>
-                  </summary>
-                  <div className="drawer-body">
-                    {compatRecords.length === 0 ? (
-                      <div className="muted">
-                        暂无已记录的版本兼容验证结果。
-                      </div>
-                    ) : (
-                      compatRecords.map((rec) => (
-                        <div key={rec.record_id} className="feature-row">
-                          <div>
-                            <div className="row">
-                              <strong>{rec.mod_id}</strong>
-                              <span className="badge">v{rec.mod_version}</span>
-                              <span className="badge">{rec.runtime_adapter}</span>
-                              <span className="badge">{rec.status}</span>
-                            </div>
-                            <div className="muted">
-                              Build {rec.game_version} ({rec.store_platform}) &middot;{" "}
-                              {rec.evidence}
-                              {rec.notes ? ` · ${rec.notes}` : ""}
+                {selectedGame.game.matched_game_id && (
+                  <details className="drawer">
+                    <summary>
+                      <span className="drawer-summary-left">
+                        <Layers size={14} strokeWidth={1.5} aria-hidden="true" />
+                        <span>兼容矩阵 ({compatRecords.length})</span>
+                      </span>
+                      <ChevronRight
+                        size={14}
+                        strokeWidth={1.5}
+                        className="drawer-chevron"
+                      />
+                    </summary>
+                    <div className="drawer-body">
+                      {compatRecords.length === 0 ? (
+                        <div className="muted">暂无已记录的版本兼容验证结果。</div>
+                      ) : (
+                        compatRecords.map((rec) => (
+                          <div key={rec.record_id} className="flat-row">
+                            <div>
+                              <div className="row">
+                                <span style={{ fontWeight: 500 }}>{rec.mod_id}</span>
+                                <span className="mono muted">
+                                  v{rec.mod_version}
+                                </span>
+                                <span className="tag">{rec.runtime_adapter}</span>
+                                <span className="tag">{rec.status}</span>
+                              </div>
+                              <div className="muted mono" style={{ marginTop: 2 }}>
+                                Build {rec.game_version} ({rec.store_platform}) ·{" "}
+                                {rec.evidence}
+                                {rec.notes ? ` · ${rec.notes}` : ""}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </details>
-              )}
-
-              {selectedGame.game.matched_game_id && (
-                <details className="drawer">
-                  <summary>
-                    <span>🌐 社区可用模组 ({communityTrainers.length})</span>
-                    <span className="muted">展开 / 收起</span>
-                  </summary>
-                  <div className="drawer-body">
-                    <div className="row" style={{ justifyContent: "flex-end" }}>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        disabled={busyAction === "sync"}
-                        onClick={() => void handleSyncRegistries()}
-                      >
-                        {busyAction === "sync" ? "同步中..." : "同步社区源"}
-                      </button>
+                        ))
+                      )}
                     </div>
-                    {communityTrainers.length === 0 ? (
-                      <div className="muted">
-                        当前游戏在已同步社区源中暂无模组，可前往「社区源」添加仓库并同步。
-                      </div>
-                    ) : (
-                      communityTrainers.map((ct) => (
-                        <div
-                          key={`${ct.repository_id}:${ct.trainer_id}`}
-                          className="feature-row"
+                  </details>
+                )}
+
+                {selectedGame.game.matched_game_id && (
+                  <details className="drawer">
+                    <summary>
+                      <span className="drawer-summary-left">
+                        <Globe size={14} strokeWidth={1.5} aria-hidden="true" />
+                        <span>社区可用模组 ({communityTrainers.length})</span>
+                      </span>
+                      <ChevronRight
+                        size={14}
+                        strokeWidth={1.5}
+                        className="drawer-chevron"
+                      />
+                    </summary>
+                    <div className="drawer-body">
+                      <div className="row" style={{ justifyContent: "flex-end" }}>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          disabled={busyAction === "sync"}
+                          onClick={() => void handleSyncRegistries()}
                         >
-                          <div>
-                            <div className="row">
-                              <strong>{ct.trainer_id}</strong>
-                              <span className="badge">v{ct.latest_version}</span>
-                              {trustBadge(ct.trust_tier)}
-                              {ct.compatibility_status && (
-                                <span className="badge">
-                                  {ct.compatibility_status}
+                          <RefreshCw
+                            size={14}
+                            strokeWidth={1.5}
+                            className={busyAction === "sync" ? "spin" : ""}
+                          />
+                          <span>
+                            {busyAction === "sync" ? "同步中..." : "同步社区源"}
+                          </span>
+                        </button>
+                      </div>
+                      {communityTrainers.length === 0 ? (
+                        <div className="muted">
+                          当前游戏在已同步社区源中暂无模组，可前往左侧「社区源」添加仓库并同步。
+                        </div>
+                      ) : (
+                        communityTrainers.map((ct) => (
+                          <div
+                            key={`${ct.repository_id}:${ct.trainer_id}`}
+                            className="flat-row"
+                          >
+                            <div>
+                              <div className="row">
+                                <span style={{ fontWeight: 500 }}>
+                                  {ct.trainer_id}
                                 </span>
+                                <span className="mono muted">
+                                  v{ct.latest_version}
+                                </span>
+                                {trustTag(ct.trust_tier)}
+                                {ct.compatibility_status && (
+                                  <span className="tag">
+                                    {ct.compatibility_status}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="muted mono" style={{ marginTop: 2 }}>
+                                {ct.repository_id}
+                                {ct.last_verified_game_version
+                                  ? ` · verified ${ct.last_verified_game_version}`
+                                  : ""}
+                              </div>
+                            </div>
+                            <div className="row">
+                              {ct.install_state.state === "not_installed" && (
+                                <button
+                                  className="btn btn-outline btn-sm"
+                                  disabled={
+                                    busyAction === `install:${ct.trainer_id}`
+                                  }
+                                  onClick={() =>
+                                    void handleInstallOrUpdateCommunity(
+                                      ct.repository_id,
+                                      ct.trainer_id,
+                                    )
+                                  }
+                                >
+                                  <Download size={14} strokeWidth={1.5} />
+                                  <span>
+                                    {busyAction === `install:${ct.trainer_id}`
+                                      ? "安装中..."
+                                      : "安装"}
+                                  </span>
+                                </button>
+                              )}
+                              {ct.install_state.state ===
+                                "installed_up_to_date" && (
+                                <span className="tag official">installed</span>
+                              )}
+                              {ct.install_state.state === "update_available" && (
+                                <button
+                                  className="btn btn-outline btn-sm"
+                                  disabled={
+                                    busyAction === `install:${ct.trainer_id}`
+                                  }
+                                  onClick={() =>
+                                    void handleInstallOrUpdateCommunity(
+                                      ct.repository_id,
+                                      ct.trainer_id,
+                                    )
+                                  }
+                                >
+                                  更新至 v{ct.install_state.latest_version}
+                                </button>
+                              )}
+                              {ct.install_state.state === "revoked" && (
+                                <span className="tag unverified">revoked</span>
                               )}
                             </div>
-                            <div className="muted">
-                              仓库：<code>{ct.repository_id}</code>
-                              {ct.last_verified_game_version
-                                ? ` · 验证版本：${ct.last_verified_game_version}`
-                                : ""}
-                            </div>
                           </div>
-                          <div className="row">
-                            {ct.install_state.state === "not_installed" && (
-                              <button
-                                className="btn btn-sm"
-                                disabled={
-                                  busyAction === `install:${ct.trainer_id}`
-                                }
-                                onClick={() =>
-                                  void handleInstallOrUpdateCommunity(
-                                    ct.repository_id,
-                                    ct.trainer_id,
-                                  )
-                                }
-                              >
-                                {busyAction === `install:${ct.trainer_id}`
-                                  ? "安装中..."
-                                  : "安装"}
-                              </button>
-                            )}
-                            {ct.install_state.state ===
-                              "installed_up_to_date" && (
-                              <span className="badge official">已是最新</span>
-                            )}
-                            {ct.install_state.state === "update_available" && (
-                              <button
-                                className="btn btn-sm"
-                                disabled={
-                                  busyAction === `install:${ct.trainer_id}`
-                                }
-                                onClick={() =>
-                                  void handleInstallOrUpdateCommunity(
-                                    ct.repository_id,
-                                    ct.trainer_id,
-                                  )
-                                }
-                              >
-                                更新至 v{ct.install_state.latest_version}
-                              </button>
-                            )}
-                            {ct.install_state.state === "revoked" && (
-                              <span className="badge unverified">已吊销</span>
-                            )}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </details>
-              )}
+                        ))
+                      )}
+                    </div>
+                  </details>
+                )}
+              </div>
             </section>
           </>
         )}
@@ -2599,43 +2857,61 @@ export default function App() {
         {/* ==================== SECONDARY TABS ==================== */}
         {tab === "community" && (
           <div className="page-scroll">
-            <div className="page-inner stack">
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <h2 style={{ margin: 0 }}>社区仓库与更新</h2>
+            <div className="page-inner stack" style={{ gap: 16 }}>
+              <div className="header-row" style={{ marginBottom: 0 }}>
+                <div className="row">
+                  {selectedGame && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setTab("workbench")}
+                    >
+                      <ArrowLeft size={14} strokeWidth={1.5} />
+                      <span>工作台</span>
+                    </button>
+                  )}
+                  <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+                    社区仓库与更新
+                  </h2>
+                </div>
                 <button
-                  className="btn"
+                  className="btn btn-primary btn-sm"
                   disabled={busyAction === "sync"}
                   onClick={() => void handleSyncRegistries()}
                 >
-                  {busyAction === "sync" ? "同步中..." : "同步所有源"}
+                  <RefreshCw
+                    size={14}
+                    strokeWidth={1.5}
+                    className={busyAction === "sync" ? "spin" : ""}
+                  />
+                  <span>{busyAction === "sync" ? "同步中..." : "同步所有源"}</span>
                 </button>
               </div>
 
-              <div className="card stack">
-                <h3 style={{ margin: 0 }}>可用更新 ({updates.length})</h3>
+              <div className="surface-panel stack">
+                <div style={{ fontWeight: 600 }}>
+                  可用更新 <span className="muted mono">({updates.length})</span>
+                </div>
                 {updates.length === 0 ? (
-                  <p className="muted" style={{ margin: 0 }}>
-                    所有已安装模组均为最新版本。
-                  </p>
+                  <div className="muted">所有已安装模组均为最新版本。</div>
                 ) : (
                   updates.map((u) => (
                     <div
                       key={`${u.repository_id}:${u.trainer_id}`}
-                      className="feature-row"
+                      className="flat-row"
                     >
                       <div>
                         <div className="row">
-                          <strong>{u.trainer_id}</strong>
-                          <span className="badge">{u.game_id}</span>
-                          {trustBadge(u.trust_tier)}
+                          <span style={{ fontWeight: 500 }}>{u.trainer_id}</span>
+                          <span className="tag">{u.game_id}</span>
+                          {trustTag(u.trust_tier)}
                         </div>
-                        <div className="muted">
-                          已安装 v{u.installed_version} &rarr; 可更新 v
-                          {u.available_version} ({u.repository_id})
+                        <div className="muted mono" style={{ marginTop: 2 }}>
+                          v{u.installed_version} -&gt; v{u.available_version} (
+                          {u.repository_id})
                         </div>
                       </div>
                       <button
-                        className="btn btn-sm"
+                        className="btn btn-outline btn-sm"
                         disabled={busyAction === `install:${u.trainer_id}`}
                         onClick={() =>
                           void handleInstallOrUpdateCommunity(
@@ -2653,37 +2929,38 @@ export default function App() {
                 )}
               </div>
 
-              <div className="card stack">
-                <h3 style={{ margin: 0 }}>
-                  已注册仓库 ({registrySources.length})
-                </h3>
+              <div className="surface-panel stack">
+                <div style={{ fontWeight: 600 }}>
+                  已注册仓库{" "}
+                  <span className="muted mono">({registrySources.length})</span>
+                </div>
                 {registrySources.length === 0 ? (
-                  <p className="muted" style={{ margin: 0 }}>
-                    尚未注册任何社区源。
-                  </p>
+                  <div className="muted">尚未注册任何社区源。</div>
                 ) : (
                   registrySources.map((s) => (
-                    <div key={s.source.repository_id} className="feature-row">
+                    <div key={s.source.repository_id} className="flat-row">
                       <div>
                         <div className="row">
-                          <strong>{s.source.repository_id}</strong>
-                          {trustBadge(s.source.authoritative_trust_tier)}
-                          <span className="badge">{s.last_status}</span>
+                          <span style={{ fontWeight: 500 }}>
+                            {s.source.repository_id}
+                          </span>
+                          {trustTag(s.source.authoritative_trust_tier)}
+                          <span className="tag">{s.last_status}</span>
                         </div>
-                        <div className="muted">{s.source.index_url}</div>
+                        <div className="muted mono" style={{ marginTop: 2 }}>
+                          {s.source.index_url}
+                        </div>
                         {s.etag && (
-                          <div className="muted">
-                            ETag: <code>{s.etag}</code>
-                          </div>
+                          <div className="muted mono">ETag: {s.etag}</div>
                         )}
                         {s.last_error && (
-                          <div className="muted" style={{ color: "#f87171" }}>
+                          <div className="mono" style={{ color: "#fca5a5" }}>
                             {s.last_error}
                           </div>
                         )}
                       </div>
                       <button
-                        className="btn btn-secondary btn-sm"
+                        className="btn btn-ghost btn-sm"
                         onClick={() =>
                           void handleRemoveRepo(s.source.repository_id)
                         }
@@ -2695,29 +2972,29 @@ export default function App() {
                 )}
               </div>
 
-              <div className="card stack">
-                <h3 style={{ margin: 0 }}>添加第三方社区仓库</h3>
-                <p className="muted" style={{ margin: 0 }}>
-                  输入 HTTPS 协议的 <code>registry-manifest.json</code> 地址。所有第三方仓库默认归类为{" "}
-                  <strong>Unverified</strong>，无法自我提升为 Official。
-                </p>
+              <div className="surface-panel stack">
+                <div style={{ fontWeight: 600 }}>添加第三方社区仓库</div>
+                <div className="muted">
+                  输入 HTTPS 协议的 <span className="mono">registry-manifest.json</span>{" "}
+                  地址。第三方仓库默认归类为 Unverified。
+                </div>
                 <div className="row">
                   <input
-                    className="search-input"
+                    className="search-input mono"
                     style={{ width: 200 }}
-                    placeholder="Repository ID (kebab-case)"
+                    placeholder="repository-id"
                     value={repoIdInput}
                     onChange={(e) => setRepoIdInput(e.target.value)}
                   />
                   <input
-                    className="search-input"
+                    className="search-input mono"
                     style={{ flex: 1 }}
                     placeholder="https://example.org/nekod/registry-manifest.json"
                     value={repoUrlInput}
                     onChange={(e) => setRepoUrlInput(e.target.value)}
                   />
                   <button
-                    className="btn"
+                    className="btn btn-outline"
                     disabled={busyAction === "add-repo"}
                     onClick={() => void handleAddThirdPartyRepo()}
                   >
@@ -2731,12 +3008,28 @@ export default function App() {
 
         {tab === "import" && (
           <div className="page-scroll">
-            <div className="page-inner stack">
-              <h2 style={{ margin: 0 }}>本地包与游戏清单导入</h2>
-              <div className="card stack">
-                <h3 style={{ margin: 0 }}>1. 注册 Game Manifest JSON</h3>
+            <div className="page-inner stack" style={{ gap: 16 }}>
+              <div className="header-row" style={{ marginBottom: 0 }}>
+                <div className="row">
+                  {selectedGame && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setTab("workbench")}
+                    >
+                      <ArrowLeft size={14} strokeWidth={1.5} />
+                      <span>工作台</span>
+                    </button>
+                  )}
+                  <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+                    本地包与游戏清单导入
+                  </h2>
+                </div>
+              </div>
+
+              <div className="surface-panel stack">
+                <div style={{ fontWeight: 600 }}>1. 注册 Game Manifest JSON</div>
                 <textarea
-                  className="text-input"
+                  className="text-input mono"
                   rows={6}
                   placeholder="粘贴通过校验的 game-manifest.json..."
                   value={gameManifestJson}
@@ -2744,7 +3037,7 @@ export default function App() {
                 />
                 <div>
                   <button
-                    className="btn"
+                    className="btn btn-primary"
                     onClick={() => void handleRegisterGameManifest()}
                   >
                     校验并注册游戏清单
@@ -2752,14 +3045,15 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="card stack">
-                <h3 style={{ margin: 0 }}>2. 导入本地模组目录</h3>
-                <p className="muted" style={{ margin: 0 }}>
-                  指定包含 <code>trainer-manifest.json</code> 及对应构件的本地文件夹，导入前自动强制校验 JSON Schema 与 SHA-256。
-                </p>
+              <div className="surface-panel stack">
+                <div style={{ fontWeight: 600 }}>2. 导入本地模组目录</div>
+                <div className="muted">
+                  指定包含 <span className="mono">trainer-manifest.json</span>{" "}
+                  及对应构件的本地目录，导入前强制校验 JSON Schema 与 SHA-256。
+                </div>
                 <div className="row">
                   <input
-                    className="text-input"
+                    className="text-input mono"
                     style={{ flex: 1 }}
                     placeholder="C:\Trainers\my-trainer-package"
                     value={trainerDir}
@@ -2773,13 +3067,11 @@ export default function App() {
                     }
                   >
                     <option value="official">Official</option>
-                    <option value="community_verified">
-                      Community Verified
-                    </option>
+                    <option value="community_verified">Community Verified</option>
                     <option value="unverified">Unverified</option>
                   </select>
                   <button
-                    className="btn"
+                    className="btn btn-outline"
                     onClick={() => void handleIngestTrainer()}
                   >
                     校验并导入
@@ -2792,11 +3084,27 @@ export default function App() {
 
         {tab === "settings" && (
           <div className="page-scroll">
-            <div className="page-inner stack">
-              <h2 style={{ margin: 0 }}>设置与安全策略</h2>
-              <div className="card stack">
-                <h3 style={{ margin: 0 }}>Default-Deny 安全控制</h3>
-                <label className="row">
+            <div className="page-inner stack" style={{ gap: 16 }}>
+              <div className="header-row" style={{ marginBottom: 0 }}>
+                <div className="row">
+                  {selectedGame && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setTab("workbench")}
+                    >
+                      <ArrowLeft size={14} strokeWidth={1.5} />
+                      <span>工作台</span>
+                    </button>
+                  )}
+                  <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+                    设置与安全策略
+                  </h2>
+                </div>
+              </div>
+
+              <div className="surface-panel stack">
+                <div style={{ fontWeight: 600 }}>Default-Deny 安全控制</div>
+                <label className="row" style={{ cursor: "pointer" }}>
                   <input
                     type="checkbox"
                     checked={policy.allow_unverified_sources}
@@ -2811,7 +3119,7 @@ export default function App() {
                     允许未认证（Unverified）来源的声明式模组（附带风险提示）
                   </span>
                 </label>
-                <label className="row">
+                <label className="row" style={{ cursor: "pointer" }}>
                   <input
                     type="checkbox"
                     checked={policy.allow_third_party_native_modules}
@@ -2826,13 +3134,13 @@ export default function App() {
                 </label>
               </div>
 
-              <div className="card stack">
-                <h3 style={{ margin: 0 }}>自定义游戏目录</h3>
+              <div className="surface-panel stack">
+                <div style={{ fontWeight: 600 }}>自定义游戏目录</div>
                 <div className="row">
                   <input
-                    className="text-input"
+                    className="text-input mono"
                     style={{ flex: 1 }}
-                    placeholder="目录路径（如 D:\Games\HollowKnight）"
+                    placeholder="D:\Games\HollowKnight"
                     value={customDir}
                     onChange={(e) => setCustomDir(e.target.value)}
                   />
@@ -2843,7 +3151,7 @@ export default function App() {
                     onChange={(e) => setCustomLabel(e.target.value)}
                   />
                   <button
-                    className="btn"
+                    className="btn btn-outline"
                     onClick={() => void handleAddCustomPath()}
                   >
                     添加目录
@@ -2851,13 +3159,13 @@ export default function App() {
                 </div>
 
                 {customPaths.map((cp) => (
-                  <div key={cp.path} className="feature-row">
+                  <div key={cp.path} className="flat-row">
                     <div>
-                      <strong>{cp.label ?? cp.path}</strong>
-                      <div className="muted">{cp.path}</div>
+                      <div style={{ fontWeight: 500 }}>{cp.label ?? cp.path}</div>
+                      <div className="muted mono">{cp.path}</div>
                     </div>
                     <button
-                      className="btn btn-danger btn-sm"
+                      className="btn btn-danger-outline btn-sm"
                       onClick={async () => {
                         try {
                           setError(null);
@@ -2881,12 +3189,25 @@ export default function App() {
 
         {tab === "logs" && (
           <div className="page-scroll">
-            <div className="page-inner stack">
-              <div className="header-row">
-                <h2 style={{ margin: 0 }}>诊断与审计日志</h2>
+            <div className="page-inner stack" style={{ gap: 16 }}>
+              <div className="header-row" style={{ marginBottom: 0 }}>
+                <div className="row">
+                  {selectedGame && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setTab("workbench")}
+                    >
+                      <ArrowLeft size={14} strokeWidth={1.5} />
+                      <span>工作台</span>
+                    </button>
+                  )}
+                  <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+                    诊断与审计日志
+                  </h2>
+                </div>
                 <div className="row">
                   <button
-                    className="btn btn-secondary"
+                    className="btn btn-ghost btn-sm"
                     onClick={() => {
                       const summary = JSON.stringify(
                         {
@@ -2905,7 +3226,7 @@ export default function App() {
                     导出诊断包
                   </button>
                   <button
-                    className="btn btn-secondary"
+                    className="btn btn-outline btn-sm"
                     onClick={async () => {
                       try {
                         setLogs(await nekodApi.getDiagnosticLogs());
@@ -2914,37 +3235,41 @@ export default function App() {
                       }
                     }}
                   >
-                    刷新日志
+                    <RefreshCw size={14} strokeWidth={1.5} />
+                    <span>刷新</span>
                   </button>
                 </div>
               </div>
+
               {diagnosticBundle && (
-                <div className="card stack">
+                <div className="surface-panel stack">
                   <div
                     className="row"
                     style={{ justifyContent: "space-between" }}
                   >
-                    <strong>Diagnostic Bundle (JSON)</strong>
+                    <span className="mono">diagnostic-bundle.json</span>
                     <button
-                      className="btn btn-secondary btn-sm"
+                      className="icon-btn"
                       onClick={() => setDiagnosticBundle(null)}
+                      aria-label="收起诊断包"
                     >
-                      收起
+                      <X size={14} strokeWidth={1.5} />
                     </button>
                   </div>
                   <textarea
-                    className="text-input"
+                    className="text-input mono"
                     rows={8}
                     readOnly
                     value={diagnosticBundle}
                   />
                 </div>
               )}
-              <div className="card">
+
+              <div className="surface-panel" style={{ padding: "4px 10px" }}>
                 {logs.length === 0 ? (
-                  <p className="muted" style={{ margin: 0 }}>
+                  <div className="muted" style={{ padding: 10 }}>
                     暂无诊断事件记录。
-                  </p>
+                  </div>
                 ) : (
                   logs.map((entry, idx) => (
                     <div key={idx} className="log-line">
@@ -2964,7 +3289,20 @@ export default function App() {
         <div className="hud-toast-stack" aria-live="polite">
           {hudToasts.map((t) => (
             <div key={t.id} className={`hud-toast ${t.tone}`}>
-              {t.text}
+              {t.tone === "ok" ? (
+                <Check
+                  size={14}
+                  strokeWidth={1.5}
+                  style={{ color: "var(--ok)" }}
+                />
+              ) : (
+                <Activity
+                  size={14}
+                  strokeWidth={1.5}
+                  style={{ color: "var(--text-secondary)" }}
+                />
+              )}
+              <span>{t.text}</span>
             </div>
           ))}
         </div>
