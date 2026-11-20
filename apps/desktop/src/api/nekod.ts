@@ -250,6 +250,7 @@ export interface CompanionBridgeCatalogEntry {
 
 export interface BridgeDeploymentStatus {
   deployed: boolean;
+  bridge_update_available: boolean;
   engine: GameEnvironmentProfile["engine"];
   active_files: string[];
   suggested_source_file: string | null;

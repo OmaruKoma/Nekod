@@ -544,6 +544,12 @@ impl RuntimeProvider for UnityBridgeRuntime {
         session_id: &RuntimeSessionId,
         command: FeatureCommand,
     ) -> Result<(), RuntimeError> {
+        enum RollbackUpdate {
+            Push(BridgeRpcRequest),
+            RemoveFeature,
+            None,
+        }
+
         let binding = {
             let guard = self.bindings.lock().unwrap();
             let payload = guard
@@ -557,155 +563,171 @@ impl RuntimeProvider for UnityBridgeRuntime {
                 .ok_or_else(|| RuntimeError::UnknownFeature(command.feature_id.clone()))?
         };
 
-        self.store.with_session_mut(session_id, |session| {
-            let use_http = session.use_unity_explorer_http;
-            match (binding, command.value) {
+        // Snapshot endpoint & token without holding the session lock while blocking on TCP I/O.
+        let (endpoint, auth_token, use_http) = self.store.session_connection(session_id)?;
+
+        let (op, params, rollback_update, event_msg) = match (binding, command.value) {
+            (
+                UnityFeatureBinding::ToggleField {
+                    class_name,
+                    field_name,
+                    enabled_value,
+                    disabled_value,
+                    ..
+                },
+                FeatureValue::Toggle(enable),
+            ) => {
+                let target_val = if enable {
+                    enabled_value
+                } else {
+                    disabled_value.clone()
+                };
+                let (op, params, undo_params) = if use_http {
+                    (
+                        "set_static",
+                        json!({ "type": class_name, "member": field_name, "value": target_val }),
+                        json!({ "type": class_name, "member": field_name, "value": disabled_value }),
+                    )
+                } else {
+                    (
+                        "set_field",
+                        json!({ "class_name": class_name, "field_name": field_name, "value": target_val }),
+                        json!({ "class_name": class_name, "field_name": field_name, "value": disabled_value }),
+                    )
+                };
+                let rollback_update = if enable {
+                    RollbackUpdate::Push(BridgeRpcRequest {
+                        token: auth_token.clone(),
+                        op: op.to_owned(),
+                        params: undo_params,
+                    })
+                } else {
+                    RollbackUpdate::RemoveFeature
+                };
                 (
-                    UnityFeatureBinding::ToggleField {
-                        class_name,
-                        field_name,
-                        enabled_value,
-                        disabled_value,
-                        ..
-                    },
-                    FeatureValue::Toggle(enable),
-                ) => {
-                    let target_val = if enable {
-                        enabled_value
-                    } else {
-                        disabled_value.clone()
-                    };
-                    let (op, params, undo_params) = if use_http {
-                        (
-                            "set_static",
-                            json!({ "type": class_name, "member": field_name, "value": target_val }),
-                            json!({ "type": class_name, "member": field_name, "value": disabled_value }),
-                        )
-                    } else {
-                        (
-                            "set_field",
-                            json!({ "class_name": class_name, "field_name": field_name, "value": target_val }),
-                            json!({ "class_name": class_name, "field_name": field_name, "value": disabled_value }),
-                        )
-                    };
-                    send_unity_rpc(use_http, session.endpoint, &session.auth_token, op, params)?;
-                    if enable {
-                        session.rollback_stack.push((
-                            command.feature_id.clone(),
-                            BridgeRpcRequest {
-                                token: session.auth_token.clone(),
-                                op: op.to_owned(),
-                                params: undo_params,
-                            },
-                        ));
-                    } else {
-                        session
-                            .rollback_stack
-                            .retain(|(fid, _)| fid != &command.feature_id);
-                    }
-                    session.recent_events.push(format!(
-                        "Unity field '{class_name}.{field_name}' set (enable={enable})"
-                    ));
-                }
-                (
-                    UnityFeatureBinding::SetField {
-                        class_name,
-                        field_name,
-                        ..
-                    },
-                    FeatureValue::Integer(val),
-                ) => {
-                    let (op, params) = if use_http {
-                        (
-                            "set_static",
-                            json!({ "type": class_name, "member": field_name, "value": val }),
-                        )
-                    } else {
-                        (
-                            "set_field",
-                            json!({ "class_name": class_name, "field_name": field_name, "value": val }),
-                        )
-                    };
-                    send_unity_rpc(use_http, session.endpoint, &session.auth_token, op, params)?;
-                    if use_http {
-                        session.rollback_stack.push((
-                            command.feature_id.clone(),
-                            BridgeRpcRequest {
-                                token: String::new(),
-                                op: "undo_write".to_owned(),
-                                params: json!({ "steps": 1 }),
-                            },
-                        ));
-                    }
-                    session
-                        .recent_events
-                        .push(format!("Unity field '{class_name}.{field_name}' = {val}"));
-                }
-                (
-                    UnityFeatureBinding::SetField {
-                        class_name,
-                        field_name,
-                        ..
-                    },
-                    FeatureValue::Float(val),
-                ) => {
-                    let (op, params) = if use_http {
-                        (
-                            "set_static",
-                            json!({ "type": class_name, "member": field_name, "value": val }),
-                        )
-                    } else {
-                        (
-                            "set_field",
-                            json!({ "class_name": class_name, "field_name": field_name, "value": val }),
-                        )
-                    };
-                    send_unity_rpc(use_http, session.endpoint, &session.auth_token, op, params)?;
-                    if use_http {
-                        session.rollback_stack.push((
-                            command.feature_id.clone(),
-                            BridgeRpcRequest {
-                                token: String::new(),
-                                op: "undo_write".to_owned(),
-                                params: json!({ "steps": 1 }),
-                            },
-                        ));
-                    }
-                    session
-                        .recent_events
-                        .push(format!("Unity field '{class_name}.{field_name}' = {val}"));
-                }
-                (
-                    UnityFeatureBinding::InvokeMethod {
-                        class_name,
-                        method_name,
-                        ..
-                    },
-                    FeatureValue::Action,
-                ) => {
-                    let (op, params) = if use_http {
-                        (
-                            "invoke_static",
-                            json!({ "type": class_name, "method": method_name, "args": [] }),
-                        )
-                    } else {
-                        (
-                            "invoke_method",
-                            json!({ "class_name": class_name, "method_name": method_name }),
-                        )
-                    };
-                    send_unity_rpc(use_http, session.endpoint, &session.auth_token, op, params)?;
-                    session.recent_events.push(format!(
-                        "Invoked Unity method '{class_name}.{method_name}()'"
-                    ));
-                }
-                _ => {
-                    return Err(RuntimeError::InvalidPayload(format!(
-                        "control type mismatch for Unity feature '{}'",
-                        command.feature_id
-                    )));
-                }
+                    op,
+                    params,
+                    rollback_update,
+                    format!("Unity field '{class_name}.{field_name}' set (enable={enable})"),
+                )
             }
+            (
+                UnityFeatureBinding::SetField {
+                    class_name,
+                    field_name,
+                    ..
+                },
+                FeatureValue::Integer(v),
+            ) => {
+                let val = json!(v);
+                let (op, params) = if use_http {
+                    (
+                        "set_static",
+                        json!({ "type": class_name, "member": field_name, "value": val }),
+                    )
+                } else {
+                    (
+                        "set_field",
+                        json!({ "class_name": class_name, "field_name": field_name, "value": val }),
+                    )
+                };
+                let rollback_update = if use_http {
+                    RollbackUpdate::Push(BridgeRpcRequest {
+                        token: String::new(),
+                        op: "undo_write".to_owned(),
+                        params: json!({ "steps": 1 }),
+                    })
+                } else {
+                    RollbackUpdate::None
+                };
+                (
+                    op,
+                    params,
+                    rollback_update,
+                    format!("Unity field '{class_name}.{field_name}' = {v}"),
+                )
+            }
+            (
+                UnityFeatureBinding::SetField {
+                    class_name,
+                    field_name,
+                    ..
+                },
+                FeatureValue::Float(v),
+            ) => {
+                let val = json!(v);
+                let (op, params) = if use_http {
+                    (
+                        "set_static",
+                        json!({ "type": class_name, "member": field_name, "value": val }),
+                    )
+                } else {
+                    (
+                        "set_field",
+                        json!({ "class_name": class_name, "field_name": field_name, "value": val }),
+                    )
+                };
+                let rollback_update = if use_http {
+                    RollbackUpdate::Push(BridgeRpcRequest {
+                        token: String::new(),
+                        op: "undo_write".to_owned(),
+                        params: json!({ "steps": 1 }),
+                    })
+                } else {
+                    RollbackUpdate::None
+                };
+                (
+                    op,
+                    params,
+                    rollback_update,
+                    format!("Unity field '{class_name}.{field_name}' = {v}"),
+                )
+            }
+            (
+                UnityFeatureBinding::InvokeMethod {
+                    class_name,
+                    method_name,
+                    ..
+                },
+                FeatureValue::Action,
+            ) => {
+                let (op, params) = if use_http {
+                    (
+                        "invoke_static",
+                        json!({ "type": class_name, "method": method_name, "args": [] }),
+                    )
+                } else {
+                    (
+                        "invoke_method",
+                        json!({ "class_name": class_name, "method_name": method_name }),
+                    )
+                };
+                (
+                    op,
+                    params,
+                    RollbackUpdate::None,
+                    format!("Invoked Unity method '{class_name}.{method_name}()'"),
+                )
+            }
+            _ => {
+                return Err(RuntimeError::InvalidPayload(format!(
+                    "control type mismatch for Unity feature '{}'",
+                    command.feature_id
+                )));
+            }
+        };
+
+        send_unity_rpc(use_http, endpoint, &auth_token, op, params)?;
+
+        self.store.with_session_mut(session_id, |session| {
+            match rollback_update {
+                RollbackUpdate::Push(req) => session.rollback_stack.push((command.feature_id, req)),
+                RollbackUpdate::RemoveFeature => session
+                    .rollback_stack
+                    .retain(|(fid, _)| fid != &command.feature_id),
+                RollbackUpdate::None => {}
+            }
+            session.recent_events.push(event_msg);
             Ok(())
         })
     }
@@ -1379,5 +1401,165 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(discovery_dir);
+    }
+
+    #[test]
+    fn diagnostics_does_not_block_while_apply_feature_rpc_is_in_flight() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (in_flight_tx, in_flight_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            for (idx, stream) in listener.incoming().take(3).enumerate() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap();
+                if op == "set_field" && idx == 1 {
+                    let _ = in_flight_tx.send(());
+                    thread::sleep(Duration::from_millis(450));
+                }
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"mono\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"updated\":1}}}}").unwrap();
+                }
+            }
+        });
+
+        let runtime = Arc::new(UnityBridgeRuntime::new());
+        let req = unity_request(UnityFlavor::Mono, UnityLoaderKind::BepinexMono, port);
+        let sid = runtime.start_session(req).unwrap();
+
+        let rt_clone = Arc::clone(&runtime);
+        let sid_clone = sid.clone();
+        let apply_handle = thread::spawn(move || {
+            rt_clone.apply_feature(
+                &sid_clone,
+                FeatureCommand {
+                    feature_id: "infinite-stamina".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+        });
+
+        // Wait until the slow set_field RPC is actively in-flight on the server.
+        in_flight_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("set_field request did not arrive");
+
+        let started = Instant::now();
+        let diag = runtime.diagnostics(&sid).unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "diagnostics blocked for {:?} while apply_feature was in-flight",
+            elapsed
+        );
+        assert_eq!(diag.session_id, sid);
+
+        apply_handle.join().unwrap().unwrap();
+        runtime.stop_session(&sid).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn stop_and_rollback_aborts_early_when_bridge_port_is_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"mono\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"updated\":1}}}}").unwrap();
+                }
+            }
+            // Drops listener here -> simulates game closing before rollback.
+        });
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Mono, UnityLoaderKind::BepinexMono, port);
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "mono",
+                "loader": "bepinex_mono",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [
+                    {
+                        "kind": "toggle_field",
+                        "feature_id": "feat-1",
+                        "class_name": "PlayerController",
+                        "field_name": "isImmortal",
+                        "enabled_value": true,
+                        "disabled_value": false
+                    },
+                    {
+                        "kind": "toggle_field",
+                        "feature_id": "feat-2",
+                        "class_name": "PlayerController",
+                        "field_name": "staminaRecovery",
+                        "enabled_value": 999.0,
+                        "disabled_value": 1.0
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let sid = runtime.start_session(req).unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "feat-1".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "feat-2".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+
+        server.join().unwrap();
+
+        let diag = runtime.stop_session(&sid).unwrap();
+        assert_eq!(diag.rollback_failures, 2);
+        assert!(
+            diag.recent_events
+                .iter()
+                .any(|e| e.contains("aborted early") && e.contains("skipped 1")),
+            "expected early abort diagnostic, got {:?}",
+            diag.recent_events
+        );
     }
 }

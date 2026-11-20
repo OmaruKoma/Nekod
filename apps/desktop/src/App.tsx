@@ -135,6 +135,33 @@ function trustTag(tier: TrustTier) {
   return <span className="tag unverified">Unverified</span>;
 }
 
+function formatRuntimeError(raw: string): string {
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes("main thread dispatch timeout") ||
+    lower.includes("bridge read timed out") ||
+    lower.includes("game main thread is busy")
+  ) {
+    return "游戏当前处于加载中或主线程暂停状态（切换场景/加载画面/旧版桥接未开启后台运行），请先更新伴生桥接并等进入游戏画面后再操作。";
+  }
+  const noInstanceMatch = raw.match(
+    /no live instance of '([^']+)' found in active scene/i,
+  );
+  if (noInstanceMatch) {
+    const fullCls = noInstanceMatch[1];
+    const shortCls = fullCls.split(".").pop() ?? fullCls;
+    return `当前场景尚未加载目标对象「${shortCls}」（请先进入实际游玩关卡，不要在标题/加载界面开启此功能）。`;
+  }
+  if (
+    lower.includes("bridge connect") ||
+    lower.includes("10061") ||
+    lower.includes("refused")
+  ) {
+    return "无法连接到游戏伴生桥接（游戏可能已退出或桥接尚未加载完成）。";
+  }
+  return raw;
+}
+
 export default function App() {
   const [tab, setTab] = useState<NavTab>("workbench");
   const [games, setGames] = useState<LibraryGameView[]>([]);
@@ -203,6 +230,10 @@ export default function App() {
   const [sessionDiag, setSessionDiag] = useState<RuntimeDiagnostics | null>(null);
   const [activeToggles, setActiveToggles] = useState<Record<string, boolean>>({});
   const [featureInputs, setFeatureInputs] = useState<Record<string, string>>({});
+  const applyingFeaturesRef = useRef<Set<string>>(new Set());
+  const [applyingFeatures, setApplyingFeatures] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [awaitingPermInject, setAwaitingPermInject] = useState<string | null>(null);
 
   // Built-in Companion Bridge Bucket & DeploymentLedger state
@@ -875,12 +906,77 @@ export default function App() {
       setStatusMsg(msg);
       pushHudToast(msg, "info");
     } catch (e) {
+      // Clear frontend session state even if target process/bridge already disappeared.
+      setActiveSessionId(null);
+      setActiveGameKey(null);
+      setActiveTrainerId(null);
+      setActiveToggles({});
+      setSessionDiag(null);
       if (soundEnabled) soundFx.error();
-      setError(String(e));
+      setError(formatRuntimeError(String(e)));
     } finally {
       setBusyAction(null);
     }
   }
+
+  // Watchdog: automatically detach when the injected target game process exits.
+  useEffect(() => {
+    if (!activeSessionId || !activeGameKey) return;
+    const activeGame = games.find((g) => g.library_key === activeGameKey);
+    if (!activeGame) return;
+
+    let cancelled = false;
+    let detaching = false;
+    const targetPid = sessionDiag?.target_pid ?? null;
+
+    const timer = window.setInterval(async () => {
+      if (cancelled || detaching) return;
+      try {
+        const procs = await nekodApi.discoverRunningProcesses(
+          activeGame.game.matched_game_id,
+          activeGame.game.install_dir,
+        );
+        if (cancelled) return;
+        const stillAlive =
+          procs.length > 0 &&
+          (targetPid === null || procs.some((p) => p.pid === targetPid));
+        if (!stillAlive) {
+          detaching = true;
+          await nekodApi.stopTrainerSession(activeSessionId).catch(() => null);
+          if (cancelled) return;
+          setActiveSessionId(null);
+          setActiveGameKey(null);
+          setActiveTrainerId(null);
+          setActiveToggles({});
+          setSessionDiag(null);
+          setRunningProcs([]);
+          setSelectedPid(null);
+          try {
+            setLogs(await nekodApi.getDiagnosticLogs());
+          } catch {
+            // Non-fatal
+          }
+          if (soundEnabled) soundFx.uninject();
+          const msg = `检测到「${activeGame.game.title}」已退出，已自动断开注入会话。`;
+          setStatusMsg(msg);
+          pushHudToast(msg, "info");
+        }
+      } catch {
+        // Ignore transient process scan failures
+      }
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    activeSessionId,
+    activeGameKey,
+    games,
+    sessionDiag?.target_pid,
+    soundEnabled,
+  ]);
 
   async function handleAutoDeployBridge(customOverride: string | null = null) {
     if (!selectedGame) return;
@@ -1130,7 +1226,7 @@ export default function App() {
     feature: TrainerFeature,
     triggeredHotkey?: string,
   ) {
-    if (!activeSessionId) return;
+    if (!activeSessionId || applyingFeaturesRef.current.has(feature.id)) return;
     let command: FeatureCommand;
     let nextToggleVal = false;
     if (feature.control_type === "toggle") {
@@ -1157,6 +1253,9 @@ export default function App() {
             }
           : { feature_id: feature.id, value: { type: "float", value: num } };
     }
+
+    applyingFeaturesRef.current.add(feature.id);
+    setApplyingFeatures(new Set(applyingFeaturesRef.current));
 
     try {
       setError(null);
@@ -1185,14 +1284,24 @@ export default function App() {
       setLogs(logList);
     } catch (e) {
       if (soundEnabled) soundFx.error();
-      setError(String(e));
-      if (activeSessionId) {
+      const rawErr = String(e);
+      const lower = rawErr.toLowerCase();
+      setError(formatRuntimeError(rawErr));
+      if (
+        activeSessionId &&
+        !lower.includes("timed out") &&
+        !lower.includes("dispatch timeout") &&
+        !lower.includes("busy")
+      ) {
         try {
           setSessionDiag(await nekodApi.getSessionDiagnostics(activeSessionId));
         } catch {
           // Keep UI responsive
         }
       }
+    } finally {
+      applyingFeaturesRef.current.delete(feature.id);
+      setApplyingFeatures(new Set(applyingFeaturesRef.current));
     }
   }
 
@@ -2483,19 +2592,44 @@ export default function App() {
 
                     {bridgeAvailable &&
                       (bridgeStatus?.deployed ? (
-                        <button
-                          className="btn btn-danger-outline"
-                          disabled={busyAction === "undeploy-bridge"}
-                          onClick={() => void handleUndeployBridge()}
-                          title="按 DeploymentLedger 卸载游戏目录中的伴生桥接文件"
-                        >
-                          <Trash2 size={14} strokeWidth={1.5} aria-hidden="true" />
-                          <span>
-                            {busyAction === "undeploy-bridge"
-                              ? "卸载中..."
-                              : "解除桥接"}
-                          </span>
-                        </button>
+                        <>
+                          {bridgeStatus.bridge_update_available && (
+                            <button
+                              className="btn btn-outline"
+                              disabled={
+                                busyAction === "deploy-bridge" ||
+                                isSelectedGameInjected ||
+                                hasAntiCheatMarkers
+                              }
+                              onClick={() => void handleAutoDeployBridge(null)}
+                              title={
+                                isSelectedGameInjected
+                                  ? "请先解除注入并关闭游戏后再更新桥接"
+                                  : "检测到新版伴生桥接 DLL（含后台运行与防卡死优化），点击一键覆盖升级"
+                              }
+                            >
+                              <Download size={14} strokeWidth={1.5} aria-hidden="true" />
+                              <span>
+                                {busyAction === "deploy-bridge"
+                                  ? "更新中..."
+                                  : "更新伴生桥接"}
+                              </span>
+                            </button>
+                          )}
+                          <button
+                            className="btn btn-danger-outline"
+                            disabled={busyAction === "undeploy-bridge"}
+                            onClick={() => void handleUndeployBridge()}
+                            title="按 DeploymentLedger 卸载游戏目录中的伴生桥接文件"
+                          >
+                            <Trash2 size={14} strokeWidth={1.5} aria-hidden="true" />
+                            <span>
+                              {busyAction === "undeploy-bridge"
+                                ? "卸载中..."
+                                : "解除桥接"}
+                            </span>
+                          </button>
+                        </>
                       ) : (
                         <button
                           className="btn btn-ghost"
@@ -3087,6 +3221,7 @@ export default function App() {
                           const isOn =
                             isSelectedTrainerInjected &&
                             Boolean(activeToggles[f.id]);
+                          const isApplying = applyingFeatures.has(f.id);
                           return (
                             <div
                               key={f.id}
@@ -3137,10 +3272,16 @@ export default function App() {
                                       role="switch"
                                       aria-checked={isOn}
                                       className={`switch-btn ${isOn ? "on" : ""}`}
-                                      disabled={!isSelectedTrainerInjected}
+                                      disabled={!isSelectedTrainerInjected || isApplying}
                                       onClick={() => void handleApplyFeature(f)}
                                     >
-                                      <span>{isOn ? "开启" : "关闭"}</span>
+                                      <span>
+                                        {isApplying
+                                          ? "执行中..."
+                                          : isOn
+                                            ? "开启"
+                                            : "关闭"}
+                                      </span>
                                       <span className="switch-track">
                                         <span className="switch-thumb" />
                                       </span>
@@ -3149,10 +3290,10 @@ export default function App() {
                                   {f.control_type === "action" && (
                                     <button
                                       className="btn btn-outline btn-sm"
-                                      disabled={!isSelectedTrainerInjected}
+                                      disabled={!isSelectedTrainerInjected || isApplying}
                                       onClick={() => void handleApplyFeature(f)}
                                     >
-                                      执行
+                                      {isApplying ? "执行中..." : "执行"}
                                     </button>
                                   )}
                                   {(f.control_type === "integer" ||
@@ -3172,7 +3313,7 @@ export default function App() {
                                             : "any"
                                         }
                                         placeholder="0"
-                                        disabled={!isSelectedTrainerInjected}
+                                        disabled={!isSelectedTrainerInjected || isApplying}
                                         value={featureInputs[f.id] ?? ""}
                                         onChange={(e) =>
                                           setFeatureInputs((prev) => ({
@@ -3183,12 +3324,12 @@ export default function App() {
                                       />
                                       <button
                                         className="btn btn-outline btn-sm"
-                                        disabled={!isSelectedTrainerInjected}
+                                        disabled={!isSelectedTrainerInjected || isApplying}
                                         onClick={() =>
                                           void handleApplyFeature(f)
                                         }
                                       >
-                                        应用
+                                        {isApplying ? "执行中..." : "应用"}
                                       </button>
                                     </>
                                   )}

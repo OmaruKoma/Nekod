@@ -55,6 +55,7 @@ pub struct AppState {
 #[derive(Debug, Clone, Serialize)]
 pub struct BridgeDeploymentStatus {
     pub deployed: bool,
+    pub bridge_update_available: bool,
     pub engine: GameEngineKind,
     pub active_files: Vec<String>,
     pub suggested_source_file: Option<String>,
@@ -285,44 +286,50 @@ async fn rescan_games(state: State<'_, AppState>) -> Result<Vec<LibraryGameView>
 }
 
 #[tauri::command]
-fn list_library_games(state: State<'_, AppState>) -> Result<Vec<LibraryGameView>, String> {
-    state.core.list_library_games().map_err(map_err)
+async fn list_library_games(state: State<'_, AppState>) -> Result<Vec<LibraryGameView>, String> {
+    spawn_core(Arc::clone(&state.core), |core| {
+        core.list_library_games().map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_trainers_for_game(
+async fn list_trainers_for_game(
     state: State<'_, AppState>,
     game_id: String,
     detected_build_id: Option<String>,
 ) -> Result<Vec<TrainerDetailView>, String> {
-    state
-        .core
-        .list_trainers_for_game(&game_id, detected_build_id.as_deref())
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.list_trainers_for_game(&game_id, detected_build_id.as_deref())
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn grant_trainer_permissions(
+async fn grant_trainer_permissions(
     state: State<'_, AppState>,
     trainer_id: String,
     confirmed_scopes: Vec<PermissionScope>,
 ) -> Result<TrainerPermissionState, String> {
     let scope_set: BTreeSet<PermissionScope> = confirmed_scopes.into_iter().collect();
-    state
-        .core
-        .grant_trainer_permissions(&trainer_id, scope_set)
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.grant_trainer_permissions(&trainer_id, scope_set)
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn revoke_trainer_permissions(
+async fn revoke_trainer_permissions(
     state: State<'_, AppState>,
     trainer_id: String,
 ) -> Result<(), String> {
-    state
-        .core
-        .revoke_trainer_permissions(&trainer_id)
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.revoke_trainer_permissions(&trainer_id)
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -496,99 +503,128 @@ async fn pick_local_path(
 }
 
 #[tauri::command]
-fn register_game_manifest(state: State<'_, AppState>, raw_json: String) -> Result<String, String> {
-    state
-        .core
-        .register_game_manifest(&raw_json)
-        .map(|m| m.id)
-        .map_err(map_err)
+async fn register_game_manifest(
+    state: State<'_, AppState>,
+    raw_json: String,
+) -> Result<String, String> {
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.register_game_manifest(&raw_json)
+            .map(|m| m.id)
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn add_custom_game_path(
+async fn add_custom_game_path(
     state: State<'_, AppState>,
     path: String,
     label: Option<String>,
 ) -> Result<Vec<CustomGamePathRecord>, String> {
-    let trimmed = path.trim().trim_matches('"');
-    if trimmed.is_empty() {
-        return Err("请输入游戏目录或可执行文件 (.exe) 路径。".to_owned());
-    }
-    if !Path::new(trimmed).exists() {
-        return Err(format!("路径 '{trimmed}' 不存在，请检查目录或文件位置。"));
-    }
-    state
-        .core
-        .add_custom_game_path(trimmed, label.as_deref())
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        let trimmed = path.trim().trim_matches('"');
+        if trimmed.is_empty() {
+            return Err("请输入游戏目录或可执行文件 (.exe) 路径。".to_owned());
+        }
+        if !Path::new(trimmed).exists() {
+            return Err(format!("路径 '{trimmed}' 不存在，请检查目录或文件位置。"));
+        }
+        core.add_custom_game_path(trimmed, label.as_deref())
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove_custom_game_path(
+async fn remove_custom_game_path(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<Vec<CustomGamePathRecord>, String> {
-    state.core.remove_custom_game_path(&path).map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.remove_custom_game_path(&path).map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_custom_game_paths(state: State<'_, AppState>) -> Result<Vec<CustomGamePathRecord>, String> {
-    state.core.list_custom_game_paths().map_err(map_err)
+async fn list_custom_game_paths(
+    state: State<'_, AppState>,
+) -> Result<Vec<CustomGamePathRecord>, String> {
+    spawn_core(Arc::clone(&state.core), |core| {
+        core.list_custom_game_paths().map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_security_policy(state: State<'_, AppState>) -> Result<SecurityPolicyConfig, String> {
-    state.core.get_security_policy().map_err(map_err)
+async fn get_security_policy(state: State<'_, AppState>) -> Result<SecurityPolicyConfig, String> {
+    spawn_core(Arc::clone(&state.core), |core| {
+        core.get_security_policy().map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn update_security_policy(
+async fn update_security_policy(
     state: State<'_, AppState>,
     policy: SecurityPolicyConfig,
 ) -> Result<(), String> {
-    state.core.update_security_policy(policy).map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.update_security_policy(policy).map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn load_profile(
+async fn load_profile(
     state: State<'_, AppState>,
     game_id: String,
     trainer_id: String,
 ) -> Result<Option<GameProfile>, String> {
-    state
-        .core
-        .load_profile(&game_id, &trainer_id)
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.load_profile(&game_id, &trainer_id).map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_profile(state: State<'_, AppState>, profile: GameProfile) -> Result<(), String> {
-    state.core.save_profile(&profile).map_err(map_err)
+async fn save_profile(state: State<'_, AppState>, profile: GameProfile) -> Result<(), String> {
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.save_profile(&profile).map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn export_profile_json(
+async fn export_profile_json(
     state: State<'_, AppState>,
     game_id: String,
     trainer_id: String,
 ) -> Result<String, String> {
-    state
-        .core
-        .export_profile_json(&game_id, &trainer_id)
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.export_profile_json(&game_id, &trainer_id)
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn import_profile_json(
+async fn import_profile_json(
     state: State<'_, AppState>,
     raw_json: String,
 ) -> Result<GameProfile, String> {
-    state.core.import_profile_json(&raw_json).map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.import_profile_json(&raw_json).map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_diagnostic_logs(state: State<'_, AppState>) -> Vec<DiagnosticEvent> {
-    state.core.get_diagnostic_logs()
+async fn get_diagnostic_logs(state: State<'_, AppState>) -> Result<Vec<DiagnosticEvent>, String> {
+    spawn_core(Arc::clone(&state.core), |core| {
+        Ok(core.get_diagnostic_logs())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -671,40 +707,50 @@ async fn stop_trainer_session(
 }
 
 #[tauri::command]
-fn get_session_diagnostics(
+async fn get_session_diagnostics(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<RuntimeDiagnostics, String> {
-    state
-        .core
-        .get_session_diagnostics(&RuntimeSessionId(session_id))
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.get_session_diagnostics(&RuntimeSessionId(session_id))
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_registry_sources(state: State<'_, AppState>) -> Result<Vec<RegistrySourceState>, String> {
-    state.core.list_registry_sources().map_err(map_err)
+async fn list_registry_sources(
+    state: State<'_, AppState>,
+) -> Result<Vec<RegistrySourceState>, String> {
+    spawn_core(Arc::clone(&state.core), |core| {
+        core.list_registry_sources().map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn add_third_party_registry_source(
+async fn add_third_party_registry_source(
     state: State<'_, AppState>,
     repository_id: String,
     index_url: String,
     enabled: bool,
 ) -> Result<(), String> {
-    state
-        .core
-        .add_third_party_registry_source(&repository_id, &index_url, enabled)
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.add_third_party_registry_source(&repository_id, &index_url, enabled)
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove_registry_source(state: State<'_, AppState>, repository_id: String) -> Result<(), String> {
-    state
-        .core
-        .remove_registry_source(&repository_id)
-        .map_err(map_err)
+async fn remove_registry_source(
+    state: State<'_, AppState>,
+    repository_id: String,
+) -> Result<(), String> {
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.remove_registry_source(&repository_id).map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -716,19 +762,25 @@ async fn sync_registry_sources(state: State<'_, AppState>) -> Result<RegistrySyn
 }
 
 #[tauri::command]
-fn list_community_trainers_for_game(
+async fn list_community_trainers_for_game(
     state: State<'_, AppState>,
     game_id: String,
 ) -> Result<Vec<CommunityTrainerView>, String> {
-    state
-        .core
-        .list_community_trainers_for_game(&game_id)
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.list_community_trainers_for_game(&game_id)
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn check_trainer_updates(state: State<'_, AppState>) -> Result<Vec<TrainerUpdateInfo>, String> {
-    state.core.check_trainer_updates().map_err(map_err)
+async fn check_trainer_updates(
+    state: State<'_, AppState>,
+) -> Result<Vec<TrainerUpdateInfo>, String> {
+    spawn_core(Arc::clone(&state.core), |core| {
+        core.check_trainer_updates().map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -748,24 +800,28 @@ async fn install_or_update_trainer_from_registry(
 }
 
 #[tauri::command]
-fn inspect_game_environment(
+async fn inspect_game_environment(
     state: State<'_, AppState>,
     install_dir: String,
-) -> GameEnvironmentProfile {
-    state.core.inspect_installed_game_environment(install_dir)
+) -> Result<GameEnvironmentProfile, String> {
+    spawn_core(Arc::clone(&state.core), move |core| {
+        Ok(core.inspect_installed_game_environment(install_dir))
+    })
+    .await
 }
 
 #[tauri::command]
-fn query_compatibility_matrix(
+async fn query_compatibility_matrix(
     state: State<'_, AppState>,
     game_id: String,
     mod_id: Option<String>,
     game_version: Option<String>,
 ) -> Result<Vec<CompatibilityRecord>, String> {
-    state
-        .core
-        .query_compatibility_matrix(&game_id, mod_id.as_deref(), game_version.as_deref())
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.query_compatibility_matrix(&game_id, mod_id.as_deref(), game_version.as_deref())
+            .map_err(map_err)
+    })
+    .await
 }
 
 fn bridge_ledger_paths(data_dir: &Path, game_key: &str) -> (PathBuf, PathBuf) {
@@ -881,8 +937,19 @@ fn compute_bridge_deployment_status(
             }
         }
     }
+    let deployed = !active_files.is_empty();
+    let bridge_update_available = if deployed
+        && let Some(catalog_sha) = matched_bridge.as_ref().and_then(|b| b.sha256.as_deref())
+        && let Some(first_rel) = active_files.first()
+        && let Ok(bytes) = fs::read(Path::new(install_dir).join(first_rel))
+    {
+        sha256_hex(&bytes) != catalog_sha
+    } else {
+        false
+    };
     Ok(BridgeDeploymentStatus {
-        deployed: !active_files.is_empty(),
+        deployed,
+        bridge_update_available,
         engine: env.engine,
         active_files,
         suggested_source_file,
@@ -1375,8 +1442,13 @@ fn quick_setup_unity_starter_sync(
 }
 
 #[tauri::command]
-fn list_companion_bridge_catalog(state: State<'_, AppState>) -> Vec<CompanionBridgeCatalogEntry> {
-    list_bridge_catalog(&state.data_dir)
+async fn list_companion_bridge_catalog(
+    state: State<'_, AppState>,
+) -> Result<Vec<CompanionBridgeCatalogEntry>, String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || list_bridge_catalog(&data_dir))
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -1410,6 +1482,13 @@ async fn auto_deploy_companion_bridge(
         let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
         let mut ledger =
             DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+        if ledger.records().iter().any(|r| {
+            r.state == DeploymentState::Deployed && r.package_id == "nekod.companion.bridge"
+        }) {
+            ledger
+                .undeploy_package("nekod.companion.bridge")
+                .map_err(map_err)?;
+        }
         ledger
             .stage_file(
                 &game_key,
@@ -1497,8 +1576,14 @@ async fn undeploy_companion_bridge(
 }
 
 #[tauri::command]
-fn sync_global_hotkeys(state: State<'_, AppState>, bindings: Vec<GlobalHotkeyBinding>) -> usize {
-    state.hotkeys.set_bindings(bindings)
+async fn sync_global_hotkeys(
+    state: State<'_, AppState>,
+    bindings: Vec<GlobalHotkeyBinding>,
+) -> Result<usize, String> {
+    let hotkeys = state.hotkeys.clone();
+    tauri::async_runtime::spawn_blocking(move || hotkeys.set_bindings(bindings))
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -1558,65 +1643,70 @@ fn validate_direct_launch_executable(
 }
 
 #[tauri::command]
-fn launch_game(
+async fn launch_game(
     store_source: String,
     store_app_id: Option<String>,
     install_dir: String,
     executable_path: Option<String>,
 ) -> Result<LaunchGameResult, String> {
-    if store_source.eq_ignore_ascii_case("steam")
-        && let Some(app_id) = store_app_id.as_deref()
-        && !app_id.is_empty()
-        && app_id.chars().all(|c| c.is_ascii_digit())
-    {
-        let uri = format!("steam://rungameid/{app_id}");
-        #[cfg(target_os = "windows")]
+    tauri::async_runtime::spawn_blocking(move || {
+        if store_source.eq_ignore_ascii_case("steam")
+            && let Some(app_id) = store_app_id.as_deref()
+            && !app_id.is_empty()
+            && app_id.chars().all(|c| c.is_ascii_digit())
         {
-            Command::new("explorer.exe")
-                .arg(&uri)
-                .spawn()
-                .map_err(|e| format!("failed to launch Steam URI '{uri}': {e}"))?;
+            let uri = format!("steam://rungameid/{app_id}");
+            #[cfg(target_os = "windows")]
+            {
+                Command::new("explorer.exe")
+                    .arg(&uri)
+                    .spawn()
+                    .map_err(|e| format!("failed to launch Steam URI '{uri}': {e}"))?;
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Command::new("xdg-open")
+                    .arg(&uri)
+                    .spawn()
+                    .map_err(|e| format!("failed to launch Steam URI '{uri}': {e}"))?;
+            }
+            return Ok(LaunchGameResult {
+                method: "steam_uri".to_owned(),
+                target: uri,
+            });
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            Command::new("xdg-open")
-                .arg(&uri)
-                .spawn()
-                .map_err(|e| format!("failed to launch Steam URI '{uri}': {e}"))?;
-        }
-        return Ok(LaunchGameResult {
-            method: "steam_uri".to_owned(),
-            target: uri,
-        });
-    }
 
-    let resolved_exe = executable_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            nekod_game_detection::custom::detect_primary_executable(Path::new(&install_dir))
-                .or_else(|| {
-                    NekodAppService::collect_candidate_exes_in_dir(&install_dir)
-                        .into_iter()
-                        .next()
-                        .map(|name| Path::new(&install_dir).join(name))
-                })
-                .map(|p| p.display().to_string())
-        });
-    let exe_str = resolved_exe.as_deref().ok_or_else(|| {
-        "cannot launch game: no Steam AppID and no executable path found for this game".to_owned()
-    })?;
-    let (dir_canon, exe_canon) = validate_direct_launch_executable(&install_dir, exe_str)?;
-    Command::new(&exe_canon)
-        .current_dir(&dir_canon)
-        .spawn()
-        .map_err(|e| format!("failed to launch '{}': {e}", exe_canon.display()))?;
-    Ok(LaunchGameResult {
-        method: "direct_executable".to_owned(),
-        target: exe_canon.display().to_string(),
+        let resolved_exe = executable_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                nekod_game_detection::custom::detect_primary_executable(Path::new(&install_dir))
+                    .or_else(|| {
+                        NekodAppService::collect_candidate_exes_in_dir(&install_dir)
+                            .into_iter()
+                            .next()
+                            .map(|name| Path::new(&install_dir).join(name))
+                    })
+                    .map(|p| p.display().to_string())
+            });
+        let exe_str = resolved_exe.as_deref().ok_or_else(|| {
+            "cannot launch game: no Steam AppID and no executable path found for this game"
+                .to_owned()
+        })?;
+        let (dir_canon, exe_canon) = validate_direct_launch_executable(&install_dir, exe_str)?;
+        Command::new(&exe_canon)
+            .current_dir(&dir_canon)
+            .spawn()
+            .map_err(|e| format!("failed to launch '{}': {e}", exe_canon.display()))?;
+        Ok(LaunchGameResult {
+            method: "direct_executable".to_owned(),
+            target: exe_canon.display().to_string(),
+        })
     })
+    .await
+    .map_err(map_err)?
 }
 
 fn build_ct_trainer_id(game_id: &str, ct_path: &Path) -> String {

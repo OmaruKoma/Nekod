@@ -68,6 +68,23 @@ impl BridgeSessionStore {
         sid
     }
 
+    /// Reads `(endpoint, auth_token, use_unity_explorer_http)` without holding the session lock
+    /// during blocking network I/O.
+    pub fn session_connection(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> Result<(SocketAddr, String, bool), RuntimeError> {
+        let guard = self.sessions.lock().unwrap();
+        let session = guard
+            .get(&session_id.0)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))?;
+        Ok((
+            session.endpoint,
+            session.auth_token.clone(),
+            session.use_unity_explorer_http,
+        ))
+    }
+
     pub fn with_session_mut<F, R>(
         &self,
         session_id: &RuntimeSessionId,
@@ -102,6 +119,15 @@ impl BridgeSessionStore {
                 send_bridge_rpc(session.endpoint, &undo_req).map(|_| ())
             };
             if let Err(err) = rpc_result {
+                if is_bridge_disconnected_error(&err) {
+                    let skipped = session.rollback_stack.len();
+                    session.rollback_failures += 1 + skipped;
+                    session.rollback_stack.clear();
+                    session.recent_events.push(format!(
+                        "Bridge disconnected while rolling back '{fid}' ({err}); aborted early and skipped {skipped} remaining rollback(s) because target game exited"
+                    ));
+                    break;
+                }
                 session.rollback_failures += 1;
                 session
                     .recent_events
@@ -136,6 +162,18 @@ impl BridgeSessionStore {
             .cloned()
             .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))
     }
+}
+
+fn is_bridge_disconnected_error(err: &RuntimeError) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("connect")
+        || lower.contains("10061")
+        || lower.contains("refused")
+        || lower.contains("timed out")
+        || lower.contains("closed connection")
+        || lower.contains("10054")
+        || lower.contains("10053")
+        || lower.contains("broken pipe")
 }
 
 fn build_diagnostics(
@@ -318,7 +356,7 @@ pub(crate) fn send_bridge_rpc(
         TcpStream::connect_timeout(&endpoint, Duration::from_millis(1500)).map_err(|e| {
             RuntimeError::ExecutionFailed(format!("bridge connect {endpoint} failed: {e}"))
         })?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(6500)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(4500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
 
     let line = serde_json::to_string(req)
@@ -335,7 +373,7 @@ pub(crate) fn send_bridge_rpc(
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
         ) {
             RuntimeError::ExecutionFailed(format!(
-                "bridge read timed out after 6.5s (Unity main thread may be paused while game window is unfocused or loading; focus the game window or update NekodUnityBridge): {e}"
+                "bridge read timed out after 4.5s (game main thread may be loading or paused; wait until gameplay resumes and retry): {e}"
             ))
         } else {
             RuntimeError::ExecutionFailed(format!("bridge read failed: {e}"))

@@ -20,17 +20,24 @@ namespace Nekod.UnityBridge
     /// </summary>
     internal sealed class BridgeServer
     {
-        public const string BridgeVersion = "0.2.1";
+        public const string BridgeVersion = "0.2.2";
 
         private sealed class PendingWork
         {
+            public const int StatePending = 0;
+            public const int StateRunning = 1;
+            public const int StateCancelled = 2;
+
             public string Op;
             public Dictionary<string, object> Params;
             public string ResponseLine;
+            public int State;
             public readonly ManualResetEventSlim Done = new ManualResetEventSlim(false);
         }
 
         private const int PortScanSpan = 20;
+        private const int MaxPendingWork = 16;
+        private const int MainThreadTimeoutMs = 3000;
         private readonly Queue<PendingWork> _queue = new Queue<PendingWork>();
         private readonly object _queueLock = new object();
         private readonly Action<string> _log;
@@ -121,6 +128,15 @@ namespace Nekod.UnityBridge
                 {
                     if (_queue.Count == 0) return;
                     work = _queue.Dequeue();
+                }
+
+                if (Interlocked.CompareExchange(
+                        ref work.State,
+                        PendingWork.StateRunning,
+                        PendingWork.StatePending) != PendingWork.StatePending)
+                {
+                    // Request already timed out on the socket thread; do not apply stale mutation later.
+                    continue;
                 }
 
                 try
@@ -216,14 +232,37 @@ namespace Nekod.UnityBridge
                             else
                             {
                                 var work = new PendingWork { Op = op, Params = p };
+                                bool enqueued = false;
                                 lock (_queueLock)
                                 {
-                                    _queue.Enqueue(work);
+                                    if (_queue.Count < MaxPendingWork)
+                                    {
+                                        _queue.Enqueue(work);
+                                        enqueued = true;
+                                    }
                                 }
 
-                                reply = work.Done.Wait(5000)
-                                    ? work.ResponseLine
-                                    : ErrorJson("main thread dispatch timeout (game main thread may be paused while unfocused or loading; focus the game window briefly or ensure KeepRunningInBackground=true)");
+                                if (!enqueued)
+                                {
+                                    reply = ErrorJson("game main thread is busy (loading scene); please retry after loading finishes");
+                                }
+                                else if (work.Done.Wait(MainThreadTimeoutMs))
+                                {
+                                    reply = work.ResponseLine;
+                                }
+                                else if (Interlocked.CompareExchange(
+                                             ref work.State,
+                                             PendingWork.StateCancelled,
+                                             PendingWork.StatePending) == PendingWork.StatePending)
+                                {
+                                    reply = ErrorJson("main thread dispatch timeout (game is loading or unfocused; wait until gameplay resumes and retry)");
+                                }
+                                else
+                                {
+                                    reply = work.Done.Wait(1000)
+                                        ? work.ResponseLine
+                                        : ErrorJson("main thread dispatch timeout (game is loading or unfocused; wait until gameplay resumes and retry)");
+                                }
                             }
                         }
                     }

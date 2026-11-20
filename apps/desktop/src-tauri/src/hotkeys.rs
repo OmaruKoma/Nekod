@@ -119,7 +119,7 @@ struct ActiveEntry {
     parsed: ParsedHotkey,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct GlobalHotkeyService {
     bindings: Arc<Mutex<Vec<ActiveEntry>>>,
 }

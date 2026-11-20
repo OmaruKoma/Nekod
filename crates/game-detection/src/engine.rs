@@ -184,7 +184,7 @@ fn detect_loaders(root: &Path) -> Vec<DetectedLoader> {
         loaders.push(DetectedLoader {
             kind: InstalledLoaderKind::NekodUnityBridge,
             entry_path: nekod_rel,
-            detected_version: Some("0.1.0".to_owned()),
+            detected_version: None,
         });
     }
 

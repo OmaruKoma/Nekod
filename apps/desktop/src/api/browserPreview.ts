@@ -571,6 +571,7 @@ export function createBrowserPreviewApi() {
         : null;
       return {
         deployed: files.length > 0,
+        bridge_update_available: false,
         engine: isHollow ? "unity_mono" : "native_unknown",
         active_files: files,
         suggested_source_file: matched?.resolved_path ?? null,
@@ -663,6 +664,7 @@ export function createBrowserPreviewApi() {
       );
       return {
         deployed: true,
+        bridge_update_available: false,
         engine: "unity_mono",
         active_files: [target],
         suggested_source_file:
@@ -700,6 +702,7 @@ export function createBrowserPreviewApi() {
       pushLog("info", "deployment", `Staged companion bridge '${targetRelativePath}' for ${gameKey}`);
       return {
         deployed: true,
+        bridge_update_available: false,
         engine: isHollow ? "unity_mono" : "native_unknown",
         active_files: next,
         suggested_source_file: isHollow
@@ -736,6 +739,7 @@ export function createBrowserPreviewApi() {
       pushLog("info", "deployment", `Installed preview BepInEx loader for ${gameKey}`);
       return {
         deployed: files.length > 0,
+        bridge_update_available: false,
         engine: isHollow ? "unity_mono" : "unity_il2cpp",
         active_files: files,
         suggested_source_file: null,
