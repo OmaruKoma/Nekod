@@ -435,7 +435,7 @@ mod tests {
             validate_nmod_package_dir(&pkg_dir).expect("gun-soul-girl-2 .nmod validates cleanly");
         assert_eq!(mod_manifest.runtime.kind, RuntimeKind::UnityBridgeV1);
         assert_eq!(mod_manifest.target_game.game_id, "gun-soul-girl-2");
-        assert_eq!(mod_manifest.features.len(), 21);
+        assert_eq!(mod_manifest.features.len(), 23);
         assert!(
             !pkg_dir.join("trainer-manifest.json").exists(),
             "examples/gun-soul-girl-2 should be pure .nmod without redundant trainer-manifest.json"

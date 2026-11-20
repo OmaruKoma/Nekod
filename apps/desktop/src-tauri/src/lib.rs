@@ -2054,7 +2054,7 @@ fn scan_nmod_root(
             .list_trainers_for_game(&mod_manifest.target_game.game_id, None)
             .map(|list| {
                 list.iter()
-                    .any(|t| !t.revoked && t.trainer_id == mod_manifest.id)
+                    .any(|t| !t.revoked && t.trainer_id == mod_manifest.id && t.version == ver_str)
             })
             .unwrap_or(false);
 

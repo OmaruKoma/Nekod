@@ -784,7 +784,7 @@ mod tests {
             .ingest_local_package(&dir, TrustTier::CommunityVerified)
             .expect("pure .nmod ingestion succeeds without trainer-manifest.json");
         assert_eq!(installed.manifest.id, "org.nekod.gun-soul-girl-2");
-        assert_eq!(installed.manifest.features.len(), 21);
+        assert_eq!(installed.manifest.features.len(), 23);
 
         let entry = load_verified_entrypoint_str(&installed)
             .expect("verified entrypoint loads cleanly for pure .nmod");

@@ -13,7 +13,8 @@
       "class_name": "Invector.vCharacterController.vThirdPersonController",
       "field_name": "isImmortal",
       "enabled_value": true,
-      "disabled_value": false
+      "disabled_value": false,
+      "persist": true
     },
     {
       "kind": "toggle_field",
@@ -21,7 +22,22 @@
       "class_name": "Invector.vShooter.vShooterManager",
       "field_name": "AllAmmoInfinity",
       "enabled_value": true,
-      "disabled_value": false
+      "disabled_value": false,
+      "persist": true,
+      "extra_targets": [
+        {
+          "class_name": "Invector.vShooter.vShooterManager",
+          "field_name": "rWeapon.isInfinityAmmo",
+          "enabled_value": true,
+          "disabled_value": false
+        },
+        {
+          "class_name": "Invector.vShooter.vShooterManager",
+          "field_name": "rWeapon.dontUseReload",
+          "enabled_value": true,
+          "disabled_value": false
+        }
+      ]
     },
     {
       "kind": "toggle_field",
@@ -29,7 +45,16 @@
       "class_name": "Invector.vShooter.vShooterManager",
       "field_name": "applyRecoilToCamera",
       "enabled_value": false,
-      "disabled_value": true
+      "disabled_value": true,
+      "persist": true,
+      "extra_targets": [
+        {
+          "class_name": "Invector.vShooter.vShooterManager",
+          "field_name": "rWeapon.dispersion",
+          "enabled_value": 0.0,
+          "disabled_value": 1.5
+        }
+      ]
     },
     {
       "kind": "toggle_field",
@@ -37,7 +62,8 @@
       "class_name": "Invector.vCharacterController.vThirdPersonController",
       "field_name": "staminaRecovery",
       "enabled_value": 999.0,
-      "disabled_value": 1.2
+      "disabled_value": 1.2,
+      "persist": true
     },
     {
       "kind": "toggle_field",
@@ -45,85 +71,138 @@
       "class_name": "Invector.vCharacterController.vThirdPersonController",
       "field_name": "sprintStamina",
       "enabled_value": 0.0,
-      "disabled_value": 30.0
+      "disabled_value": 30.0,
+      "persist": true
     },
     {
       "kind": "toggle_field",
       "feature_id": "guaranteed-crit",
-      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
-      "field_name": "CriticalRate",
+      "class_name": "Invector.vShooter.vShooterManager",
+      "field_name": "rWeapon.CriticalRate",
       "enabled_value": 100.0,
-      "disabled_value": 10.0
+      "disabled_value": 10.0,
+      "persist": true,
+      "extra_targets": [
+        {
+          "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+          "field_name": "CriticalRate",
+          "enabled_value": 100.0,
+          "disabled_value": 10.0
+        }
+      ]
     },
     {
       "kind": "toggle_field",
       "feature_id": "zero-cooldown",
-      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
-      "field_name": "CoolDownReduction",
-      "enabled_value": 1.0,
-      "disabled_value": 0.0
+      "class_name": "GunSoulGirl2.GS2_SkillCanvas",
+      "field_name": "SpecialSkillTime",
+      "enabled_value": 0.05,
+      "disabled_value": 5.0,
+      "persist": true,
+      "extra_targets": [
+        {
+          "class_name": "GunSoulGirl2.GS2_SkillCanvas",
+          "field_name": "JinZhanTime",
+          "enabled_value": 0.05,
+          "disabled_value": 1.0
+        },
+        {
+          "class_name": "GunSoulGirl2.GS2_SkillCanvas",
+          "field_name": "Skill_DaZhao_Energy",
+          "enabled_value": 100,
+          "disabled_value": 0
+        }
+      ]
     },
     {
       "kind": "toggle_field",
       "feature_id": "damage-reduction-max",
       "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
       "field_name": "DamageReduction",
-      "enabled_value": 1.0,
-      "disabled_value": 0.0
+      "enabled_value": 100.0,
+      "disabled_value": 0.0,
+      "persist": true
     },
     {
       "kind": "set_field",
       "feature_id": "player-damage",
-      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
-      "field_name": "Damage"
+      "class_name": "Invector.vShooter.vShooterManager",
+      "field_name": "rWeapon.maxDamage",
+      "persist": true,
+      "extra_targets": [
+        {
+          "class_name": "Invector.vShooter.vShooterManager",
+          "field_name": "rWeapon.minDamage",
+          "scale": 0.75
+        },
+        {
+          "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+          "field_name": "Damage"
+        }
+      ]
     },
     {
       "kind": "set_field",
       "feature_id": "attack-speed",
-      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
-      "field_name": "AtkSpd"
+      "class_name": "Invector.vShooter.vShooterManager",
+      "field_name": "rWeapon.shootFrequency",
+      "persist": true,
+      "reciprocal": true,
+      "extra_targets": [
+        {
+          "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+          "field_name": "AtkSpd"
+        }
+      ]
     },
     {
       "kind": "set_field",
       "feature_id": "move-speed",
-      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
-      "field_name": "MoveSpd"
+      "class_name": "Invector.vCharacterController.vThirdPersonController",
+      "field_name": "speedMultiplier",
+      "persist": true
     },
     {
       "kind": "set_field",
       "feature_id": "health-regen",
       "class_name": "Invector.vCharacterController.vThirdPersonController",
-      "field_name": "healthRecovery"
+      "field_name": "healthRecovery",
+      "persist": true
     },
     {
       "kind": "set_field",
       "feature_id": "currency-scrap",
-      "class_name": "GunSoulGirl2.GS2Inventory",
-      "field_name": "废料"
+      "class_name": "GunSoulGirl2.BagData",
+      "field_name": "Gs2_Inventory.废料",
+      "persist": false
     },
     {
       "kind": "set_field",
       "feature_id": "currency-energy",
-      "class_name": "GunSoulGirl2.GS2Inventory",
-      "field_name": "能源"
+      "class_name": "GunSoulGirl2.BagData",
+      "field_name": "Gs2_Inventory.能源",
+      "persist": false
     },
     {
       "kind": "set_field",
       "feature_id": "currency-star-ore",
-      "class_name": "GunSoulGirl2.GS2Inventory",
-      "field_name": "星矿"
+      "class_name": "GunSoulGirl2.BagData",
+      "field_name": "Gs2_Inventory.星矿",
+      "persist": false
     },
     {
       "kind": "set_field",
       "feature_id": "currency-titanium",
-      "class_name": "GunSoulGirl2.GS2Inventory",
-      "field_name": "钛金"
+      "class_name": "GunSoulGirl2.BagData",
+      "field_name": "Gs2_Inventory.钛金",
+      "persist": false
     },
     {
       "kind": "set_field",
       "feature_id": "currency-primogem",
-      "class_name": "GunSoulGirl2.GS2Inventory",
-      "field_name": "原石"
+      "class_name": "GunSoulGirl2.BagData",
+      "field_name": "Gs2_Inventory.原石",
+      "persist": false
     },
     {
       "kind": "invoke_method",
@@ -150,6 +229,58 @@
       "feature_id": "game-speed",
       "class_name": "UnityEngine.Time",
       "field_name": "timeScale"
+    },
+    {
+      "kind": "target_lock",
+      "feature_id": "auto-lock-enemy",
+      "player_class": "Invector.vCharacterController.vThirdPersonController",
+      "camera_class": "Invector.vCamera.vThirdPersonCamera",
+      "target_class": "GunSoulGirl2.GS2_EnemyStat",
+      "lock_method": "SetLockTarget",
+      "unlock_method": "RemoveLockTarget",
+      "alive_checks": [
+        {
+          "component_class": "Invector.vHealthController",
+          "dead_field": "isDead",
+          "health_field": "currentHealth"
+        },
+        {
+          "component_class": "EmeraldAI.EmeraldAISystem",
+          "dead_field": "IsDead",
+          "health_field": "CurrentHealth"
+        }
+      ],
+      "max_range": 55.0,
+      "height_offset": 0.0,
+      "lock_speed": 12.0,
+      "require_collider": true,
+      "interval_ms": 60
+    },
+    {
+      "kind": "damage_aura",
+      "feature_id": "kill-aura",
+      "player_class": "Invector.vCharacterController.vThirdPersonController",
+      "target_class": "GunSoulGirl2.GS2_EnemyStat",
+      "damage_amount": 999999,
+      "radius": 30.0,
+      "interval_ms": 250,
+      "handlers": [
+        {
+          "kind": "invector_health",
+          "component_class": "Invector.vHealthController",
+          "damage_type_class": "Invector.vDamage",
+          "method_name": "TakeDamage",
+          "dead_field": "isDead",
+          "health_field": "currentHealth"
+        },
+        {
+          "kind": "emerald_ai",
+          "component_class": "EmeraldAI.EmeraldAISystem",
+          "method_name": "Damage",
+          "dead_field": "IsDead",
+          "health_field": "CurrentHealth"
+        }
+      ]
     }
   ]
 }

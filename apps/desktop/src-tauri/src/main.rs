@@ -651,7 +651,7 @@ shellExecute("https://modengine.net")
         assert_eq!(cand_list.len(), 1);
         let cand = &cand_list[0];
         assert_eq!(cand["mod_id"], "org.nekod.gun-soul-girl-2");
-        assert_eq!(cand["feature_count"], 21);
+        assert_eq!(cand["feature_count"], 23);
         assert_eq!(cand["source_format"], "nmod_dir");
         assert_eq!(cand["already_installed"], false);
 
@@ -676,7 +676,7 @@ shellExecute("https://modengine.net")
         .expect("list gsg2 trainers");
         let gsg2_trainer = &gsg2_trainers.as_array().unwrap()[0];
         assert_eq!(gsg2_trainer["trainer_id"], "org.nekod.gun-soul-girl-2");
-        assert_eq!(gsg2_trainer["features"].as_array().unwrap().len(), 21);
+        assert_eq!(gsg2_trainer["features"].as_array().unwrap().len(), 23);
         assert_eq!(
             gsg2_trainer["permission_state"]["status"],
             "requires_confirmation"

@@ -153,6 +153,24 @@ function formatRuntimeError(raw: string): string {
     return `当前场景尚未加载目标对象「${shortCls}」（请先进入实际游玩关卡，不要在标题/加载界面开启此功能）。`;
   }
   if (
+    lower.includes("pin_field") ||
+    lower.includes("pin_target_lock") ||
+    lower.includes("pin_damage_aura") ||
+    lower.includes("outdated") ||
+    lower.includes("v0.3.0") ||
+    lower.includes("v0.4.0")
+  ) {
+    return "伴生桥接版本过旧（不支持持续锁定、自动锁怪或杀戮光环），请关闭游戏后点击右上角「更新伴生桥接」升级到 v0.4.0。";
+  }
+  if (
+    lower.includes("integrity mismatch") ||
+    lower.includes("checksum") ||
+    lower.includes("sha-256") ||
+    lower.includes("sha256")
+  ) {
+    return "本地模组文件已更新，请先点击上方的「更新至新版本」重新导入并确认运行权限。";
+  }
+  if (
     lower.includes("bridge connect") ||
     lower.includes("10061") ||
     lower.includes("refused")
@@ -2857,48 +2875,55 @@ export default function App() {
                     </div>
                     <span className="tag">nmod_v1</span>
                   </div>
-                  {uninstalledLocalNmods.map((cand) => (
-                    <div key={`${cand.mod_id}:${cand.version}`} className="flat-row">
-                      <div style={{ minWidth: 0 }}>
-                        <div className="row">
-                          <span style={{ fontWeight: 500 }}>{cand.name}</span>
-                          <span className="mono muted">v{cand.version}</span>
-                          <span className="tag">{cand.mod_kind}</span>
-                          <span className="tag official">
-                            {cand.feature_count} 项功能
+                  {uninstalledLocalNmods.map((cand) => {
+                    const isUpgrade = trainers.some(
+                      (t) => t.trainer_id === cand.mod_id,
+                    );
+                    return (
+                      <div key={`${cand.mod_id}:${cand.version}`} className="flat-row">
+                        <div style={{ minWidth: 0 }}>
+                          <div className="row">
+                            <span style={{ fontWeight: 500 }}>{cand.name}</span>
+                            <span className="mono muted">v{cand.version}</span>
+                            <span className="tag">{cand.mod_kind}</span>
+                            <span className="tag official">
+                              {cand.feature_count} 项功能
+                            </span>
+                            <span className="tag">{cand.runtime_kind}</span>
+                          </div>
+                          <div className="muted" style={{ marginTop: 2 }}>
+                            {cand.description}
+                          </div>
+                          <div className="muted mono" style={{ marginTop: 2 }}>
+                            {cand.mod_id} · {cand.source_format} ·{" "}
+                            {cand.source_path}
+                          </div>
+                        </div>
+                        <button
+                          className="btn btn-primary btn-sm"
+                          disabled={busyAction === `nmod:${cand.mod_id}`}
+                          onClick={() => void handleInstallLocalNmod(cand)}
+                        >
+                          {busyAction === `nmod:${cand.mod_id}` ? (
+                            <RefreshCw
+                              size={14}
+                              strokeWidth={1.5}
+                              className="spin"
+                            />
+                          ) : (
+                            <Package size={14} strokeWidth={1.5} />
+                          )}
+                          <span>
+                            {busyAction === `nmod:${cand.mod_id}`
+                              ? "导入中..."
+                              : isUpgrade
+                                ? `更新至 v${cand.version}`
+                                : "导入 .nmod"}
                           </span>
-                          <span className="tag">{cand.runtime_kind}</span>
-                        </div>
-                        <div className="muted" style={{ marginTop: 2 }}>
-                          {cand.description}
-                        </div>
-                        <div className="muted mono" style={{ marginTop: 2 }}>
-                          {cand.mod_id} · {cand.source_format} ·{" "}
-                          {cand.source_path}
-                        </div>
+                        </button>
                       </div>
-                      <button
-                        className="btn btn-primary btn-sm"
-                        disabled={busyAction === `nmod:${cand.mod_id}`}
-                        onClick={() => void handleInstallLocalNmod(cand)}
-                      >
-                        {busyAction === `nmod:${cand.mod_id}` ? (
-                          <RefreshCw
-                            size={14}
-                            strokeWidth={1.5}
-                            className="spin"
-                          />
-                        ) : (
-                          <Package size={14} strokeWidth={1.5} />
-                        )}
-                        <span>
-                          {busyAction === `nmod:${cand.mod_id}`
-                            ? "导入中..."
-                            : "导入 .nmod"}
-                        </span>
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 

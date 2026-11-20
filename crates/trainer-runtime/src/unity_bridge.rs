@@ -81,6 +81,86 @@ pub struct UnityBridgePayload {
     pub features: Vec<UnityFeatureBinding>,
 }
 
+/// Additional Unity field target synchronized alongside a primary `ToggleField` binding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnityToggleTarget {
+    pub class_name: String,
+    pub field_name: String,
+    pub enabled_value: Value,
+    pub disabled_value: Value,
+}
+
+/// Additional Unity field target updated alongside a primary `SetField` binding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnitySetTarget {
+    pub class_name: String,
+    pub field_name: String,
+    #[serde(default)]
+    pub scale: Option<f64>,
+    #[serde(default)]
+    pub reciprocal: bool,
+}
+
+/// Optional component liveness filter checked when selecting targets for `TargetLock`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnityAliveCheck {
+    pub component_class: String,
+    #[serde(default)]
+    pub dead_field: Option<String>,
+    #[serde(default)]
+    pub health_field: Option<String>,
+}
+
+/// Native Unity damage method specification executed per enemy hit in `DamageAura`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnityDamageHandler {
+    pub kind: String,
+    pub component_class: String,
+    #[serde(default)]
+    pub damage_type_class: Option<String>,
+    pub method_name: String,
+    #[serde(default)]
+    pub dead_field: Option<String>,
+    #[serde(default)]
+    pub health_field: Option<String>,
+}
+
+fn default_lock_method() -> String {
+    "SetLockTarget".to_owned()
+}
+
+fn default_unlock_method() -> String {
+    "RemoveLockTarget".to_owned()
+}
+
+fn default_lock_range() -> f64 {
+    45.0
+}
+
+fn default_lock_speed() -> f64 {
+    10.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_lock_interval_ms() -> u64 {
+    80
+}
+
+fn default_aura_radius() -> f64 {
+    25.0
+}
+
+fn default_aura_interval_ms() -> u64 {
+    250
+}
+
 /// Declarative Unity class/field/method binding mapped from a UI `FeatureCommand`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -91,16 +171,61 @@ pub enum UnityFeatureBinding {
         field_name: String,
         enabled_value: Value,
         disabled_value: Value,
+        #[serde(default)]
+        persist: bool,
+        #[serde(default)]
+        extra_targets: Vec<UnityToggleTarget>,
     },
     SetField {
         feature_id: String,
         class_name: String,
         field_name: String,
+        #[serde(default)]
+        persist: bool,
+        #[serde(default)]
+        scale: Option<f64>,
+        #[serde(default)]
+        reciprocal: bool,
+        #[serde(default)]
+        extra_targets: Vec<UnitySetTarget>,
     },
     InvokeMethod {
         feature_id: String,
         class_name: String,
         method_name: String,
+    },
+    TargetLock {
+        feature_id: String,
+        player_class: String,
+        camera_class: String,
+        target_class: String,
+        #[serde(default = "default_lock_method")]
+        lock_method: String,
+        #[serde(default = "default_unlock_method")]
+        unlock_method: String,
+        #[serde(default)]
+        alive_checks: Vec<UnityAliveCheck>,
+        #[serde(default = "default_lock_range")]
+        max_range: f64,
+        #[serde(default)]
+        height_offset: f64,
+        #[serde(default = "default_lock_speed")]
+        lock_speed: f64,
+        #[serde(default = "default_true")]
+        require_collider: bool,
+        #[serde(default = "default_lock_interval_ms")]
+        interval_ms: u64,
+    },
+    DamageAura {
+        feature_id: String,
+        player_class: String,
+        target_class: String,
+        damage_amount: i64,
+        #[serde(default = "default_aura_radius")]
+        radius: f64,
+        #[serde(default = "default_aura_interval_ms")]
+        interval_ms: u64,
+        handlers: Vec<UnityDamageHandler>,
     },
 }
 
@@ -109,7 +234,9 @@ impl UnityFeatureBinding {
         match self {
             Self::ToggleField { feature_id, .. }
             | Self::SetField { feature_id, .. }
-            | Self::InvokeMethod { feature_id, .. } => feature_id,
+            | Self::InvokeMethod { feature_id, .. }
+            | Self::TargetLock { feature_id, .. }
+            | Self::DamageAura { feature_id, .. } => feature_id,
         }
     }
 }
@@ -156,6 +283,122 @@ impl UnityBridgeRuntime {
             return Err(RuntimeError::InvalidPayload(
                 "unity_bridge_v1 payload must declare at least one feature".to_owned(),
             ));
+        }
+
+        for feature in &payload.features {
+            match feature {
+                UnityFeatureBinding::TargetLock {
+                    feature_id,
+                    player_class,
+                    camera_class,
+                    target_class,
+                    lock_method,
+                    unlock_method,
+                    alive_checks,
+                    max_range,
+                    height_offset,
+                    lock_speed,
+                    interval_ms,
+                    ..
+                } => {
+                    if player_class.trim().is_empty()
+                        || camera_class.trim().is_empty()
+                        || target_class.trim().is_empty()
+                        || lock_method.trim().is_empty()
+                        || unlock_method.trim().is_empty()
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "target_lock feature '{feature_id}' requires non-empty class and method names"
+                        )));
+                    }
+                    if !max_range.is_finite() || *max_range <= 0.0 {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "target_lock feature '{feature_id}' requires positive finite max_range"
+                        )));
+                    }
+                    if !height_offset.is_finite() || !lock_speed.is_finite() || *lock_speed <= 0.0 {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "target_lock feature '{feature_id}' requires finite height_offset and positive lock_speed"
+                        )));
+                    }
+                    if !(30..=2000).contains(interval_ms) {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "target_lock feature '{feature_id}' interval_ms must be 30..=2000"
+                        )));
+                    }
+                    if alive_checks
+                        .iter()
+                        .any(|c| c.component_class.trim().is_empty())
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "target_lock feature '{feature_id}' alive_checks entry requires component_class"
+                        )));
+                    }
+                }
+                UnityFeatureBinding::DamageAura {
+                    feature_id,
+                    player_class,
+                    target_class,
+                    damage_amount,
+                    radius,
+                    interval_ms,
+                    handlers,
+                } => {
+                    if player_class.trim().is_empty() || target_class.trim().is_empty() {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "damage_aura feature '{feature_id}' requires player_class and target_class"
+                        )));
+                    }
+                    if *damage_amount <= 0 {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "damage_aura feature '{feature_id}' requires damage_amount > 0"
+                        )));
+                    }
+                    if !radius.is_finite() || *radius <= 0.0 {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "damage_aura feature '{feature_id}' requires positive finite radius"
+                        )));
+                    }
+                    if !(100..=5000).contains(interval_ms) {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "damage_aura feature '{feature_id}' interval_ms must be 100..=5000"
+                        )));
+                    }
+                    if handlers.is_empty() {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "damage_aura feature '{feature_id}' requires at least one handler"
+                        )));
+                    }
+                    for h in handlers {
+                        if h.component_class.trim().is_empty() || h.method_name.trim().is_empty() {
+                            return Err(RuntimeError::InvalidPayload(format!(
+                                "damage_aura feature '{feature_id}' handler requires component_class and method_name"
+                            )));
+                        }
+                        match h.kind.as_str() {
+                            "invector_health" => {
+                                if h.damage_type_class
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .unwrap_or("")
+                                    .is_empty()
+                                {
+                                    return Err(RuntimeError::InvalidPayload(format!(
+                                        "damage_aura feature '{feature_id}' invector_health handler requires damage_type_class"
+                                    )));
+                                }
+                            }
+                            "emerald_ai" | "invoke_damage_int" => {}
+                            other => {
+                                return Err(RuntimeError::InvalidPayload(format!(
+                                    "unsupported damage_aura handler kind '{other}'"
+                                )));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -309,6 +552,77 @@ fn send_unity_rpc(
         )
         .map(|resp| resp.data)
     }
+}
+
+fn transform_numeric_value(
+    value: &FeatureValue,
+    scale: Option<f64>,
+    reciprocal: bool,
+) -> Result<Value, RuntimeError> {
+    let numeric = match *value {
+        FeatureValue::Integer(v) if scale.is_none() && !reciprocal => return Ok(json!(v)),
+        FeatureValue::Float(v) if !v.is_finite() => {
+            return Err(RuntimeError::InvalidPayload(
+                "numeric feature value must be finite".to_owned(),
+            ));
+        }
+        FeatureValue::Float(v) if scale.is_none() && !reciprocal => return Ok(json!(v)),
+        FeatureValue::Integer(v) => v as f64,
+        FeatureValue::Float(v) => v,
+        _ => {
+            return Err(RuntimeError::InvalidPayload(
+                "expected integer or float value".to_owned(),
+            ));
+        }
+    };
+
+    if let Some(s) = scale
+        && !s.is_finite()
+    {
+        return Err(RuntimeError::InvalidPayload(
+            "unity_bridge_v1 target scale must be finite".to_owned(),
+        ));
+    }
+
+    let base = if reciprocal {
+        if numeric <= 0.0 || !numeric.is_finite() {
+            return Err(RuntimeError::InvalidPayload(
+                "reciprocal numeric value must be > 0".to_owned(),
+            ));
+        }
+        1.0 / numeric
+    } else {
+        numeric
+    };
+
+    let scaled = base * scale.unwrap_or(1.0);
+    if !scaled.is_finite() {
+        return Err(RuntimeError::InvalidPayload(
+            "transformed numeric value must be finite".to_owned(),
+        ));
+    }
+    Ok(json!(scaled))
+}
+
+fn map_bridge_rpc_error(err: RuntimeError) -> RuntimeError {
+    if let RuntimeError::ExecutionFailed(msg) = &err {
+        if msg.contains("unsupported op: pin_target_lock")
+            || msg.contains("unsupported op: unpin_target_lock")
+            || msg.contains("unsupported op: pin_damage_aura")
+            || msg.contains("unsupported op: unpin_damage_aura")
+        {
+            return RuntimeError::ExecutionFailed(
+                "companion NekodUnityBridge is outdated (missing target_lock/damage_aura support); close the game and update NekodUnityBridge to v0.4.0".to_owned(),
+            );
+        }
+        if msg.contains("unsupported op: pin_field") || msg.contains("unsupported op: unpin_field")
+        {
+            return RuntimeError::ExecutionFailed(
+                "companion NekodUnityBridge is outdated (missing pin_field support); close the game and update NekodUnityBridge to v0.3.0".to_owned(),
+            );
+        }
+    }
+    err
 }
 
 impl RuntimeProvider for UnityBridgeRuntime {
@@ -545,7 +859,8 @@ impl RuntimeProvider for UnityBridgeRuntime {
         command: FeatureCommand,
     ) -> Result<(), RuntimeError> {
         enum RollbackUpdate {
-            Push(BridgeRpcRequest),
+            Replace(Vec<BridgeRpcRequest>),
+            Append(Vec<BridgeRpcRequest>),
             RemoveFeature,
             None,
         }
@@ -566,121 +881,198 @@ impl RuntimeProvider for UnityBridgeRuntime {
         // Snapshot endpoint & token without holding the session lock while blocking on TCP I/O.
         let (endpoint, auth_token, use_http) = self.store.session_connection(session_id)?;
 
-        let (op, params, rollback_update, event_msg) = match (binding, command.value) {
+        let (calls, rollback_update, event_msg) = match (binding, command.value) {
             (
                 UnityFeatureBinding::ToggleField {
                     class_name,
                     field_name,
                     enabled_value,
                     disabled_value,
+                    persist,
+                    extra_targets,
                     ..
                 },
                 FeatureValue::Toggle(enable),
             ) => {
-                let target_val = if enable {
-                    enabled_value
-                } else {
-                    disabled_value.clone()
-                };
-                let (op, params, undo_params) = if use_http {
-                    (
-                        "set_static",
-                        json!({ "type": class_name, "member": field_name, "value": target_val }),
-                        json!({ "type": class_name, "member": field_name, "value": disabled_value }),
-                    )
-                } else {
-                    (
-                        "set_field",
-                        json!({ "class_name": class_name, "field_name": field_name, "value": target_val }),
-                        json!({ "class_name": class_name, "field_name": field_name, "value": disabled_value }),
-                    )
-                };
+                let mut targets = Vec::with_capacity(1 + extra_targets.len());
+                targets.push((
+                    class_name.clone(),
+                    field_name.clone(),
+                    enabled_value,
+                    disabled_value,
+                ));
+                for extra in extra_targets {
+                    targets.push((
+                        extra.class_name,
+                        extra.field_name,
+                        extra.enabled_value,
+                        extra.disabled_value,
+                    ));
+                }
+
+                let target_count = targets.len();
+                let mut calls = Vec::with_capacity(target_count);
+                let mut rollback_entries = Vec::new();
+                for (idx, (cls, fld, en_val, dis_val)) in targets.into_iter().enumerate() {
+                    if persist && !use_http {
+                        let pin_id = format!("{}:{idx}", command.feature_id);
+                        if enable {
+                            calls.push((
+                                "pin_field",
+                                json!({
+                                    "id": pin_id,
+                                    "class_name": cls,
+                                    "field_name": fld,
+                                    "value": en_val
+                                }),
+                            ));
+                            rollback_entries.push(BridgeRpcRequest {
+                                token: auth_token.clone(),
+                                op: "unpin_field".to_owned(),
+                                params: json!({
+                                    "id": pin_id,
+                                    "class_name": cls,
+                                    "field_name": fld,
+                                    "restore_value": dis_val
+                                }),
+                            });
+                        } else {
+                            calls.push((
+                                "unpin_field",
+                                json!({
+                                    "id": pin_id,
+                                    "class_name": cls,
+                                    "field_name": fld,
+                                    "restore_value": dis_val
+                                }),
+                            ));
+                        }
+                    } else {
+                        let target_val = if enable { en_val } else { dis_val.clone() };
+                        let (op, params, undo_params) = if use_http {
+                            (
+                                "set_static",
+                                json!({ "type": cls, "member": fld, "value": target_val }),
+                                json!({ "type": cls, "member": fld, "value": dis_val }),
+                            )
+                        } else {
+                            (
+                                "set_field",
+                                json!({ "class_name": cls, "field_name": fld, "value": target_val }),
+                                json!({ "class_name": cls, "field_name": fld, "value": dis_val }),
+                            )
+                        };
+                        calls.push((op, params));
+                        if enable {
+                            rollback_entries.push(BridgeRpcRequest {
+                                token: auth_token.clone(),
+                                op: op.to_owned(),
+                                params: undo_params,
+                            });
+                        }
+                    }
+                }
+
                 let rollback_update = if enable {
-                    RollbackUpdate::Push(BridgeRpcRequest {
-                        token: auth_token.clone(),
-                        op: op.to_owned(),
-                        params: undo_params,
-                    })
+                    RollbackUpdate::Replace(rollback_entries)
                 } else {
                     RollbackUpdate::RemoveFeature
                 };
                 (
-                    op,
-                    params,
+                    calls,
                     rollback_update,
-                    format!("Unity field '{class_name}.{field_name}' set (enable={enable})"),
+                    format!(
+                        "Unity field '{class_name}.{field_name}' {} (enable={enable}, targets={target_count})",
+                        if persist && !use_http {
+                            "pinned"
+                        } else {
+                            "set"
+                        }
+                    ),
                 )
             }
             (
                 UnityFeatureBinding::SetField {
                     class_name,
                     field_name,
+                    persist,
+                    scale,
+                    reciprocal,
+                    extra_targets,
                     ..
                 },
-                FeatureValue::Integer(v),
+                ref raw_val @ (FeatureValue::Integer(_) | FeatureValue::Float(_)),
             ) => {
-                let val = json!(v);
-                let (op, params) = if use_http {
-                    (
-                        "set_static",
-                        json!({ "type": class_name, "member": field_name, "value": val }),
-                    )
-                } else {
-                    (
-                        "set_field",
-                        json!({ "class_name": class_name, "field_name": field_name, "value": val }),
-                    )
+                let display_val = match raw_val {
+                    FeatureValue::Integer(v) => v.to_string(),
+                    FeatureValue::Float(v) => v.to_string(),
+                    _ => unreachable!(),
                 };
-                let rollback_update = if use_http {
-                    RollbackUpdate::Push(BridgeRpcRequest {
-                        token: String::new(),
-                        op: "undo_write".to_owned(),
-                        params: json!({ "steps": 1 }),
-                    })
+                let mut targets = Vec::with_capacity(1 + extra_targets.len());
+                targets.push((class_name.clone(), field_name.clone(), scale, reciprocal));
+                for extra in extra_targets {
+                    targets.push((
+                        extra.class_name,
+                        extra.field_name,
+                        extra.scale,
+                        extra.reciprocal,
+                    ));
+                }
+
+                let target_count = targets.len();
+                let mut calls = Vec::with_capacity(target_count);
+                let mut rollback_entries = Vec::new();
+                for (idx, (cls, fld, target_scale, target_reciprocal)) in
+                    targets.into_iter().enumerate()
+                {
+                    let val = transform_numeric_value(raw_val, target_scale, target_reciprocal)?;
+                    if persist && !use_http {
+                        let pin_id = format!("{}:{idx}", command.feature_id);
+                        calls.push((
+                            "pin_field",
+                            json!({
+                                "id": pin_id,
+                                "class_name": cls,
+                                "field_name": fld,
+                                "value": val
+                            }),
+                        ));
+                        rollback_entries.push(BridgeRpcRequest {
+                            token: auth_token.clone(),
+                            op: "unpin_field".to_owned(),
+                            params: json!({ "id": pin_id }),
+                        });
+                    } else if use_http {
+                        calls.push((
+                            "set_static",
+                            json!({ "type": cls, "member": fld, "value": val }),
+                        ));
+                        rollback_entries.push(BridgeRpcRequest {
+                            token: String::new(),
+                            op: "undo_write".to_owned(),
+                            params: json!({ "steps": 1 }),
+                        });
+                    } else {
+                        calls.push((
+                            "set_field",
+                            json!({ "class_name": cls, "field_name": fld, "value": val }),
+                        ));
+                    }
+                }
+
+                let rollback_update = if persist && !use_http {
+                    RollbackUpdate::Replace(rollback_entries)
+                } else if use_http {
+                    RollbackUpdate::Append(rollback_entries)
                 } else {
                     RollbackUpdate::None
                 };
                 (
-                    op,
-                    params,
+                    calls,
                     rollback_update,
-                    format!("Unity field '{class_name}.{field_name}' = {v}"),
-                )
-            }
-            (
-                UnityFeatureBinding::SetField {
-                    class_name,
-                    field_name,
-                    ..
-                },
-                FeatureValue::Float(v),
-            ) => {
-                let val = json!(v);
-                let (op, params) = if use_http {
-                    (
-                        "set_static",
-                        json!({ "type": class_name, "member": field_name, "value": val }),
-                    )
-                } else {
-                    (
-                        "set_field",
-                        json!({ "class_name": class_name, "field_name": field_name, "value": val }),
-                    )
-                };
-                let rollback_update = if use_http {
-                    RollbackUpdate::Push(BridgeRpcRequest {
-                        token: String::new(),
-                        op: "undo_write".to_owned(),
-                        params: json!({ "steps": 1 }),
-                    })
-                } else {
-                    RollbackUpdate::None
-                };
-                (
-                    op,
-                    params,
-                    rollback_update,
-                    format!("Unity field '{class_name}.{field_name}' = {v}"),
+                    format!(
+                        "Unity field '{class_name}.{field_name}' = {display_val} (targets={target_count})"
+                    ),
                 )
             }
             (
@@ -703,11 +1095,116 @@ impl RuntimeProvider for UnityBridgeRuntime {
                     )
                 };
                 (
-                    op,
-                    params,
+                    vec![(op, params)],
                     RollbackUpdate::None,
                     format!("Invoked Unity method '{class_name}.{method_name}()'"),
                 )
+            }
+            (
+                UnityFeatureBinding::TargetLock {
+                    player_class,
+                    camera_class,
+                    target_class,
+                    lock_method,
+                    unlock_method,
+                    alive_checks,
+                    max_range,
+                    height_offset,
+                    lock_speed,
+                    require_collider,
+                    interval_ms,
+                    ..
+                },
+                FeatureValue::Toggle(enable),
+            ) => {
+                if use_http {
+                    return Err(RuntimeError::InvalidPayload(format!(
+                        "target_lock feature '{}' requires standalone NekodUnityBridge (nekod_json_line_v1)",
+                        command.feature_id
+                    )));
+                }
+                let unpin_params = json!({ "id": command.feature_id });
+                if enable {
+                    let pin_params = json!({
+                        "id": command.feature_id,
+                        "player_class": player_class,
+                        "camera_class": camera_class,
+                        "target_class": target_class,
+                        "lock_method": lock_method,
+                        "unlock_method": unlock_method,
+                        "alive_checks": alive_checks,
+                        "max_range": max_range,
+                        "height_offset": height_offset,
+                        "lock_speed": lock_speed,
+                        "require_collider": require_collider,
+                        "interval_ms": interval_ms,
+                    });
+                    (
+                        vec![("pin_target_lock", pin_params)],
+                        RollbackUpdate::Replace(vec![BridgeRpcRequest {
+                            token: auth_token.clone(),
+                            op: "unpin_target_lock".to_owned(),
+                            params: unpin_params,
+                        }]),
+                        format!(
+                            "Unity target lock '{target_class}' -> '{camera_class}.{lock_method}' armed (range={max_range})"
+                        ),
+                    )
+                } else {
+                    (
+                        vec![("unpin_target_lock", unpin_params)],
+                        RollbackUpdate::RemoveFeature,
+                        format!("Unity target lock '{target_class}' disarmed"),
+                    )
+                }
+            }
+            (
+                UnityFeatureBinding::DamageAura {
+                    player_class,
+                    target_class,
+                    damage_amount,
+                    radius,
+                    interval_ms,
+                    handlers,
+                    ..
+                },
+                FeatureValue::Toggle(enable),
+            ) => {
+                if use_http {
+                    return Err(RuntimeError::InvalidPayload(format!(
+                        "damage_aura feature '{}' requires standalone NekodUnityBridge (nekod_json_line_v1)",
+                        command.feature_id
+                    )));
+                }
+                let unpin_params = json!({ "id": command.feature_id });
+                if enable {
+                    let pin_params = json!({
+                        "id": command.feature_id,
+                        "player_class": player_class,
+                        "target_class": target_class,
+                        "damage_amount": damage_amount,
+                        "radius": radius,
+                        "interval_ms": interval_ms,
+                        "handlers": handlers,
+                    });
+                    (
+                        vec![("pin_damage_aura", pin_params)],
+                        RollbackUpdate::Replace(vec![BridgeRpcRequest {
+                            token: auth_token.clone(),
+                            op: "unpin_damage_aura".to_owned(),
+                            params: unpin_params,
+                        }]),
+                        format!(
+                            "Unity damage aura '{target_class}' armed (damage={damage_amount}, radius={radius})"
+                        ),
+                    )
+                } else {
+                    (
+                        vec![("unpin_damage_aura", unpin_params)],
+                        RollbackUpdate::RemoveFeature,
+                        format!("Unity damage aura '{target_class}' disarmed"),
+                    )
+                }
             }
             _ => {
                 return Err(RuntimeError::InvalidPayload(format!(
@@ -717,11 +1214,30 @@ impl RuntimeProvider for UnityBridgeRuntime {
             }
         };
 
-        send_unity_rpc(use_http, endpoint, &auth_token, op, params)?;
+        for (op, params) in calls {
+            send_unity_rpc(use_http, endpoint, &auth_token, op, params)
+                .map_err(map_bridge_rpc_error)?;
+        }
 
         self.store.with_session_mut(session_id, |session| {
             match rollback_update {
-                RollbackUpdate::Push(req) => session.rollback_stack.push((command.feature_id, req)),
+                RollbackUpdate::Replace(reqs) => {
+                    session
+                        .rollback_stack
+                        .retain(|(fid, _)| fid != &command.feature_id);
+                    for req in reqs {
+                        session
+                            .rollback_stack
+                            .push((command.feature_id.clone(), req));
+                    }
+                }
+                RollbackUpdate::Append(reqs) => {
+                    for req in reqs {
+                        session
+                            .rollback_stack
+                            .push((command.feature_id.clone(), req));
+                    }
+                }
                 RollbackUpdate::RemoveFeature => session
                     .rollback_stack
                     .retain(|(fid, _)| fid != &command.feature_id),
@@ -1561,5 +2077,488 @@ mod tests {
             "expected early abort diagnostic, got {:?}",
             diag.recent_events
         );
+    }
+
+    #[test]
+    fn toggle_field_with_persist_and_extra_targets_pins_and_rolls_back_lifo() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_srv = Arc::clone(&seen);
+
+        // ping + 3 pin_field + 3 unpin_field rollback requests = 7
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(7) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap().to_owned();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"mono\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    seen_srv.lock().unwrap().push((op, req["params"].clone()));
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"updated\":1}}}}").unwrap();
+                }
+            }
+        });
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Mono, UnityLoaderKind::BepinexMono, port);
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "mono",
+                "loader": "bepinex_mono",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [{
+                    "kind": "toggle_field",
+                    "feature_id": "infinite-ammo",
+                    "class_name": "Invector.vShooter.vShooterManager",
+                    "field_name": "AllAmmoInfinity",
+                    "enabled_value": true,
+                    "disabled_value": false,
+                    "persist": true,
+                    "extra_targets": [
+                        {
+                            "class_name": "Invector.vShooter.vShooterManager",
+                            "field_name": "rWeapon.isInfinityAmmo",
+                            "enabled_value": true,
+                            "disabled_value": false
+                        },
+                        {
+                            "class_name": "Invector.vShooter.vShooterManager",
+                            "field_name": "rWeapon.dontUseReload",
+                            "enabled_value": true,
+                            "disabled_value": false
+                        }
+                    ]
+                }]
+            })
+            .to_string(),
+        );
+
+        let sid = runtime.start_session(req).unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "infinite-ammo".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        let diag = runtime.stop_session(&sid).unwrap();
+        assert_eq!(diag.rollback_failures, 0);
+        server.join().unwrap();
+
+        let ops = seen.lock().unwrap();
+        assert_eq!(ops.len(), 6);
+        assert_eq!(ops[0].0, "pin_field");
+        assert_eq!(ops[0].1["id"], "infinite-ammo:0");
+        assert_eq!(ops[1].0, "pin_field");
+        assert_eq!(ops[1].1["id"], "infinite-ammo:1");
+        assert_eq!(ops[1].1["field_name"], "rWeapon.isInfinityAmmo");
+        assert_eq!(ops[2].0, "pin_field");
+        assert_eq!(ops[2].1["id"], "infinite-ammo:2");
+        assert_eq!(ops[2].1["field_name"], "rWeapon.dontUseReload");
+
+        // LIFO rollback restores 2 -> 1 -> 0
+        assert_eq!(ops[3].0, "unpin_field");
+        assert_eq!(ops[3].1["id"], "infinite-ammo:2");
+        assert_eq!(ops[3].1["restore_value"], false);
+        assert_eq!(ops[4].0, "unpin_field");
+        assert_eq!(ops[4].1["id"], "infinite-ammo:1");
+        assert_eq!(ops[5].0, "unpin_field");
+        assert_eq!(ops[5].1["id"], "infinite-ammo:0");
+    }
+
+    #[test]
+    fn set_field_with_scale_and_reciprocal_transforms_and_rejects_non_positive() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_srv = Arc::clone(&seen);
+
+        // ping + 3 (player-damage) + 2 (attack-speed) + 3 unpin + 2 unpin? wait:
+        // player-damage (3 pin) + attack-speed (2 pin) + stop rollback (5 unpin) = 11 total
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(11) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap().to_owned();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"mono\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    seen_srv.lock().unwrap().push((op, req["params"].clone()));
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"updated\":1}}}}").unwrap();
+                }
+            }
+        });
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Mono, UnityLoaderKind::BepinexMono, port);
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "mono",
+                "loader": "bepinex_mono",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [
+                    {
+                        "kind": "set_field",
+                        "feature_id": "player-damage",
+                        "class_name": "Invector.vShooter.vShooterManager",
+                        "field_name": "rWeapon.maxDamage",
+                        "persist": true,
+                        "extra_targets": [
+                            {
+                                "class_name": "Invector.vShooter.vShooterManager",
+                                "field_name": "rWeapon.minDamage",
+                                "scale": 0.75
+                            },
+                            {
+                                "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+                                "field_name": "Damage"
+                            }
+                        ]
+                    },
+                    {
+                        "kind": "set_field",
+                        "feature_id": "attack-speed",
+                        "class_name": "Invector.vShooter.vShooterManager",
+                        "field_name": "rWeapon.shootFrequency",
+                        "persist": true,
+                        "reciprocal": true,
+                        "extra_targets": [
+                            {
+                                "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+                                "field_name": "AtkSpd"
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let sid = runtime.start_session(req).unwrap();
+
+        let invalid = runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "attack-speed".to_owned(),
+                    value: FeatureValue::Float(0.0),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(invalid, RuntimeError::InvalidPayload(_)));
+
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "player-damage".to_owned(),
+                    value: FeatureValue::Float(4000.0),
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "attack-speed".to_owned(),
+                    value: FeatureValue::Float(10.0),
+                },
+            )
+            .unwrap();
+
+        let diag = runtime.stop_session(&sid).unwrap();
+        assert_eq!(diag.rollback_failures, 0);
+        server.join().unwrap();
+
+        let ops = seen.lock().unwrap();
+        assert_eq!(ops.len(), 10);
+        assert_eq!(ops[0].1["value"], 4000.0);
+        assert_eq!(ops[1].1["field_name"], "rWeapon.minDamage");
+        assert_eq!(ops[1].1["value"], 3000.0);
+        assert_eq!(ops[2].1["field_name"], "Damage");
+        assert_eq!(ops[2].1["value"], 4000.0);
+        assert_eq!(ops[3].1["field_name"], "rWeapon.shootFrequency");
+        assert!((ops[3].1["value"].as_f64().unwrap() - 0.1).abs() < 1e-9);
+        assert_eq!(ops[4].1["field_name"], "AtkSpd");
+        assert_eq!(ops[4].1["value"], 10.0);
+        assert_eq!(ops[5].0, "unpin_field");
+    }
+
+    #[test]
+    fn persist_feature_reports_upgrade_hint_on_legacy_bridge() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"mono\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":false,\"error\":\"unsupported op: {op}\"}}"
+                    )
+                    .unwrap();
+                }
+            }
+        });
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Mono, UnityLoaderKind::BepinexMono, port);
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "mono",
+                "loader": "bepinex_mono",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [{
+                    "kind": "toggle_field",
+                    "feature_id": "god-mode",
+                    "class_name": "PlayerController",
+                    "field_name": "isImmortal",
+                    "enabled_value": true,
+                    "disabled_value": false,
+                    "persist": true
+                }]
+            })
+            .to_string(),
+        );
+
+        let sid = runtime.start_session(req).unwrap();
+        let err = runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "god-mode".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("v0.3.0") && msg.contains("outdated"),
+            "got: {msg}"
+        );
+
+        runtime.stop_session(&sid).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn target_lock_and_damage_aura_pin_and_roll_back_lifo() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_srv = Arc::clone(&seen);
+
+        // ping + pin_target_lock + pin_damage_aura + unpin_damage_aura + unpin_target_lock = 5
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(5) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap().to_owned();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"mono\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    seen_srv.lock().unwrap().push((op, req["params"].clone()));
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"pinned\":true}}}}").unwrap();
+                }
+            }
+        });
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Mono, UnityLoaderKind::BepinexMono, port);
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "mono",
+                "loader": "bepinex_mono",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [
+                    {
+                        "kind": "target_lock",
+                        "feature_id": "auto-lock-enemy",
+                        "player_class": "Invector.vCharacterController.vThirdPersonController",
+                        "camera_class": "Invector.vCamera.vThirdPersonCamera",
+                        "target_class": "GunSoulGirl2.GS2_EnemyStat",
+                        "alive_checks": [
+                            {
+                                "component_class": "Invector.vHealthController",
+                                "dead_field": "isDead",
+                                "health_field": "currentHealth"
+                            }
+                        ],
+                        "max_range": 55.0,
+                        "lock_speed": 12.0,
+                        "interval_ms": 60
+                    },
+                    {
+                        "kind": "damage_aura",
+                        "feature_id": "kill-aura",
+                        "player_class": "Invector.vCharacterController.vThirdPersonController",
+                        "target_class": "GunSoulGirl2.GS2_EnemyStat",
+                        "damage_amount": 999999,
+                        "radius": 30.0,
+                        "interval_ms": 250,
+                        "handlers": [
+                            {
+                                "kind": "invector_health",
+                                "component_class": "Invector.vHealthController",
+                                "damage_type_class": "Invector.vDamage",
+                                "method_name": "TakeDamage",
+                                "dead_field": "isDead",
+                                "health_field": "currentHealth"
+                            },
+                            {
+                                "kind": "emerald_ai",
+                                "component_class": "EmeraldAI.EmeraldAISystem",
+                                "method_name": "Damage",
+                                "dead_field": "IsDead",
+                                "health_field": "CurrentHealth"
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let sid = runtime.start_session(req).unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "auto-lock-enemy".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "kill-aura".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+
+        let diag = runtime.stop_session(&sid).unwrap();
+        assert_eq!(diag.rollback_failures, 0);
+        server.join().unwrap();
+
+        let ops = seen.lock().unwrap();
+        assert_eq!(ops.len(), 4);
+        assert_eq!(ops[0].0, "pin_target_lock");
+        assert_eq!(ops[0].1["id"], "auto-lock-enemy");
+        assert_eq!(ops[0].1["lock_method"], "SetLockTarget");
+        assert_eq!(ops[0].1["unlock_method"], "RemoveLockTarget");
+        assert_eq!(ops[0].1["max_range"], 55.0);
+        assert_eq!(ops[1].0, "pin_damage_aura");
+        assert_eq!(ops[1].1["id"], "kill-aura");
+        assert_eq!(ops[1].1["damage_amount"], 999999);
+        assert_eq!(ops[2].0, "unpin_damage_aura");
+        assert_eq!(ops[2].1["id"], "kill-aura");
+        assert_eq!(ops[3].0, "unpin_target_lock");
+        assert_eq!(ops[3].1["id"], "auto-lock-enemy");
+    }
+
+    #[test]
+    fn rejects_invalid_damage_aura_handler_kind_and_zero_radius() {
+        let runtime = UnityBridgeRuntime::new();
+
+        let bad_kind: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+            "schema_version": "1.0.0",
+            "flavor": "mono",
+            "loader": "bepinex_mono",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "features": [{
+                "kind": "damage_aura",
+                "feature_id": "kill-aura",
+                "player_class": "Player",
+                "target_class": "Enemy",
+                "damage_amount": 1000,
+                "radius": 20.0,
+                "handlers": [{
+                    "kind": "arbitrary_csharp",
+                    "component_class": "Enemy",
+                    "method_name": "Kill"
+                }]
+            }]
+        }))
+        .unwrap();
+        let err = UnityBridgeRuntime::validate_payload(&bad_kind).unwrap_err();
+        assert!(matches!(err, RuntimeError::InvalidPayload(_)));
+
+        let bad_radius: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+            "schema_version": "1.0.0",
+            "flavor": "mono",
+            "loader": "bepinex_mono",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "features": [{
+                "kind": "damage_aura",
+                "feature_id": "kill-aura",
+                "player_class": "Player",
+                "target_class": "Enemy",
+                "damage_amount": 1000,
+                "radius": 0.0,
+                "handlers": [{
+                    "kind": "emerald_ai",
+                    "component_class": "EmeraldAI.EmeraldAISystem",
+                    "method_name": "Damage"
+                }]
+            }]
+        }))
+        .unwrap();
+        let err2 = UnityBridgeRuntime::validate_payload(&bad_radius).unwrap_err();
+        assert!(matches!(err2, RuntimeError::InvalidPayload(_)));
+        let _ = runtime;
     }
 }
