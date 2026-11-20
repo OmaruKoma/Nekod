@@ -228,6 +228,7 @@ export default function App() {
   const [profileJsonBox, setProfileJsonBox] = useState("");
   const [diagnosticBundle, setDiagnosticBundle] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const toastSeqRef = useRef(0);
 
   const selectedTrainer = useMemo(() => {
     if (trainers.length === 0) return null;
@@ -250,7 +251,7 @@ export default function App() {
     (gameEnv?.anti_cheat_files_present.length ?? 0) > 0;
 
   function pushHudToast(text: string, tone: HudToast["tone"] = "info") {
-    const id = Date.now() + Math.floor(Math.random() * 1000);
+    const id = ++toastSeqRef.current;
     setHudToasts((prev) => [...prev.slice(-3), { id, text, tone }]);
     window.setTimeout(() => {
       setHudToasts((prev) => prev.filter((t) => t.id !== id));
@@ -269,51 +270,45 @@ export default function App() {
   }
 
   function toggleFavorite(gameKey: string) {
-    setFavoriteKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(gameKey)) {
-        next.delete(gameKey);
-      } else {
-        next.add(gameKey);
-      }
-      try {
-        localStorage.setItem(FAV_STORAGE_KEY, JSON.stringify([...next]));
-      } catch {
-        // Ignore storage quota errors
-      }
-      return next;
-    });
+    const next = new Set(favoriteKeys);
+    if (next.has(gameKey)) {
+      next.delete(gameKey);
+    } else {
+      next.add(gameKey);
+    }
+    setFavoriteKeys(next);
+    try {
+      localStorage.setItem(FAV_STORAGE_KEY, JSON.stringify([...next]));
+    } catch {
+      // Ignore storage quota errors
+    }
   }
 
   function toggleSoundEnabled() {
-    setSoundEnabled((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(SOUND_STORAGE_KEY, String(next));
-      } catch {
-        // Ignore
-      }
-      if (next) soundFx.toggleOn();
-      return next;
-    });
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    try {
+      localStorage.setItem(SOUND_STORAGE_KEY, String(next));
+    } catch {
+      // Ignore
+    }
+    if (next) soundFx.toggleOn();
   }
 
   function toggleAutoAttach() {
-    setAutoAttachEnabled((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(AUTO_ATTACH_STORAGE_KEY, String(next));
-      } catch {
-        // Ignore
-      }
-      pushHudToast(
-        next
-          ? "已开启自动附着：检测到已授权游戏启动将自动注入"
-          : "已关闭自动附着模式",
-        "info",
-      );
-      return next;
-    });
+    const next = !autoAttachEnabled;
+    setAutoAttachEnabled(next);
+    try {
+      localStorage.setItem(AUTO_ATTACH_STORAGE_KEY, String(next));
+    } catch {
+      // Ignore
+    }
+    pushHudToast(
+      next
+        ? "已开启自动附着：检测到已授权游戏启动将自动注入"
+        : "已关闭自动附着模式",
+      "info",
+    );
   }
 
   async function loadArtworksForLibrary(lib: LibraryGameView[]) {
@@ -2036,6 +2031,7 @@ export default function App() {
                               selectedTrainer &&
                               void handleOneClickInject(selectedTrainer)
                             }
+                            title="连接到当前已经在运行的游戏进程并激活 Mod"
                           >
                             <Zap size={14} strokeWidth={1.5} aria-hidden="true" />
                             <span>
@@ -2058,6 +2054,7 @@ export default function App() {
                             selectedTrainer &&
                             void handleOneClickInject(selectedTrainer)
                           }
+                          title="连接到当前已经在运行的游戏进程并激活 Mod"
                         >
                           <Zap size={14} strokeWidth={1.5} aria-hidden="true" />
                           <span>
