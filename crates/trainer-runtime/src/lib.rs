@@ -55,8 +55,9 @@ pub use sandbox::{SandboxBudget, SandboxHostBridge, SandboxedGuestAdapter, Sandb
 pub use session::{check_running_anti_cheat, validate_session_preflight};
 pub use ue4ss_bridge::{Ue4ssBridgePayload, Ue4ssBridgeRuntime, Ue4ssFeatureBinding};
 pub use unity_bridge::{
-    UnityBridgePayload, UnityBridgeProtocol, UnityBridgeRuntime, UnityFeatureBinding, UnityFlavor,
-    UnityLoaderKind, resolve_unity_explorer_discovery_port,
+    NekodUnityDiscovery, UnityBridgePayload, UnityBridgeProtocol, UnityBridgeRuntime,
+    UnityFeatureBinding, UnityFlavor, UnityLoaderKind, resolve_nekod_unity_discovery,
+    resolve_unity_explorer_discovery_port,
 };
 
 use session::{

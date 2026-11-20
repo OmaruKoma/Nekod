@@ -394,4 +394,26 @@ mod tests {
             validate_trainer_package_dir(&pkg_dir).expect("starter v1 trainer bridge validates");
         assert_eq!(trainer_manifest.id, mod_manifest.id);
     }
+
+    #[test]
+    fn validates_unity_standalone_starter_nmod_package() {
+        let pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("unity-standalone-starter");
+        let (mod_manifest, _) =
+            validate_nmod_package_dir(&pkg_dir).expect("standalone .nmod validates cleanly");
+        assert_eq!(mod_manifest.runtime.kind, RuntimeKind::UnityBridgeV1);
+        assert!(
+            mod_manifest
+                .dependencies
+                .iter()
+                .any(|d| d.dependency_id == "nekod-unity-bridge")
+        );
+
+        let (trainer_manifest, _) =
+            validate_trainer_package_dir(&pkg_dir).expect("standalone v1 bridge validates");
+        assert_eq!(trainer_manifest.id, mod_manifest.id);
+    }
 }

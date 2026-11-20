@@ -1441,11 +1441,11 @@ fn build_forged_entrypoint_payload(
             "scripts/unity_bridge.json".to_owned(),
             serde_json::to_string_pretty(&json!({
                 "schema_version": "1.0.0",
-                "protocol": "unity_explorer_mcp_http_v1",
+                "protocol": "nekod_json_line_v1",
                 "flavor": "il2cpp",
                 "loader": "bepinex_il2cpp",
                 "host": "127.0.0.1",
-                "port": 12345,
+                "port": 19540,
                 "auto_discover_by_pid": true,
                 "features": [{
                     "kind": "toggle_field",

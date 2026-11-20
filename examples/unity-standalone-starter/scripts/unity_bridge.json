@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "protocol": "nekod_json_line_v1",
+  "flavor": "il2cpp",
+  "loader": "bepinex_il2cpp",
+  "host": "127.0.0.1",
+  "port": 19540,
+  "auto_discover_by_pid": true,
+  "features": [
+    {
+      "kind": "toggle_field",
+      "feature_id": "time-pause",
+      "class_name": "UnityEngine.Time",
+      "field_name": "timeScale",
+      "enabled_value": 0.0,
+      "disabled_value": 1.0
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "game-speed",
+      "class_name": "UnityEngine.Time",
+      "field_name": "timeScale"
+    },
+    {
+      "kind": "invoke_method",
+      "feature_id": "unload-unused-assets",
+      "class_name": "UnityEngine.Resources",
+      "method_name": "UnloadUnusedAssets"
+    }
+  ]
+}

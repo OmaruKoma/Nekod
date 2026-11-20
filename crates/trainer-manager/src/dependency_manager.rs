@@ -195,6 +195,9 @@ fn matches_loader_id(dependency_id: &str, kind: InstalledLoaderKind) -> bool {
         InstalledLoaderKind::BepInExMono => low == "bepinex-mono" || low == "bepinex",
         InstalledLoaderKind::BepInExIl2cpp => low == "bepinex-il2cpp" || low == "bepinex",
         InstalledLoaderKind::MelonLoader => low.contains("melonloader"),
+        InstalledLoaderKind::NekodUnityBridge => {
+            low.contains("nekod-unity-bridge") || low.contains("nekodunitybridge")
+        }
         InstalledLoaderKind::UnityExplorerMcpBridge => {
             low.contains("unity-explorer-mcp") || low.contains("mcpbridge")
         }

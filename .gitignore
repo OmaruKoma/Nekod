@@ -3,6 +3,8 @@
 **/target/
 dist/
 build/
+bin/
+obj/
 
 # Node / Frontend (future apps/desktop)
 node_modules/

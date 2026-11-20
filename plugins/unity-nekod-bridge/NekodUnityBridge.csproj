@@ -1,0 +1,91 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Nekod Standalone Unity Bridge Plugin (Zero UnityExplorer / Zero UniverseLib / Zero mcs.dll).
+    Build targets:
+      Release_IL2CPP : BepInEx 6 IL2CPP (net6.0)        -> dist/il2cpp/NekodUnityBridge.IL2CPP.dll
+      Release_Mono   : BepInEx 5 Mono   (netstandard2.0) -> dist/mono/NekodUnityBridge.Mono.dll
+
+    Usage:
+      dotnet build -c Release_IL2CPP -p:UnityGameDir="D:\SteamLibrary\steamapps\common\MyIl2CppGame"
+      dotnet build -c Release_Mono   -p:UnityGameDir="D:\SteamLibrary\steamapps\common\MyMonoGame"
+  -->
+  <PropertyGroup>
+    <Configurations>Release_IL2CPP;Release_Mono</Configurations>
+    <Configuration Condition="'$(Configuration)'==''">Release_IL2CPP</Configuration>
+    <OutputType>Library</OutputType>
+    <LangVersion>latest</LangVersion>
+    <Optimize>true</Optimize>
+    <DebugSymbols>false</DebugSymbols>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <RootNamespace>Nekod.UnityBridge</RootNamespace>
+    <NoWarn>$(NoWarn);CS8632</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)'=='Release_IL2CPP'">
+    <TargetFramework>net6.0</TargetFramework>
+    <DefineConstants>IL2CPP;BIE6</DefineConstants>
+    <AssemblyName>NekodUnityBridge.IL2CPP</AssemblyName>
+    <OutputPath>dist\il2cpp\</OutputPath>
+    <BepInExCoreDir Condition="'$(BepInExCoreDir)'==''">$(UnityGameDir)\BepInEx\core</BepInExCoreDir>
+    <UnityInteropDir Condition="'$(UnityInteropDir)'==''">$(UnityGameDir)\BepInEx\interop</UnityInteropDir>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)'=='Release_Mono'">
+    <TargetFramework Condition="'$(MonoTargetFramework)'==''">netstandard2.1</TargetFramework>
+    <TargetFramework Condition="'$(MonoTargetFramework)'!=''">$(MonoTargetFramework)</TargetFramework>
+    <DefineConstants>MONO;BIE5</DefineConstants>
+    <AssemblyName>NekodUnityBridge.Mono</AssemblyName>
+    <OutputPath>dist\mono\</OutputPath>
+    <BepInExCoreDir Condition="'$(BepInExCoreDir)'==''">$(UnityGameDir)\BepInEx\core</BepInExCoreDir>
+  </PropertyGroup>
+
+  <!-- BepInEx 6 IL2CPP references -->
+  <ItemGroup Condition="'$(Configuration)'=='Release_IL2CPP'">
+    <Reference Include="BepInEx.Core">
+      <HintPath>$(BepInExCoreDir)\BepInEx.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx.Unity.IL2CPP">
+      <HintPath>$(BepInExCoreDir)\BepInEx.Unity.IL2CPP.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(BepInExCoreDir)\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(UnityInteropDir)\Il2Cppmscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(UnityInteropDir)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(UnityInteropDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- BepInEx 5 Mono references (auto-discovers *_Data\Managed under UnityGameDir if UnityManagedDir omitted) -->
+  <ItemGroup Condition="'$(Configuration)'=='Release_Mono'">
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExCoreDir)\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(UnityManagedDir)\UnityEngine.dll" Condition="'$(UnityManagedDir)'!='' and Exists('$(UnityManagedDir)\UnityEngine.dll')">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(UnityManagedDir)\UnityEngine.CoreModule.dll" Condition="'$(UnityManagedDir)'!='' and Exists('$(UnityManagedDir)\UnityEngine.CoreModule.dll')">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(UnityGameDir)\*_Data\Managed\UnityEngine.dll" Condition="'$(UnityManagedDir)'==''">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(UnityGameDir)\*_Data\Managed\UnityEngine.CoreModule.dll" Condition="'$(UnityManagedDir)'==''">
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

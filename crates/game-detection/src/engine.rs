@@ -28,6 +28,7 @@ pub enum InstalledLoaderKind {
     BepInExMono,
     BepInExIl2cpp,
     MelonLoader,
+    NekodUnityBridge,
     UnityExplorerMcpBridge,
     Ue4ss,
     ReFramework,
@@ -177,7 +178,17 @@ fn detect_loaders(root: &Path) -> Vec<DetectedLoader> {
         });
     }
 
-    if let Some(mcp_rel) = find_mcp_bridge_rel(&root.join("BepInEx").join("plugins")) {
+    if let Some(nekod_rel) =
+        find_plugin_rel(&root.join("BepInEx").join("plugins"), "nekodunitybridge")
+    {
+        loaders.push(DetectedLoader {
+            kind: InstalledLoaderKind::NekodUnityBridge,
+            entry_path: nekod_rel,
+            detected_version: Some("0.1.0".to_owned()),
+        });
+    }
+
+    if let Some(mcp_rel) = find_plugin_rel(&root.join("BepInEx").join("plugins"), "mcpbridge") {
         loaders.push(DetectedLoader {
             kind: InstalledLoaderKind::UnityExplorerMcpBridge,
             entry_path: mcp_rel,
@@ -223,7 +234,7 @@ fn detect_loaders(root: &Path) -> Vec<DetectedLoader> {
     loaders
 }
 
-fn find_mcp_bridge_rel(plugins_dir: &Path) -> Option<String> {
+fn find_plugin_rel(plugins_dir: &Path, needle: &str) -> Option<String> {
     let entries = fs::read_dir(plugins_dir).ok()?;
     for entry in entries.flatten() {
         let p = entry.path();
@@ -231,7 +242,7 @@ fn find_mcp_bridge_rel(plugins_dir: &Path) -> Option<String> {
             && let Some(name) = p.file_name().and_then(|n| n.to_str())
         {
             let lower = name.to_ascii_lowercase();
-            if lower.contains("mcpbridge") && lower.ends_with(".dll") {
+            if lower.contains(needle) && lower.ends_with(".dll") {
                 return Some(format!("BepInEx/plugins/{name}"));
             }
         } else if p.is_dir()
@@ -244,7 +255,7 @@ fn find_mcp_bridge_rel(plugins_dir: &Path) -> Option<String> {
                     && let Some(name) = sp.file_name().and_then(|n| n.to_str())
                 {
                     let lower = name.to_ascii_lowercase();
-                    if lower.contains("mcpbridge") && lower.ends_with(".dll") {
+                    if lower.contains(needle) && lower.ends_with(".dll") {
                         return Some(format!("BepInEx/plugins/{dir_name}/{name}"));
                     }
                 }

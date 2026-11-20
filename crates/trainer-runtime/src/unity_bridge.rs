@@ -188,7 +188,49 @@ pub fn resolve_unity_explorer_discovery_port(
     u16::try_from(port_u64).ok().filter(|p| *p != 0)
 }
 
-fn find_mcp_bridge_dll(plugins_dir: &Path) -> Option<PathBuf> {
+/// Discovery record written by standalone `NekodUnityBridge` (`plugins/unity-nekod-bridge/`)
+/// under `%LOCALAPPDATA%\Nekod\bridges\unity-<pid>.json` (zero UnityExplorer dependency).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NekodUnityDiscovery {
+    pub port: u16,
+    pub auth_token: Option<String>,
+    pub flavor: Option<String>,
+}
+
+/// Resolves port and per-launch auth token from `<dir>/unity-<pid>.json` written by
+/// standalone `NekodUnityBridge.IL2CPP.dll` / `NekodUnityBridge.Mono.dll`.
+pub fn resolve_nekod_unity_discovery(
+    target_pid: u32,
+    custom_dir: Option<&str>,
+) -> Option<NekodUnityDiscovery> {
+    let dir: PathBuf = match custom_dir {
+        Some(custom) => PathBuf::from(custom),
+        None => {
+            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                PathBuf::from(local_app_data).join("Nekod").join("bridges")
+            } else {
+                std::env::temp_dir().join("Nekod").join("bridges")
+            }
+        }
+    };
+    let file = dir.join(format!("unity-{target_pid}.json"));
+    let raw = fs::read_to_string(file).ok()?;
+    let val: Value = serde_json::from_str(&raw).ok()?;
+    let port_u64 = val.get("port")?.as_u64()?;
+    let port = u16::try_from(port_u64).ok().filter(|p| *p != 0)?;
+    let auth_token = val
+        .get("auth_token")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let flavor = val.get("flavor").and_then(Value::as_str).map(str::to_owned);
+    Some(NekodUnityDiscovery {
+        port,
+        auth_token,
+        flavor,
+    })
+}
+
+fn find_plugin_dll_matching(plugins_dir: &Path, needle: &str) -> Option<PathBuf> {
     let entries = fs::read_dir(plugins_dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -196,7 +238,7 @@ fn find_mcp_bridge_dll(plugins_dir: &Path) -> Option<PathBuf> {
             && let Some(name) = path.file_name().and_then(|n| n.to_str())
         {
             let lower = name.to_ascii_lowercase();
-            if lower.contains("mcpbridge") && lower.ends_with(".dll") {
+            if lower.contains(needle) && lower.ends_with(".dll") {
                 return Some(path);
             }
         } else if path.is_dir()
@@ -205,7 +247,7 @@ fn find_mcp_bridge_dll(plugins_dir: &Path) -> Option<PathBuf> {
                     p.is_file()
                         && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
                             let lower = n.to_ascii_lowercase();
-                            lower.contains("mcpbridge") && lower.ends_with(".dll")
+                            lower.contains(needle) && lower.ends_with(".dll")
                         })
                 })
             })
@@ -264,11 +306,30 @@ impl RuntimeProvider for UnityBridgeRuntime {
             .map(|dep| {
                 let low = dep.dependency_id.to_ascii_lowercase();
                 let outcome = match game_install_dir {
+                    Some(dir) if low.contains("nekod-unity-bridge") => {
+                        if let Some(dll) = find_plugin_dll_matching(
+                            &dir.join("BepInEx").join("plugins"),
+                            "nekodunitybridge",
+                        ) {
+                            DependencyStatus::Satisfied {
+                                resolved_location: dll.display().to_string(),
+                            }
+                        } else {
+                            DependencyStatus::Missing {
+                                suggested_action: format!(
+                                    "Stage standalone '{}' ({}) from Plugin Bucket into BepInEx/plugins",
+                                    dep.dependency_id, dep.version_req
+                                ),
+                            }
+                        }
+                    }
                     Some(dir)
                         if (low.contains("unity-explorer-mcp") || low.contains("mcpbridge")) =>
                     {
-                        if let Some(dll) = find_mcp_bridge_dll(&dir.join("BepInEx").join("plugins"))
-                        {
+                        if let Some(dll) = find_plugin_dll_matching(
+                            &dir.join("BepInEx").join("plugins"),
+                            "mcpbridge",
+                        ) {
                             DependencyStatus::Satisfied {
                                 resolved_location: dll.display().to_string(),
                             }
@@ -343,27 +404,42 @@ impl RuntimeProvider for UnityBridgeRuntime {
         Self::validate_payload(&payload)?;
 
         let use_http = payload.protocol == UnityBridgeProtocol::UnityExplorerMcpHttpV1;
-        let resolved_port = if use_http && payload.auto_discover_by_pid {
-            resolve_unity_explorer_discovery_port(
+        let (resolved_port, effective_token) = if payload.auto_discover_by_pid {
+            if use_http {
+                let discovered_port = resolve_unity_explorer_discovery_port(
+                    req.target_process.pid,
+                    payload.discovery_dir.as_deref(),
+                )
+                .unwrap_or(payload.port);
+                (discovered_port, payload.auth_token.clone())
+            } else if let Some(disc) = resolve_nekod_unity_discovery(
                 req.target_process.pid,
                 payload.discovery_dir.as_deref(),
-            )
-            .unwrap_or(payload.port)
+            ) {
+                let tok = if payload.auth_token.trim().is_empty() {
+                    disc.auth_token.unwrap_or_default()
+                } else {
+                    payload.auth_token.clone()
+                };
+                (disc.port, tok)
+            } else {
+                (payload.port, payload.auth_token.clone())
+            }
         } else {
-            payload.port
+            (payload.port, payload.auth_token.clone())
         };
 
         let endpoint = if use_http {
             validate_loopback_host_port(&payload.host, resolved_port)?
         } else {
-            validate_loopback_bridge(&payload.host, resolved_port, &payload.auth_token)?
+            validate_loopback_bridge(&payload.host, resolved_port, &effective_token)?
         };
 
         // Perform handshake verifying reported Unity flavor (and optional PID) matches manifest.
         let ping_data = send_unity_rpc(
             use_http,
             endpoint,
-            &payload.auth_token,
+            &effective_token,
             "ping",
             if use_http {
                 json!({})
@@ -400,7 +476,7 @@ impl RuntimeProvider for UnityBridgeRuntime {
 
         let session = ManagedBridgeSession {
             endpoint,
-            auth_token: payload.auth_token.clone(),
+            auth_token: effective_token,
             target_process: req.target_process,
             runtime_kind: RuntimeKind::UnityBridgeV1,
             use_unity_explorer_http: use_http,
@@ -1040,5 +1116,98 @@ mod tests {
         assert_eq!(ops[4].0, "undo_write");
         assert_eq!(ops[5].0, "set_static");
         assert_eq!(ops[5].1["value"], json!(1.0));
+    }
+
+    #[test]
+    fn nekod_standalone_unity_bridge_discovers_pid_port_and_token_without_unity_explorer() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let discovery_dir = std::env::temp_dir().join(format!("nekod_standalone_unity_{nanos}"));
+        fs::create_dir_all(&discovery_dir).unwrap();
+        fs::write(
+            discovery_dir.join("unity-22040.json"),
+            serde_json::json!({
+                "pid": 22040,
+                "port": port,
+                "flavor": "il2cpp",
+                "loader": "bepinex_il2cpp",
+                "auth_token": token,
+                "unity_version": "2022.3.51f1",
+                "bridge_version": "0.1.0"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(req["token"], token);
+                let op = req["op"].as_str().unwrap();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"il2cpp\",\"pid\":22040,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"updated\":1}}}}").unwrap();
+                }
+            }
+        });
+
+        let payload = serde_json::json!({
+            "schema_version": "1.0.0",
+            "protocol": "nekod_json_line_v1",
+            "flavor": "il2cpp",
+            "loader": "bepinex_il2cpp",
+            "host": "127.0.0.1",
+            "port": 0,
+            "auto_discover_by_pid": true,
+            "discovery_dir": discovery_dir.display().to_string(),
+            "features": [{
+                "kind": "toggle_field",
+                "feature_id": "infinite-stamina",
+                "class_name": "UnityEngine.Time",
+                "field_name": "timeScale",
+                "enabled_value": 0.0,
+                "disabled_value": 1.0
+            }]
+        })
+        .to_string();
+
+        let mut req = unity_request(UnityFlavor::Il2cpp, UnityLoaderKind::BepinexIl2cpp, 0);
+        req.target_process.pid = 22040;
+        req.declarative_payload_json = Some(payload);
+
+        let router = CompositeRuntimeRouter::with_default_providers();
+        let sid = router.start_session(req).unwrap();
+        router
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "infinite-stamina".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        let diag = router.stop_session(&sid).unwrap();
+        assert_eq!(diag.rollback_failures, 0);
+        assert_eq!(diag.active_patches, 0);
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(discovery_dir);
     }
 }
