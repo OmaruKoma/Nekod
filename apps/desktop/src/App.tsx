@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  BridgeDeploymentStatus,
   CommunityTrainerView,
   CompatibilityRecord,
   CustomGamePathRecord,
@@ -21,17 +22,26 @@ import {
   nekodApi,
 } from "./api/nekod";
 
-type NavTab = "library" | "community" | "import" | "settings" | "logs";
+type NavTab = "workbench" | "community" | "import" | "settings" | "logs";
 
 const PERMISSION_LABELS: Record<PermissionScope, string> = {
-  "process.discover": "Locate running game process",
-  "process.read_memory": "Read game memory values",
-  "process.write_memory": "Modify game memory for active cheats",
-  "process.allocate_memory": "Allocate memory pages in game process",
-  "process.suspend_resume": "Briefly pause game threads during patches",
-  "filesystem.read_save_dir": "Read game save folder",
-  "filesystem.write_save_dir": "Modify files in game save folder",
-  "runtime.native_module": "Load native runtime library (disabled by default)",
+  "process.discover": "发现运行中的游戏进程",
+  "process.read_memory": "读取游戏内存数值",
+  "process.write_memory": "写入游戏内存以启用模组功能",
+  "process.allocate_memory": "在游戏进程中分配内存页",
+  "process.suspend_resume": "打补丁时短暂停顿游戏线程",
+  "filesystem.read_save_dir": "读取游戏存档目录",
+  "filesystem.write_save_dir": "修改游戏存档目录文件",
+  "runtime.native_module": "加载原生运行时模块（默认禁用）",
+};
+
+const ENGINE_LABELS: Record<GameEnvironmentProfile["engine"], string> = {
+  unity_mono: "Unity (Mono)",
+  unity_il2cpp: "Unity (IL2CPP)",
+  unreal_engine: "Unreal Engine",
+  re_engine: "RE Engine",
+  godot: "Godot",
+  native_unknown: "Native / Unknown",
 };
 
 function trustBadge(tier: TrustTier) {
@@ -43,11 +53,12 @@ function trustBadge(tier: TrustTier) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<NavTab>("library");
+  const [tab, setTab] = useState<NavTab>("workbench");
   const [games, setGames] = useState<LibraryGameView[]>([]);
   const [search, setSearch] = useState("");
   const [selectedGame, setSelectedGame] = useState<LibraryGameView | null>(null);
   const [trainers, setTrainers] = useState<TrainerDetailView[]>([]);
+  const [selectedTrainerId, setSelectedTrainerId] = useState<string | null>(null);
   const [customPaths, setCustomPaths] = useState<CustomGamePathRecord[]>([]);
   const [policy, setPolicy] = useState<SecurityPolicyConfig>({
     allow_third_party_native_modules: false,
@@ -64,16 +75,26 @@ export default function App() {
   const [trainerTrust, setTrainerTrust] = useState<TrustTier>("community_verified");
   const [gameManifestJson, setGameManifestJson] = useState("");
 
-  // P2 Runtime session state
+  // Runtime session state (One-Click Inject / Uninject)
   const [runningProcs, setRunningProcs] = useState<ProcessIdentity[]>([]);
   const [selectedPid, setSelectedPid] = useState<number | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeGameKey, setActiveGameKey] = useState<string | null>(null);
   const [activeTrainerId, setActiveTrainerId] = useState<string | null>(null);
   const [sessionDiag, setSessionDiag] = useState<RuntimeDiagnostics | null>(null);
   const [activeToggles, setActiveToggles] = useState<Record<string, boolean>>({});
   const [featureInputs, setFeatureInputs] = useState<Record<string, string>>({});
+  const [awaitingPermInject, setAwaitingPermInject] = useState<string | null>(null);
 
-  // P3 Community ecosystem & profiles state
+  // Companion bridge deployment state (DeploymentLedger)
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeDeploymentStatus | null>(null);
+  const [bridgeStatusByGame, setBridgeStatusByGame] = useState<
+    Record<string, BridgeDeploymentStatus>
+  >({});
+  const [bridgeSourceInput, setBridgeSourceInput] = useState("");
+  const [bridgeTargetInput, setBridgeTargetInput] = useState("");
+
+  // Community ecosystem & profiles state
   const [registrySources, setRegistrySources] = useState<RegistrySourceState[]>([]);
   const [communityTrainers, setCommunityTrainers] = useState<CommunityTrainerView[]>([]);
   const [updates, setUpdates] = useState<TrainerUpdateInfo[]>([]);
@@ -92,7 +113,24 @@ export default function App() {
   const [diagnosticBundle, setDiagnosticBundle] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
-  async function refreshAll() {
+  const selectedTrainer = useMemo(() => {
+    if (trainers.length === 0) return null;
+    return trainers.find((t) => t.trainer_id === selectedTrainerId) ?? trainers[0];
+  }, [trainers, selectedTrainerId]);
+
+  const isSelectedGameInjected =
+    activeSessionId !== null &&
+    selectedGame !== null &&
+    activeGameKey === selectedGame.library_key;
+
+  const isSelectedTrainerInjected =
+    isSelectedGameInjected &&
+    selectedTrainer !== null &&
+    activeTrainerId === selectedTrainer.trainer_id;
+
+  const hasAntiCheatMarkers = (gameEnv?.anti_cheat_files_present.length ?? 0) > 0;
+
+  async function refreshAll(autoSelectFirst = false) {
     try {
       setError(null);
       const [lib, paths, sec, diag, sources, availUpdates] = await Promise.all([
@@ -109,54 +147,96 @@ export default function App() {
       setLogs(diag);
       setRegistrySources(sources);
       setUpdates(availUpdates);
+      if (autoSelectFirst && lib.length > 0) {
+        await openGame(lib[0], false);
+      }
     } catch (e) {
       setError(String(e));
     }
   }
 
   useEffect(() => {
-    void refreshAll();
+    void refreshAll(true);
   }, []);
 
   async function handleRescan() {
     try {
+      setBusyAction("rescan");
       setError(null);
       const lib = await nekodApi.rescanGames();
       setGames(lib);
       setLogs(await nekodApi.getDiagnosticLogs());
-      setStatusMsg(`Scanned library: found ${lib.length} installed game(s).`);
+      setStatusMsg(`已重新扫描游戏库：发现 ${lib.length} 款已安装游戏。`);
+      if (lib.length > 0 && !selectedGame) {
+        await openGame(lib[0], false);
+      } else if (selectedGame) {
+        const refreshed = lib.find((g) => g.library_key === selectedGame.library_key);
+        if (refreshed) {
+          await openGame(refreshed, false);
+        }
+      }
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusyAction(null);
     }
   }
 
-  async function scanRunningProcesses(gameId: string) {
+  async function scanRunningProcesses(gameId: string): Promise<ProcessIdentity[]> {
     try {
       const procs = await nekodApi.discoverRunningProcesses(gameId);
       setRunningProcs(procs);
       setSelectedPid((prev) =>
         procs.some((p) => p.pid === prev) ? prev : (procs[0]?.pid ?? null),
       );
+      return procs;
     } catch (e) {
       setError(String(e));
+      return [];
     }
   }
 
-  async function openGame(entry: LibraryGameView) {
+  async function refreshBridgeStatus(entry: LibraryGameView) {
+    try {
+      const status = await nekodApi.getBridgeDeploymentStatus(
+        entry.library_key,
+        entry.game.install_dir,
+      );
+      setBridgeStatus(status);
+      setBridgeStatusByGame((prev) => ({ ...prev, [entry.library_key]: status }));
+      setBridgeSourceInput(status.suggested_source_file ?? "");
+      setBridgeTargetInput(status.suggested_target_relative_path ?? "");
+    } catch {
+      setBridgeStatus(null);
+    }
+  }
+
+  async function openGame(entry: LibraryGameView, switchToWorkbench = true) {
+    if (switchToWorkbench) {
+      setTab("workbench");
+    }
     setSelectedGame(entry);
     setStatusMsg(null);
     setError(null);
+    setAwaitingPermInject(null);
     setRunningProcs([]);
     setSelectedPid(null);
     setGameEnv(null);
     setCompatRecords([]);
     setProfileJsonTrainerId(null);
-    try {
-      const env = await nekodApi.inspectGameEnvironment(entry.game.install_dir);
-      setGameEnv(env);
-    } catch {
-      // Non-fatal if install directory is temporarily inaccessible
-    }
+
+    await Promise.all([
+      (async () => {
+        try {
+          const env = await nekodApi.inspectGameEnvironment(entry.game.install_dir);
+          setGameEnv(env);
+        } catch {
+          // Non-fatal if install directory is temporarily inaccessible
+        }
+      })(),
+      refreshBridgeStatus(entry),
+    ]);
+
     if (entry.game.matched_game_id) {
       const gameId = entry.game.matched_game_id;
       try {
@@ -167,6 +247,14 @@ export default function App() {
           nekodApi.queryCompatibilityMatrix(gameId, null, null),
         ]);
         setTrainers(list);
+        setSelectedTrainerId((prev) => {
+          if (activeGameKey === entry.library_key && activeTrainerId) {
+            return activeTrainerId;
+          }
+          return list.some((t) => t.trainer_id === prev)
+            ? prev
+            : (list[0]?.trainer_id ?? null);
+        });
         setRunningProcs(procs);
         setSelectedPid(procs[0]?.pid ?? null);
         setCommunityTrainers(community);
@@ -193,20 +281,34 @@ export default function App() {
       }
     } else {
       setTrainers([]);
+      setSelectedTrainerId(null);
       setCommunityTrainers([]);
       setCompatRecords([]);
     }
   }
 
-  async function handleStartSession(trainer: TrainerDetailView) {
+  async function startSessionInternal(
+    trainer: TrainerDetailView,
+    overrideProcs?: ProcessIdentity[],
+  ) {
     const gameId = selectedGame?.game.matched_game_id;
-    if (!gameId) return;
-    const proc = runningProcs.find((p) => p.pid === selectedPid) ?? runningProcs[0];
-    if (!proc) {
-      setError("Launch the game first and scan for its running process.");
+    if (!gameId || !selectedGame) return;
+    if (hasAntiCheatMarkers) {
+      setError(
+        "检测到反作弊保护标记，根据安全策略拒绝注入该游戏进程（Nekod 仅支持单机/无反作弊环境）。",
+      );
       return;
     }
+
+    const procs = overrideProcs ?? runningProcs;
+    const proc = procs.find((p) => p.pid === selectedPid) ?? procs[0];
+    if (!proc) {
+      setError("未检测到运行中的游戏进程。请先启动游戏，再点击「一键注入 Mod」。");
+      return;
+    }
+
     try {
+      setBusyAction("inject");
       setError(null);
       const sessionId = await nekodApi.startTrainerSession(
         gameId,
@@ -214,31 +316,177 @@ export default function App() {
         proc,
       );
       setActiveSessionId(sessionId);
+      setActiveGameKey(selectedGame.library_key);
       setActiveTrainerId(trainer.trainer_id);
       setActiveToggles({});
+      setAwaitingPermInject(null);
       setSessionDiag(await nekodApi.getSessionDiagnostics(sessionId));
       setLogs(await nekodApi.getDiagnosticLogs());
-      setStatusMsg(`Attached '${trainer.name}' to ${proc.process_name} (PID ${proc.pid}).`);
+      setStatusMsg(
+        `已成功注入「${trainer.name}」到 ${proc.process_name} (PID ${proc.pid})，现在可以直接开关下方模组功能。`,
+      );
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusyAction(null);
     }
   }
 
-  async function handleStopSession() {
+  async function handleOneClickInject(trainer: TrainerDetailView) {
+    if (!selectedGame?.game.matched_game_id) return;
+    if (activeSessionId) {
+      setError("当前已有活跃注入会话，请先点击「解除注入」后再切换其他模组或游戏。");
+      return;
+    }
+    if (hasAntiCheatMarkers) {
+      setError(
+        "检测到反作弊保护标记，根据安全策略拒绝注入该游戏进程（Nekod 仅支持单机/无反作弊环境）。",
+      );
+      return;
+    }
+    if (trainer.permission_state.status === "blocked") {
+      setError(`当前模组被安全策略阻止：${trainer.permission_state.reason}`);
+      return;
+    }
+    if (trainer.permission_state.status === "requires_confirmation") {
+      setAwaitingPermInject(trainer.trainer_id);
+      setStatusMsg(
+        `「${trainer.name}」需要您确认声明的运行权限，请在下方权限卡片点击「确认权限并立即注入」。`,
+      );
+      return;
+    }
+
+    let procs = runningProcs;
+    if (procs.length === 0) {
+      procs = await scanRunningProcesses(selectedGame.game.matched_game_id);
+    }
+    await startSessionInternal(trainer, procs);
+  }
+
+  async function handleApprovePermissions(
+    trainer: TrainerDetailView,
+    andInject = false,
+  ) {
+    try {
+      setBusyAction("approve");
+      setError(null);
+      const scopes = trainer.permissions.map((p) => p.scope);
+      await nekodApi.grantTrainerPermissions(trainer.trainer_id, scopes);
+      let updatedTrainer = trainer;
+      if (selectedGame?.game.matched_game_id) {
+        const refreshed = await nekodApi.listTrainersForGame(
+          selectedGame.game.matched_game_id,
+          selectedGame.game.store_build_id,
+        );
+        setTrainers(refreshed);
+        updatedTrainer =
+          refreshed.find((t) => t.trainer_id === trainer.trainer_id) ?? trainer;
+      }
+      setLogs(await nekodApi.getDiagnosticLogs());
+      setAwaitingPermInject(null);
+      if (andInject && selectedGame?.game.matched_game_id) {
+        let procs = runningProcs;
+        if (procs.length === 0) {
+          procs = await scanRunningProcesses(selectedGame.game.matched_game_id);
+        }
+        await startSessionInternal(updatedTrainer, procs);
+      } else {
+        setStatusMsg(`已授权 ${trainer.name} v${trainer.version} 的声明权限。`);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleUninject() {
     if (!activeSessionId) return;
     try {
+      setBusyAction("uninject");
       setError(null);
       const diag = await nekodApi.stopTrainerSession(activeSessionId);
       setSessionDiag(diag);
       setActiveSessionId(null);
+      setActiveGameKey(null);
       setActiveTrainerId(null);
       setActiveToggles({});
       setLogs(await nekodApi.getDiagnosticLogs());
       setStatusMsg(
-        `Session stopped cleanly (conflicts: ${diag.rollback_conflicts}, failures: ${diag.rollback_failures}).`,
+        `已解除注入并按 LIFO 顺序完成内存回滚（冲突: ${diag.rollback_conflicts}，失败: ${diag.rollback_failures}）。`,
       );
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleDeployBridge() {
+    if (!selectedGame) return;
+    const src = bridgeSourceInput.trim();
+    const target = bridgeTargetInput.trim();
+    if (!src || !target) {
+      setError("请先在下方「伴生桥接部署配置」中填写源 DLL/脚本路径和目标相对路径。");
+      return;
+    }
+    try {
+      setBusyAction("deploy-bridge");
+      setError(null);
+      const next = await nekodApi.deployCompanionBridge(
+        selectedGame.library_key,
+        selectedGame.game.install_dir,
+        src,
+        target,
+      );
+      setBridgeStatus(next);
+      setBridgeStatusByGame((prev) => ({
+        ...prev,
+        [selectedGame.library_key]: next,
+      }));
+      try {
+        setGameEnv(
+          await nekodApi.inspectGameEnvironment(selectedGame.game.install_dir),
+        );
+      } catch {
+        // Ignore env refresh error
+      }
+      setLogs(await nekodApi.getDiagnosticLogs());
+      setStatusMsg(
+        `已通过 DeploymentLedger 安全部署伴生桥接文件到 ${target}（可随时一键解除）。`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleUndeployBridge() {
+    if (!selectedGame) return;
+    try {
+      setBusyAction("undeploy-bridge");
+      setError(null);
+      const summary = await nekodApi.undeployCompanionBridge(
+        selectedGame.library_key,
+        selectedGame.game.install_dir,
+      );
+      await refreshBridgeStatus(selectedGame);
+      try {
+        setGameEnv(
+          await nekodApi.inspectGameEnvironment(selectedGame.game.install_dir),
+        );
+      } catch {
+        // Ignore env refresh error
+      }
+      setLogs(await nekodApi.getDiagnosticLogs());
+      setStatusMsg(
+        `已解除伴生桥接部署：移除 ${summary.removed_count} 个文件，还原 ${summary.restored_originals} 个原文件（冲突: ${summary.conflicts}）。`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -263,7 +511,7 @@ export default function App() {
       const raw = (featureInputs[feature.id] ?? "").trim();
       const num = Number(raw);
       if (!raw || !Number.isFinite(num)) {
-        setError(`Enter a valid number for '${feature.name}'.`);
+        setError(`请为「${feature.name}」输入有效数字。`);
         return;
       }
       command =
@@ -296,26 +544,6 @@ export default function App() {
     }
   }
 
-  async function handleApprovePermissions(trainer: TrainerDetailView) {
-    try {
-      setError(null);
-      const scopes = trainer.permissions.map((p) => p.scope);
-      await nekodApi.grantTrainerPermissions(trainer.trainer_id, scopes);
-      if (selectedGame?.game.matched_game_id) {
-        setTrainers(
-          await nekodApi.listTrainersForGame(
-            selectedGame.game.matched_game_id,
-            selectedGame.game.store_build_id,
-          ),
-        );
-      }
-      setLogs(await nekodApi.getDiagnosticLogs());
-      setStatusMsg(`Permissions granted for ${trainer.name} v${trainer.version}.`);
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
   async function handleRevokePermissions(trainer: TrainerDetailView) {
     try {
       await nekodApi.revokeTrainerPermissions(trainer.trainer_id);
@@ -328,6 +556,7 @@ export default function App() {
         );
       }
       setLogs(await nekodApi.getDiagnosticLogs());
+      setStatusMsg(`已撤销「${trainer.name}」的运行权限。`);
     } catch (e) {
       setError(String(e));
     }
@@ -357,7 +586,7 @@ export default function App() {
       await nekodApi.ingestLocalTrainer(trainerDir.trim(), trainerTrust);
       setTrainerDir("");
       await handleRescan();
-      setStatusMsg("Validated and installed local trainer package.");
+      setStatusMsg("已完成校验并导入本地模组包。");
     } catch (e) {
       setError(String(e));
     }
@@ -370,7 +599,7 @@ export default function App() {
       const gameId = await nekodApi.registerGameManifest(gameManifestJson);
       setGameManifestJson("");
       await handleRescan();
-      setStatusMsg(`Registered game manifest '${gameId}'.`);
+      setStatusMsg(`已注册游戏清单 '${gameId}'。`);
     } catch (e) {
       setError(String(e));
     }
@@ -410,7 +639,7 @@ export default function App() {
         setCommunityTrainers(community);
       }
       setStatusMsg(
-        `Synced ${report.sources_checked} source(s): ${report.updated} updated, ${report.not_modified} unchanged, ${report.failed} failed, ${report.revoked_trainer_ids.length} revoked.`,
+        `同步完成（检查 ${report.sources_checked} 源）：${report.updated} 更新，${report.not_modified} 无变化，${report.failed} 失败，${report.revoked_trainer_ids.length} 已吊销。`,
       );
       if (report.errors.length > 0) {
         setError(report.errors.join(" | "));
@@ -440,7 +669,7 @@ export default function App() {
       ]);
       setRegistrySources(sources);
       setLogs(diag);
-      setStatusMsg("Added third-party repository as Unverified. Click Sync All Feeds to fetch its index.");
+      setStatusMsg("已添加第三方社区源（默认 Unverified），请点击同步获取索引。");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -455,7 +684,7 @@ export default function App() {
       setRegistrySources(await nekodApi.listRegistrySources());
       setUpdates(await nekodApi.checkTrainerUpdates());
       setLogs(await nekodApi.getDiagnosticLogs());
-      setStatusMsg(`Removed repository '${repositoryId}'.`);
+      setStatusMsg(`已移除社区源 '${repositoryId}'。`);
     } catch (e) {
       setError(String(e));
     }
@@ -469,7 +698,7 @@ export default function App() {
       setBusyAction(`install:${trainerId}`);
       setError(null);
       await nekodApi.installOrUpdateTrainerFromRegistry(repositoryId, trainerId);
-      await refreshAll();
+      await refreshAll(false);
       if (selectedGame?.game.matched_game_id) {
         const gameId = selectedGame.game.matched_game_id;
         const [list, community] = await Promise.all([
@@ -480,7 +709,7 @@ export default function App() {
         setCommunityTrainers(community);
       }
       setStatusMsg(
-        `Verified SHA-256 package and installed '${trainerId}'. Review and confirm its permissions before attaching.`,
+        `已完成 SHA-256 校验并安装 '${trainerId}'，注入前请确认其运行权限。`,
       );
     } catch (e) {
       setError(String(e));
@@ -514,7 +743,7 @@ export default function App() {
         presets: profilePresets[trainer.trainer_id] ?? {},
       };
       await nekodApi.saveProfile(profile);
-      setStatusMsg(`Saved hotkey & preset profile for '${trainer.name}'.`);
+      setStatusMsg(`已保存「${trainer.name}」的快捷键与预设配置。`);
     } catch (e) {
       setError(String(e));
     }
@@ -545,7 +774,7 @@ export default function App() {
           }
           setActiveToggles({});
         }
-        setStatusMsg(`Restored default hotkeys & toggles for '${trainer.name}'.`);
+        setStatusMsg(`已重置「${trainer.name}」的默认快捷键与开关状态。`);
         return;
       }
 
@@ -578,7 +807,7 @@ export default function App() {
         saved_feature_states: activeTrainerId === trainer.trainer_id ? activeToggles : {},
         presets: nextTrainerPresets,
       });
-      setStatusMsg(`Applied & saved preset '${presetName}' for '${trainer.name}'.`);
+      setStatusMsg(`已应用并保存预设「${presetName}」。`);
     } catch (e) {
       setError(String(e));
     }
@@ -592,7 +821,7 @@ export default function App() {
       const json = await nekodApi.exportProfileJson(gameId, trainer.trainer_id);
       setProfileJsonTrainerId(trainer.trainer_id);
       setProfileJsonBox(json);
-      setStatusMsg(`Exported portable JSON profile for '${trainer.name}'.`);
+      setStatusMsg(`已导出「${trainer.name}」的可移植 JSON 配置。`);
     } catch (e) {
       setError(String(e));
     }
@@ -611,7 +840,7 @@ export default function App() {
         ...prev,
         [trainer.trainer_id]: imported.presets ?? {},
       }));
-      setStatusMsg(`Imported JSON profile for '${imported.trainer_id}'.`);
+      setStatusMsg(`已导入 '${imported.trainer_id}' 的 JSON 配置。`);
     } catch (e) {
       setError(String(e));
     }
@@ -667,178 +896,342 @@ export default function App() {
     );
   }, [games, search]);
 
+  const activeProcessLabel = useMemo(() => {
+    const proc = runningProcs.find((p) => p.pid === selectedPid) ?? runningProcs[0];
+    return proc ? `${proc.process_name} (PID ${proc.pid})` : null;
+  }, [runningProcs, selectedPid]);
+
+  const bridgeAvailable = Boolean(
+    bridgeStatus &&
+      (bridgeStatus.deployed ||
+        bridgeStatus.suggested_target_relative_path ||
+        bridgeStatus.engine !== "native_unknown"),
+  );
+
   return (
-    <div className="layout">
-      <aside className="sidebar">
-        <div className="brand">
-          <h1>Nekod</h1>
-          <p>Modding games, together.</p>
+    <div className="workbench-shell">
+      {/* ==================== LEFT PANE: 游戏列表 ==================== */}
+      <aside className="game-sidebar">
+        <div className="sidebar-top">
+          <div className="brand-row">
+            <div>
+              <h1 className="brand-title">Nekod</h1>
+              <p className="brand-sub">Modding games, together.</p>
+            </div>
+            <button
+              className="btn btn-secondary btn-sm"
+              disabled={busyAction === "rescan"}
+              onClick={() => void handleRescan()}
+              title="重新扫描 Steam 与自定义游戏目录"
+            >
+              {busyAction === "rescan" ? "扫描中..." : "刷新"}
+            </button>
+          </div>
+          <input
+            className="search-input sidebar-search"
+            placeholder="搜索游戏列表..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
         </div>
 
-        <button
-          className={`nav-btn ${tab === "library" ? "active" : ""}`}
-          onClick={() => {
-            setTab("library");
-            setSelectedGame(null);
-          }}
-        >
-          Game Library
-        </button>
-        <button
-          className={`nav-btn ${tab === "community" ? "active" : ""}`}
-          onClick={() => setTab("community")}
-        >
-          Community &amp; Updates{updates.length > 0 ? ` (${updates.length})` : ""}
-        </button>
-        <button
-          className={`nav-btn ${tab === "import" ? "active" : ""}`}
-          onClick={() => setTab("import")}
-        >
-          Local Packages
-        </button>
-        <button
-          className={`nav-btn ${tab === "settings" ? "active" : ""}`}
-          onClick={() => setTab("settings")}
-        >
-          Settings &amp; Security
-        </button>
-        <button
-          className={`nav-btn ${tab === "logs" ? "active" : ""}`}
-          onClick={async () => {
-            setTab("logs");
-            try {
-              setLogs(await nekodApi.getDiagnosticLogs());
-            } catch (e) {
-              setError(String(e));
-            }
-          }}
-        >
-          Diagnostics
-        </button>
+        <div className="sidebar-section-header">
+          <span>游戏列表 ({filteredGames.length})</span>
+          {activeSessionId && (
+            <span style={{ color: "var(--ok)", fontWeight: 700 }}>● 注入中</span>
+          )}
+        </div>
+
+        <div className="game-list">
+          {filteredGames.length === 0 ? (
+            <div className="muted" style={{ padding: "12px 6px", lineHeight: 1.5 }}>
+              未匹配到游戏。可在下方「设置」添加自定义游戏目录，或在「导入包」注册游戏清单。
+            </div>
+          ) : (
+            filteredGames.map((item) => {
+              const isSelected =
+                tab === "workbench" &&
+                selectedGame?.library_key === item.library_key;
+              const isInjected =
+                activeSessionId !== null && activeGameKey === item.library_key;
+              const isBridgeDeployed = Boolean(
+                bridgeStatusByGame[item.library_key]?.deployed,
+              );
+
+              return (
+                <button
+                  key={item.library_key}
+                  className={`game-list-item ${isSelected ? "active" : ""}`}
+                  onClick={() => void openGame(item, true)}
+                >
+                  <span
+                    className={`game-status-dot ${
+                      isInjected
+                        ? "injected"
+                        : isBridgeDeployed
+                          ? "bridge-ready"
+                          : ""
+                    }`}
+                    title={
+                      isInjected
+                        ? "已注入运行中"
+                        : isBridgeDeployed
+                          ? "已部署伴生桥接"
+                          : "未注入"
+                    }
+                  />
+                  <div className="game-list-meta">
+                    <div className="game-list-title">{item.game.title}</div>
+                    <div className="game-list-sub">
+                      <span>{item.game.store_source.toUpperCase()}</span>
+                      <span>&middot;</span>
+                      <span>{item.trainer_count} 模组</span>
+                      {isInjected && (
+                        <>
+                          <span>&middot;</span>
+                          <span style={{ color: "#86efac", fontWeight: 600 }}>
+                            已注入
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        <nav className="bottom-nav" aria-label="Secondary navigation">
+          <button
+            className={`nav-pill span-2 ${tab === "workbench" ? "active" : ""}`}
+            onClick={() => setTab("workbench")}
+          >
+            模组工作台
+          </button>
+          <button
+            className={`nav-pill ${tab === "community" ? "active" : ""}`}
+            onClick={() => setTab("community")}
+          >
+            社区源{updates.length > 0 ? ` (${updates.length})` : ""}
+          </button>
+          <button
+            className={`nav-pill ${tab === "import" ? "active" : ""}`}
+            onClick={() => setTab("import")}
+          >
+            本地导入
+          </button>
+          <button
+            className={`nav-pill ${tab === "settings" ? "active" : ""}`}
+            onClick={() => setTab("settings")}
+          >
+            设置安全
+          </button>
+          <button
+            className={`nav-pill ${tab === "logs" ? "active" : ""}`}
+            onClick={async () => {
+              setTab("logs");
+              try {
+                setLogs(await nekodApi.getDiagnosticLogs());
+              } catch (e) {
+                setError(String(e));
+              }
+            }}
+          >
+            诊断日志
+          </button>
+        </nav>
       </aside>
 
-      <main className="content">
-        {isBrowserPreview && (
-          <div className="banner">
-            Browser Preview Mode (port 1420): showing simulated IPC sample data. Launch Tauri Desktop
-            for live Windows x64 process &amp; SQLite runtime.
-          </div>
-        )}
-        {error && <div className="error-banner">{error}</div>}
-        {statusMsg && <div className="banner">{statusMsg}</div>}
-
-        {tab === "library" && !selectedGame && (
-          <>
-            <div className="header-row">
-              <div>
-                <h2 style={{ margin: 0 }}>Game Library</h2>
-                <p className="muted" style={{ margin: "4px 0 0" }}>
-                  Automatically discovered Steam games and registered local folders.
-                </p>
-              </div>
-              <div className="row">
-                <input
-                  className="search-input"
-                  placeholder="Search games..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />
-                <button className="btn" onClick={handleRescan}>
-                  Rescan Library
-                </button>
-              </div>
-            </div>
-
-            {filteredGames.length === 0 ? (
-              <div className="card">
-                <p style={{ margin: 0 }}>
-                  No installed games matched yet. Ensure Steam is installed or add a custom game
-                  folder in Settings.
-                </p>
-              </div>
-            ) : (
-              <div className="grid">
-                {filteredGames.map((item) => (
-                  <div
-                    key={item.library_key}
-                    className="card game-card"
-                    onClick={() => void openGame(item)}
-                  >
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <span className="badge">{item.game.store_source.toUpperCase()}</span>
-                      <span className="badge">{item.trainer_count} trainer(s)</span>
-                    </div>
-                    <h3 style={{ margin: "10px 0 6px" }}>{item.game.title}</h3>
-                    <div className="muted">
-                      {item.game.matched_game_id
-                        ? `ID: ${item.game.matched_game_id}`
-                        : "No Game Manifest matched"}
-                    </div>
-                    {item.game.store_build_id && (
-                      <div className="muted">Build: {item.game.store_build_id}</div>
-                    )}
-                  </div>
-                ))}
+      {/* ==================== RIGHT COLUMN ==================== */}
+      <div className="right-pane">
+        {(isBrowserPreview || error || statusMsg) && (
+          <div className="top-banners">
+            {isBrowserPreview && (
+              <div className="banner">
+                浏览器预览模式：当前展示模拟 IPC 数据；运行 Tauri 桌面端可连接真实 Windows x64 进程与 SQLite 账本。
               </div>
             )}
-          </>
+            {error && <div className="error-banner">{error}</div>}
+            {statusMsg && <div className="banner">{statusMsg}</div>}
+          </div>
         )}
 
-        {tab === "library" && selectedGame && (
-          <div className="stack">
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <button className="btn btn-secondary" onClick={() => setSelectedGame(null)}>
-                &larr; Back to Library
-              </button>
-              <span className="badge">{selectedGame.game.platform}</span>
-            </div>
+        {/* ==================== WORKBENCH (Top-Right 游戏信息 + Bottom-Right 模组的功能) ==================== */}
+        {tab === "workbench" && !selectedGame && (
+          <div className="empty-state">
+            <h2 style={{ margin: 0, color: "var(--text)" }}>选择一款游戏开始</h2>
+            <p style={{ margin: 0, maxWidth: 420 }}>
+              点击左侧「游戏列表」中的任意游戏，即可在上方查看游戏信息并一键注入 / 解除注入 Mod，在下方直接控制模组功能。
+            </p>
+            <button className="btn" onClick={() => void handleRescan()}>
+              立即扫描游戏库
+            </button>
+          </div>
+        )}
 
-            <div className="card">
-              <h2 style={{ margin: "0 0 6px" }}>{selectedGame.game.title}</h2>
-              <div className="muted">Install folder: {selectedGame.game.install_dir}</div>
-              {selectedGame.game.executable_path && (
-                <div className="muted">Executable: {selectedGame.game.executable_path}</div>
-              )}
-              {selectedGame.game.store_build_id && (
-                <div className="muted">Steam Build ID: {selectedGame.game.store_build_id}</div>
-              )}
-              {gameEnv && (
-                <div className="row" style={{ marginTop: 10 }}>
-                  <span className="badge community">Engine: {gameEnv.engine}</span>
-                  {gameEnv.installed_loaders.map((loader) => (
-                    <span key={loader.entry_path} className="badge official">
-                      Loader: {loader.kind}
-                    </span>
-                  ))}
-                  {gameEnv.recommended_adapters.map((ad) => (
-                    <span key={ad} className="badge">
-                      Adapter: {ad}
-                    </span>
-                  ))}
-                  {gameEnv.anti_cheat_files_present.map((ac) => (
-                    <span key={ac} className="badge unverified">
-                      Anti-Cheat Marker: {ac}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {selectedGame.game.matched_game_id && (
-              <div className="card stack">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <div>
-                    <strong>Running Game Process</strong>
-                    <div className="muted">
-                      {runningProcs.length === 0
-                        ? "No running game process detected yet. Start the game and rescan."
-                        : `${runningProcs.length} matching process(es) discovered.`}
-                    </div>
-                  </div>
+        {tab === "workbench" && selectedGame && (
+          <>
+            {/* ---------- TOP-RIGHT: 游戏信息 & 一键注入 / 解除注入 ---------- */}
+            <header className="game-hero">
+              <div className="game-hero-main">
+                <div className="game-hero-info">
                   <div className="row">
-                    {runningProcs.length > 0 && (
+                    <h2 className="game-hero-title">{selectedGame.game.title}</h2>
+                    <span className="badge">
+                      {selectedGame.game.store_source.toUpperCase()}
+                    </span>
+                    <span className="badge">{selectedGame.game.platform}</span>
+                    {selectedGame.game.store_build_id && (
+                      <span className="badge">
+                        Build {selectedGame.game.store_build_id}
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    className="game-hero-path"
+                    title={selectedGame.game.install_dir}
+                  >
+                    {selectedGame.game.install_dir}
+                  </div>
+                  <div className="row" style={{ marginTop: 8 }}>
+                    {gameEnv && (
+                      <span className="badge community">
+                        引擎: {ENGINE_LABELS[gameEnv.engine]}
+                      </span>
+                    )}
+                    {gameEnv?.installed_loaders.map((loader) => (
+                      <span key={loader.entry_path} className="badge official">
+                        加载器: {loader.kind}
+                        {loader.detected_version
+                          ? ` ${loader.detected_version}`
+                          : ""}
+                      </span>
+                    ))}
+                    {bridgeStatus?.deployed && (
+                      <span className="status-pill bridge">
+                        ● 伴生桥接已部署 ({bridgeStatus.active_files.length} 文件)
+                      </span>
+                    )}
+                    {gameEnv?.anti_cheat_files_present.map((ac) => (
+                      <span key={ac} className="badge unverified">
+                        ⚠ 检测到反作弊: {ac}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Primary Hero Controls: 一键注入 Mod / 解除注入 */}
+                <div className="game-hero-actions">
+                  <div className="hero-btn-row">
+                    {!isSelectedGameInjected ? (
+                      <button
+                        className="btn-inject"
+                        disabled={
+                          !selectedTrainer ||
+                          hasAntiCheatMarkers ||
+                          busyAction === "inject" ||
+                          (activeSessionId !== null && !isSelectedGameInjected)
+                        }
+                        onClick={() =>
+                          selectedTrainer &&
+                          void handleOneClickInject(selectedTrainer)
+                        }
+                      >
+                        {busyAction === "inject"
+                          ? "正在注入..."
+                          : "⚡ 一键注入 Mod"}
+                      </button>
+                    ) : (
+                      <button
+                        className="btn-uninject"
+                        disabled={busyAction === "uninject"}
+                        onClick={() => void handleUninject()}
+                      >
+                        {busyAction === "uninject"
+                          ? "正在回滚..."
+                          : "⏏ 解除注入"}
+                      </button>
+                    )}
+
+                    {bridgeAvailable &&
+                      (bridgeStatus?.deployed ? (
+                        <button
+                          className="btn btn-danger"
+                          disabled={busyAction === "undeploy-bridge"}
+                          onClick={() => void handleUndeployBridge()}
+                          title="按 DeploymentLedger 安全卸载游戏目录中的伴生桥接文件"
+                        >
+                          {busyAction === "undeploy-bridge"
+                            ? "卸载中..."
+                            : "🧹 解除桥接文件"}
+                        </button>
+                      ) : (
+                        <button
+                          className="btn btn-secondary"
+                          disabled={
+                            busyAction === "deploy-bridge" ||
+                            hasAntiCheatMarkers ||
+                            !bridgeSourceInput.trim() ||
+                            !bridgeTargetInput.trim()
+                          }
+                          onClick={() => void handleDeployBridge()}
+                          title="通过 DeploymentLedger 写入零 UnityExplorer 伴生桥接插件"
+                        >
+                          {busyAction === "deploy-bridge"
+                            ? "部署中..."
+                            : "📦 一键部署伴生桥接"}
+                        </button>
+                      ))}
+                  </div>
+
+                  <div className="row">
+                    {isSelectedGameInjected && sessionDiag ? (
+                      <>
+                        <span className="status-pill live">
+                          ● 已注入 {activeProcessLabel ?? sessionDiag.session_id} ·
+                          补丁 {sessionDiag.active_patches} · 锁定{" "}
+                          {sessionDiag.active_freeze_features}
+                        </span>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => void handleRefreshDiagnostics()}
+                        >
+                          刷新状态
+                        </button>
+                      </>
+                    ) : activeSessionId && !isSelectedGameInjected ? (
+                      <span className="status-pill">
+                        另一款游戏正在注入中，请先解除当前会话
+                        <button
+                          className="btn btn-danger btn-sm"
+                          style={{ marginLeft: 8 }}
+                          onClick={() => void handleUninject()}
+                        >
+                          解除另一会话
+                        </button>
+                      </span>
+                    ) : (
+                      <span className="status-pill">
+                        {selectedTrainer
+                          ? `就绪 · 目标模组：${selectedTrainer.name} v${selectedTrainer.version}`
+                          : "当前游戏暂无已安装模组"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Compact Process Selector Row inside Game Info Header */}
+              {selectedGame.game.matched_game_id && (
+                <div className="game-hero-bar">
+                  <div className="row">
+                    <span className="muted" style={{ fontWeight: 600 }}>
+                      目标进程：
+                    </span>
+                    {runningProcs.length > 0 ? (
                       <select
-                        className="search-input"
+                        className="select-input"
                         value={selectedPid ?? ""}
                         onChange={(e) => setSelectedPid(Number(e.target.value))}
                         disabled={activeSessionId !== null}
@@ -849,209 +1242,236 @@ export default function App() {
                           </option>
                         ))}
                       </select>
+                    ) : (
+                      <span className="muted">
+                        未发现运行中的游戏进程（启动游戏后点击扫描，或直接点一键注入自动扫描）
+                      </span>
                     )}
                     <button
-                      className="btn btn-secondary"
+                      className="btn btn-secondary btn-sm"
                       onClick={() =>
-                        void scanRunningProcesses(selectedGame.game.matched_game_id!)
+                        void scanRunningProcesses(
+                          selectedGame.game.matched_game_id!,
+                        )
                       }
                       disabled={activeSessionId !== null}
                     >
-                      Scan Process
+                      扫描进程
                     </button>
                   </div>
-                </div>
-
-                {sessionDiag && (
-                  <div className="card" style={{ background: "var(--surface-alt)" }}>
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <div className="row">
-                        <strong>Session {sessionDiag.session_id}</strong>
-                        <span className="badge">{sessionDiag.state}</span>
-                        <span className="badge">
-                          Active patches: {sessionDiag.active_patches}
-                        </span>
-                        <span className="badge">
-                          Freezes: {sessionDiag.active_freeze_features}
-                        </span>
-                        {sessionDiag.rollback_conflicts > 0 && (
-                          <span className="badge unverified">
-                            Conflicts: {sessionDiag.rollback_conflicts}
-                          </span>
-                        )}
-                        {sessionDiag.rollback_failures > 0 && (
-                          <span className="badge unverified">
-                            Failures: {sessionDiag.rollback_failures}
-                          </span>
-                        )}
-                      </div>
-                      <div className="row">
-                        {activeSessionId && (
-                          <>
-                            <button
-                              className="btn btn-secondary"
-                              onClick={() => void handleRefreshDiagnostics()}
-                            >
-                              Refresh Status
-                            </button>
-                            <button
-                              className="btn"
-                              onClick={() => void handleStopSession()}
-                            >
-                              Stop &amp; Rollback Session
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    {sessionDiag.recent_events.length > 0 && (
-                      <div className="stack" style={{ marginTop: 8 }}>
-                        {sessionDiag.recent_events.slice(-5).map((ev, idx) => (
-                          <div key={idx} className="muted">
-                            &bull; {ev}
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                  <div className="row">
+                    <span className="muted">
+                      ID: <code>{selectedGame.game.matched_game_id}</code>
+                    </span>
                   </div>
-                )}
-              </div>
-            )}
+                </div>
+              )}
+            </header>
 
-            {trainers.length === 0 ? (
-              <div className="card">
-                <p className="muted" style={{ margin: 0 }}>
-                  No local trainers installed for this game yet. Use &ldquo;Local Packages&rdquo;
-                  to register a Game Manifest and ingest a validated trainer package.
-                </p>
-              </div>
-            ) : (
-              trainers.map((t) => {
-                const isThisTrainerAttached =
-                  activeSessionId !== null && activeTrainerId === t.trainer_id;
-
-                return (
-                  <div key={t.trainer_id} className="card stack">
+            {/* ---------- BOTTOM-RIGHT: 模组的功能 ---------- */}
+            <section className="mod-workspace">
+              {trainers.length === 0 ? (
+                <div className="card stack">
+                  <h3 style={{ margin: 0 }}>模组的功能</h3>
+                  <p className="muted" style={{ margin: 0 }}>
+                    当前游戏还没有安装本地模组。您可以展开下方「社区可用模组」一键安装，或切换到左侧底部「本地导入」导入本地模组包。
+                  </p>
+                </div>
+              ) : (
+                selectedTrainer && (
+                  <>
+                    {/* Mod Selector Tabs */}
                     <div className="row" style={{ justifyContent: "space-between" }}>
-                      <div className="row">
-                        <h3 style={{ margin: 0 }}>{t.name}</h3>
-                        <span className="badge">v{t.version}</span>
-                        {trustBadge(t.trust_tier)}
-                        <span className="badge">{t.compatibility_status}</span>
-                        {t.revoked && (
-                          <span className="badge unverified">Revoked by Registry</span>
-                        )}
+                      <div className="mod-tabs">
+                        {trainers.map((t) => {
+                          const isTabSelected =
+                            t.trainer_id === selectedTrainer.trainer_id;
+                          const isTabActive =
+                            isSelectedGameInjected &&
+                            activeTrainerId === t.trainer_id;
+                          return (
+                            <button
+                              key={t.trainer_id}
+                              className={`mod-tab ${isTabSelected ? "active" : ""}`}
+                              onClick={() => {
+                                setSelectedTrainerId(t.trainer_id);
+                                setAwaitingPermInject(null);
+                              }}
+                            >
+                              {isTabActive && (
+                                <span
+                                  className="game-status-dot injected"
+                                  style={{ marginTop: 0 }}
+                                />
+                              )}
+                              <span>{t.name}</span>
+                              <span className="badge">v{t.version}</span>
+                              {trustBadge(t.trust_tier)}
+                            </button>
+                          );
+                        })}
                       </div>
                       <div className="row">
-                        <button
-                          className="btn btn-secondary"
-                          onClick={() => void handleSaveProfile(t)}
+                        <span className="badge">
+                          兼容性: {selectedTrainer.compatibility_status}
+                        </span>
+                        {selectedTrainer.revoked && (
+                          <span className="badge unverified">已被社区源吊销</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Inline Permission Gate (Default-Deny preserved!) */}
+                    {(selectedTrainer.permission_state.status ===
+                      "requires_confirmation" ||
+                      selectedTrainer.permission_state.status === "blocked" ||
+                      awaitingPermInject === selectedTrainer.trainer_id) && (
+                      <div className="permission-banner stack">
+                        <div
+                          className="row"
+                          style={{ justifyContent: "space-between" }}
                         >
-                          Save Profile
-                        </button>
-                        {t.permission_state.status === "approved" && !activeSessionId && (
-                          <button
-                            className="btn"
-                            disabled={runningProcs.length === 0}
-                            onClick={() => void handleStartSession(t)}
-                          >
-                            Attach Trainer
-                          </button>
-                        )}
-                        {isThisTrainerAttached && (
-                          <button
-                            className="btn btn-secondary"
-                            onClick={() => void handleStopSession()}
-                          >
-                            Detach &amp; Rollback
-                          </button>
-                        )}
-                        {t.permission_state.status === "approved" && !activeSessionId && (
-                          <button
-                            className="btn btn-secondary"
-                            onClick={() => void handleRevokePermissions(t)}
-                          >
-                            Revoke Permissions
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    <p className="muted" style={{ margin: 0 }}>
-                      {t.description}
-                    </p>
-
-                    <div className="card" style={{ background: "var(--surface-alt)" }}>
-                      <strong>Permission Review</strong>
-                      <div className="stack" style={{ marginTop: 8 }}>
-                        {t.permissions.map((p) => (
-                          <div key={p.scope} className="muted">
-                            &bull; <strong>{PERMISSION_LABELS[p.scope]}</strong> ({p.scope}):{" "}
-                            {p.reason}
-                          </div>
-                        ))}
-                      </div>
-                      <div style={{ marginTop: 10 }}>
-                        {t.permission_state.status === "approved" && (
-                          <span className="badge official">Permissions Approved</span>
-                        )}
-                        {t.permission_state.status === "requires_confirmation" && (
-                          <button
-                            className="btn"
-                            onClick={() => void handleApprovePermissions(t)}
-                          >
-                            Confirm &amp; Grant Required Permissions
-                          </button>
-                        )}
-                        {t.permission_state.status === "blocked" && (
-                          <span className="badge unverified">
-                            Blocked: {t.permission_state.reason}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="stack">
-                      <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
-                        <div className="row">
-                          <strong>Features ({t.features.length})</strong>
-                          {findDuplicateHotkeys(profilesByTrainer[t.trainer_id] ?? {}).length > 0 && (
+                          <strong>
+                            🔒 注入前权限确认（Default-Deny 安全机制）
+                          </strong>
+                          {selectedTrainer.permission_state.status ===
+                            "blocked" && (
                             <span className="badge unverified">
-                              Hotkey Conflict:{" "}
-                              {findDuplicateHotkeys(profilesByTrainer[t.trainer_id] ?? {}).join(", ")}
+                              已阻止：{selectedTrainer.permission_state.reason}
                             </span>
                           )}
                         </div>
+                        <div className="stack" style={{ gap: 6 }}>
+                          {selectedTrainer.permissions.map((p) => (
+                            <div key={p.scope} className="muted">
+                              &bull; <strong>{PERMISSION_LABELS[p.scope]}</strong>{" "}
+                              (<code>{p.scope}</code>)：{p.reason}
+                            </div>
+                          ))}
+                        </div>
+                        {selectedTrainer.permission_state.status ===
+                          "requires_confirmation" && (
+                          <div className="row">
+                            <button
+                              className="btn-inject"
+                              style={{ padding: "8px 16px", fontSize: 13 }}
+                              disabled={busyAction === "approve"}
+                              onClick={() =>
+                                void handleApprovePermissions(
+                                  selectedTrainer,
+                                  true,
+                                )
+                              }
+                            >
+                              ✓ 确认权限并立即注入
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              disabled={busyAction === "approve"}
+                              onClick={() =>
+                                void handleApprovePermissions(
+                                  selectedTrainer,
+                                  false,
+                                )
+                              }
+                            >
+                              仅授权暂不注入
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Feature Toolbar: Presets + Profile Save/Import */}
+                    <div className="card stack">
+                      <div
+                        className="row"
+                        style={{ justifyContent: "space-between" }}
+                      >
+                        <div>
+                          <div className="row">
+                            <h3 style={{ margin: 0 }}>
+                              模组的功能 ({selectedTrainer.features.length})
+                            </h3>
+                            {findDuplicateHotkeys(
+                              profilesByTrainer[selectedTrainer.trainer_id] ?? {},
+                            ).length > 0 && (
+                              <span className="badge unverified">
+                                快捷键冲突：
+                                {findDuplicateHotkeys(
+                                  profilesByTrainer[selectedTrainer.trainer_id] ??
+                                    {},
+                                ).join(", ")}
+                              </span>
+                            )}
+                          </div>
+                          <div className="muted" style={{ marginTop: 4 }}>
+                            {selectedTrainer.description}
+                          </div>
+                        </div>
+
                         <div className="row">
                           <button
-                            className="btn btn-secondary"
-                            onClick={() => void handleApplyPreset(t, "Story Mode")}
+                            className="btn btn-secondary btn-sm"
+                            onClick={() =>
+                              void handleApplyPreset(
+                                selectedTrainer,
+                                "Story Mode",
+                              )
+                            }
                           >
                             Story Mode
                           </button>
                           <button
-                            className="btn btn-secondary"
-                            onClick={() => void handleApplyPreset(t, "No Grind")}
+                            className="btn btn-secondary btn-sm"
+                            onClick={() =>
+                              void handleApplyPreset(selectedTrainer, "No Grind")
+                            }
                           >
                             No Grind
                           </button>
                           <button
-                            className="btn btn-secondary"
-                            onClick={() => void handleApplyPreset(t, "Reset Defaults")}
+                            className="btn btn-secondary btn-sm"
+                            onClick={() =>
+                              void handleApplyPreset(
+                                selectedTrainer,
+                                "Reset Defaults",
+                              )
+                            }
                           >
-                            Reset Defaults
+                            重置默认
                           </button>
                           <button
-                            className="btn btn-secondary"
-                            onClick={() => void handleExportProfile(t)}
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => void handleSaveProfile(selectedTrainer)}
                           >
-                            Export/Import Profile
+                            保存配置
+                          </button>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() =>
+                              void handleExportProfile(selectedTrainer)
+                            }
+                          >
+                            导入/导出 JSON
                           </button>
                         </div>
                       </div>
-                      {profileJsonTrainerId === t.trainer_id && (
-                        <div className="card stack" style={{ background: "var(--surface-alt)" }}>
-                          <strong>Portable Profile JSON ({t.trainer_id})</strong>
+
+                      {!isSelectedTrainerInjected && (
+                        <div className="banner" style={{ marginBottom: 0 }}>
+                          当前尚未注入此模组。点击右上角「⚡ 一键注入 Mod」后即可实时开关或修改以下功能；注入后可随时点击「⏏ 解除注入」无痕回滚。
+                        </div>
+                      )}
+
+                      {profileJsonTrainerId === selectedTrainer.trainer_id && (
+                        <div
+                          className="card stack"
+                          style={{ background: "var(--surface-alt)" }}
+                        >
+                          <strong>
+                            可移植配置 JSON ({selectedTrainer.trainer_id})
+                          </strong>
                           <textarea
                             className="text-input"
                             rows={6}
@@ -1059,562 +1479,762 @@ export default function App() {
                             onChange={(e) => setProfileJsonBox(e.target.value)}
                           />
                           <div className="row">
-                            <button className="btn" onClick={() => void handleImportProfile(t)}>
-                              Import JSON Into Profile
+                            <button
+                              className="btn btn-sm"
+                              onClick={() =>
+                                void handleImportProfile(selectedTrainer)
+                              }
+                            >
+                              导入 JSON 配置
                             </button>
                             <button
-                              className="btn btn-secondary"
+                              className="btn btn-secondary btn-sm"
                               onClick={() => setProfileJsonTrainerId(null)}
                             >
-                              Close
+                              关闭
                             </button>
                           </div>
                         </div>
                       )}
-                      {t.features.map((f) => {
-                        const isOn = Boolean(activeToggles[f.id]);
-                        return (
-                          <div key={f.id} className="feature-row">
-                            <div>
-                              <div>
-                                <strong>{f.name}</strong>{" "}
-                                <span className="badge">{f.control_type}</span>
-                              </div>
-                              <div className="muted">{f.description}</div>
-                            </div>
-                            <div className="row">
-                              <input
-                                className="search-input"
-                                style={{ width: 96 }}
-                                placeholder="Hotkey"
-                                aria-label={`Hotkey for ${f.name}`}
-                                value={
-                                  profilesByTrainer[t.trainer_id]?.[f.id] ??
-                                  f.default_hotkey ??
-                                  ""
-                                }
-                                onChange={(e) =>
-                                  setProfilesByTrainer((prev) => ({
-                                    ...prev,
-                                    [t.trainer_id]: {
-                                      ...(prev[t.trainer_id] ?? {}),
-                                      [f.id]: e.target.value,
-                                    },
-                                  }))
-                                }
-                              />
-                              {f.control_type === "toggle" && (
-                                <button
-                                  className={isOn ? "btn" : "btn btn-secondary"}
-                                  disabled={!isThisTrainerAttached}
-                                  onClick={() => void handleApplyFeature(f)}
-                                >
-                                  {isOn ? "Active (Turn Off)" : "Enable"}
-                                </button>
-                              )}
-                              {f.control_type === "action" && (
-                                <button
-                                  className="btn btn-secondary"
-                                  disabled={!isThisTrainerAttached}
-                                  onClick={() => void handleApplyFeature(f)}
-                                >
-                                  Trigger
-                                </button>
-                              )}
-                              {(f.control_type === "integer" ||
-                                f.control_type === "float") && (
-                                <>
-                                  <input
-                                    className="search-input"
-                                    style={{ width: 110 }}
-                                    type="number"
-                                    step={f.control_type === "integer" ? "1" : "any"}
-                                    placeholder="Value"
-                                    disabled={!isThisTrainerAttached}
-                                    value={featureInputs[f.id] ?? ""}
-                                    onChange={(e) =>
-                                      setFeatureInputs((prev) => ({
-                                        ...prev,
-                                        [f.id]: e.target.value,
-                                      }))
-                                    }
-                                  />
-                                  <button
-                                    className="btn"
-                                    disabled={!isThisTrainerAttached}
-                                    onClick={() => void handleApplyFeature(f)}
+
+                      {/* 2-Column Feature Control Grid */}
+                      <div className="feature-grid">
+                        {selectedTrainer.features.map((f) => {
+                          const isOn =
+                            isSelectedTrainerInjected &&
+                            Boolean(activeToggles[f.id]);
+                          return (
+                            <div
+                              key={f.id}
+                              className={`feature-card ${isOn ? "enabled" : ""}`}
+                            >
+                              <div className="feature-card-top">
+                                <div>
+                                  <div className="row" style={{ gap: 6 }}>
+                                    <strong>{f.name}</strong>
+                                    <span className="badge">
+                                      {f.control_type}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="muted"
+                                    style={{ marginTop: 4 }}
                                   >
-                                    Apply
-                                  </button>
-                                </>
-                              )}
+                                    {f.description}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="feature-card-controls">
+                                <input
+                                  className="search-input"
+                                  style={{ width: 92, padding: "6px 8px" }}
+                                  placeholder="热键"
+                                  aria-label={`Hotkey for ${f.name}`}
+                                  value={
+                                    profilesByTrainer[selectedTrainer.trainer_id]?.[
+                                      f.id
+                                    ] ??
+                                    f.default_hotkey ??
+                                    ""
+                                  }
+                                  onChange={(e) =>
+                                    setProfilesByTrainer((prev) => ({
+                                      ...prev,
+                                      [selectedTrainer.trainer_id]: {
+                                        ...(prev[selectedTrainer.trainer_id] ??
+                                          {}),
+                                        [f.id]: e.target.value,
+                                      },
+                                    }))
+                                  }
+                                />
+
+                                <div className="row">
+                                  {f.control_type === "toggle" && (
+                                    <button
+                                      className={
+                                        isOn
+                                          ? "btn btn-ok btn-sm"
+                                          : "btn btn-secondary btn-sm"
+                                      }
+                                      disabled={!isSelectedTrainerInjected}
+                                      onClick={() => void handleApplyFeature(f)}
+                                    >
+                                      {isOn ? "● 已开启（关闭）" : "开启"}
+                                    </button>
+                                  )}
+                                  {f.control_type === "action" && (
+                                    <button
+                                      className="btn btn-secondary btn-sm"
+                                      disabled={!isSelectedTrainerInjected}
+                                      onClick={() => void handleApplyFeature(f)}
+                                    >
+                                      立即执行
+                                    </button>
+                                  )}
+                                  {(f.control_type === "integer" ||
+                                    f.control_type === "float") && (
+                                    <>
+                                      <input
+                                        className="search-input"
+                                        style={{
+                                          width: 96,
+                                          padding: "6px 8px",
+                                        }}
+                                        type="number"
+                                        step={
+                                          f.control_type === "integer"
+                                            ? "1"
+                                            : "any"
+                                        }
+                                        placeholder="数值"
+                                        disabled={!isSelectedTrainerInjected}
+                                        value={featureInputs[f.id] ?? ""}
+                                        onChange={(e) =>
+                                          setFeatureInputs((prev) => ({
+                                            ...prev,
+                                            [f.id]: e.target.value,
+                                          }))
+                                        }
+                                      />
+                                      <button
+                                        className="btn btn-sm"
+                                        disabled={!isSelectedTrainerInjected}
+                                        onClick={() =>
+                                          void handleApplyFeature(f)
+                                        }
+                                      >
+                                        应用
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                )
+              )}
+
+              {/* Collapsible Drawers: Keep main feature canvas clean */}
+              <details className="drawer">
+                <summary>
+                  <span>
+                    🧩 伴生桥接部署配置 (DeploymentLedger ·{" "}
+                    {bridgeStatus?.deployed ? "已部署" : "未部署"})
+                  </span>
+                  <span className="muted">展开 / 收起</span>
+                </summary>
+                <div className="drawer-body">
+                  <div className="muted">
+                    用于将无 UnityExplorer 依赖的 <code>NekodUnityBridge</code> /{" "}
+                    <code>UE4SS</code> / <code>REFramework</code>{" "}
+                    伴生插件安全部署到游戏子目录，并通过 SHA-256 账本记录，支持一键完整卸载还原。
+                  </div>
+                  <div className="row">
+                    <input
+                      className="text-input"
+                      style={{ flex: 1 }}
+                      placeholder="本地源插件文件路径（例如 plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll）"
+                      value={bridgeSourceInput}
+                      onChange={(e) => setBridgeSourceInput(e.target.value)}
+                    />
+                    <input
+                      className="text-input"
+                      style={{ flex: 1 }}
+                      placeholder="游戏内目标相对路径（例如 BepInEx/plugins/NekodUnityBridge.Mono.dll）"
+                      value={bridgeTargetInput}
+                      onChange={(e) => setBridgeTargetInput(e.target.value)}
+                    />
+                  </div>
+                  {bridgeStatus && bridgeStatus.active_files.length > 0 && (
+                    <div className="muted">
+                      当前账本跟踪的已部署文件：{" "}
+                      {bridgeStatus.active_files.map((f) => (
+                        <code key={f} style={{ marginRight: 8 }}>
+                          {f}
+                        </code>
+                      ))}
+                    </div>
+                  )}
+                  <div className="row">
+                    <button
+                      className="btn btn-sm"
+                      disabled={
+                        busyAction === "deploy-bridge" || hasAntiCheatMarkers
+                      }
+                      onClick={() => void handleDeployBridge()}
+                    >
+                      部署到游戏目录
+                    </button>
+                    {bridgeStatus?.deployed && (
+                      <button
+                        className="btn btn-danger btn-sm"
+                        disabled={busyAction === "undeploy-bridge"}
+                        onClick={() => void handleUndeployBridge()}
+                      >
+                        一键解除并清理账本文件
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </details>
+
+              {selectedTrainer && (
+                <details className="drawer">
+                  <summary>
+                    <span>
+                      🔒 权限明细与撤销 ({selectedTrainer.permissions.length} 项权限)
+                    </span>
+                    <span className="muted">
+                      {selectedTrainer.permission_state.status === "approved"
+                        ? "已授权"
+                        : selectedTrainer.permission_state.status}
+                    </span>
+                  </summary>
+                  <div className="drawer-body">
+                    {selectedTrainer.permissions.map((p) => (
+                      <div key={p.scope} className="muted">
+                        &bull; <strong>{PERMISSION_LABELS[p.scope]}</strong> (
+                        <code>{p.scope}</code>)：{p.reason}
+                      </div>
+                    ))}
+                    <div className="row">
+                      {selectedTrainer.permission_state.status === "approved" &&
+                        !activeSessionId && (
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() =>
+                              void handleRevokePermissions(selectedTrainer)
+                            }
+                          >
+                            撤销该模组授权
+                          </button>
+                        )}
                     </div>
                   </div>
-                );
-              })
-            )}
+                </details>
+              )}
 
-            {selectedGame.game.matched_game_id && (
-              <div className="card stack">
-                <h3 style={{ margin: 0 }}>
-                  Compatibility Matrix &amp; Plugin Bucket ({compatRecords.length})
-                </h3>
-                {compatRecords.length === 0 ? (
-                  <p className="muted" style={{ margin: 0 }}>
-                    No tested build matrix records recorded yet for this title. Optional companion
-                    plugins and runtime workers resolve on demand with SHA-256 verification.
-                  </p>
-                ) : (
-                  <div className="stack">
-                    {compatRecords.map((rec) => (
-                      <div key={rec.record_id} className="feature-row">
-                        <div>
-                          <div className="row">
-                            <strong>{rec.mod_id}</strong>
-                            <span className="badge">v{rec.mod_version}</span>
-                            <span className="badge">{rec.runtime_adapter}</span>
-                            <span className="badge">{rec.status}</span>
-                          </div>
-                          <div className="muted">
-                            Build {rec.game_version} ({rec.store_platform}) &middot; Evidence:{" "}
-                            {rec.evidence}
-                            {rec.notes ? ` · ${rec.notes}` : ""}
-                          </div>
-                        </div>
+              {sessionDiag && sessionDiag.recent_events.length > 0 && (
+                <details className="drawer" open={isSelectedGameInjected}>
+                  <summary>
+                    <span>
+                      📜 实时注入会话事件 ({sessionDiag.session_id} ·{" "}
+                      {sessionDiag.state})
+                    </span>
+                    <span className="muted">
+                      冲突 {sessionDiag.rollback_conflicts} / 失败{" "}
+                      {sessionDiag.rollback_failures}
+                    </span>
+                  </summary>
+                  <div className="drawer-body">
+                    {sessionDiag.recent_events.slice(-8).map((ev, idx) => (
+                      <div key={idx} className="muted">
+                        &bull; {ev}
                       </div>
                     ))}
                   </div>
-                )}
-              </div>
-            )}
+                </details>
+              )}
 
-            {selectedGame.game.matched_game_id && (
-              <div className="card stack">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <h3 style={{ margin: 0 }}>
-                    Available Community Trainers ({communityTrainers.length})
-                  </h3>
-                  <button
-                    className="btn btn-secondary"
-                    disabled={busyAction === "sync"}
-                    onClick={() => void handleSyncRegistries()}
-                  >
-                    {busyAction === "sync" ? "Syncing..." : "Sync Feeds"}
-                  </button>
-                </div>
-                {communityTrainers.length === 0 ? (
-                  <p className="muted" style={{ margin: 0 }}>
-                    No indexed community trainers found for this game yet. Sync your registry feeds
-                    in &ldquo;Community &amp; Updates&rdquo;.
-                  </p>
-                ) : (
-                  <div className="stack">
-                    {communityTrainers.map((ct) => (
-                      <div
-                        key={`${ct.repository_id}:${ct.trainer_id}`}
-                        className="feature-row"
+              {selectedGame.game.matched_game_id && (
+                <details className="drawer">
+                  <summary>
+                    <span>📊 兼容矩阵 ({compatRecords.length})</span>
+                    <span className="muted">展开 / 收起</span>
+                  </summary>
+                  <div className="drawer-body">
+                    {compatRecords.length === 0 ? (
+                      <div className="muted">
+                        暂无已记录的版本兼容验证结果。
+                      </div>
+                    ) : (
+                      compatRecords.map((rec) => (
+                        <div key={rec.record_id} className="feature-row">
+                          <div>
+                            <div className="row">
+                              <strong>{rec.mod_id}</strong>
+                              <span className="badge">v{rec.mod_version}</span>
+                              <span className="badge">{rec.runtime_adapter}</span>
+                              <span className="badge">{rec.status}</span>
+                            </div>
+                            <div className="muted">
+                              Build {rec.game_version} ({rec.store_platform}) &middot;{" "}
+                              {rec.evidence}
+                              {rec.notes ? ` · ${rec.notes}` : ""}
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </details>
+              )}
+
+              {selectedGame.game.matched_game_id && (
+                <details className="drawer">
+                  <summary>
+                    <span>
+                      🌐 社区可用模组 ({communityTrainers.length})
+                    </span>
+                    <span className="muted">展开 / 收起</span>
+                  </summary>
+                  <div className="drawer-body">
+                    <div className="row" style={{ justifyContent: "flex-end" }}>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        disabled={busyAction === "sync"}
+                        onClick={() => void handleSyncRegistries()}
                       >
-                        <div>
+                        {busyAction === "sync" ? "同步中..." : "同步社区源"}
+                      </button>
+                    </div>
+                    {communityTrainers.length === 0 ? (
+                      <div className="muted">
+                        当前游戏在已同步社区源中暂无模组，可前往「社区源」添加仓库并同步。
+                      </div>
+                    ) : (
+                      communityTrainers.map((ct) => (
+                        <div
+                          key={`${ct.repository_id}:${ct.trainer_id}`}
+                          className="feature-row"
+                        >
+                          <div>
+                            <div className="row">
+                              <strong>{ct.trainer_id}</strong>
+                              <span className="badge">v{ct.latest_version}</span>
+                              {trustBadge(ct.trust_tier)}
+                              {ct.compatibility_status && (
+                                <span className="badge">
+                                  {ct.compatibility_status}
+                                </span>
+                              )}
+                            </div>
+                            <div className="muted">
+                              仓库：<code>{ct.repository_id}</code>
+                              {ct.last_verified_game_version
+                                ? ` · 验证版本：${ct.last_verified_game_version}`
+                                : ""}
+                            </div>
+                          </div>
                           <div className="row">
-                            <strong>{ct.trainer_id}</strong>
-                            <span className="badge">v{ct.latest_version}</span>
-                            {trustBadge(ct.trust_tier)}
-                            {ct.compatibility_status && (
-                              <span className="badge">{ct.compatibility_status}</span>
+                            {ct.install_state.state === "not_installed" && (
+                              <button
+                                className="btn btn-sm"
+                                disabled={
+                                  busyAction === `install:${ct.trainer_id}`
+                                }
+                                onClick={() =>
+                                  void handleInstallOrUpdateCommunity(
+                                    ct.repository_id,
+                                    ct.trainer_id,
+                                  )
+                                }
+                              >
+                                {busyAction === `install:${ct.trainer_id}`
+                                  ? "安装中..."
+                                  : "安装"}
+                              </button>
+                            )}
+                            {ct.install_state.state ===
+                              "installed_up_to_date" && (
+                              <span className="badge official">已是最新</span>
+                            )}
+                            {ct.install_state.state === "update_available" && (
+                              <button
+                                className="btn btn-sm"
+                                disabled={
+                                  busyAction === `install:${ct.trainer_id}`
+                                }
+                                onClick={() =>
+                                  void handleInstallOrUpdateCommunity(
+                                    ct.repository_id,
+                                    ct.trainer_id,
+                                  )
+                                }
+                              >
+                                更新至 v{ct.install_state.latest_version}
+                              </button>
+                            )}
+                            {ct.install_state.state === "revoked" && (
+                              <span className="badge unverified">已吊销</span>
                             )}
                           </div>
-                          <div className="muted">
-                            Repo: <code>{ct.repository_id}</code>
-                            {ct.last_verified_game_version
-                              ? ` · Verified build: ${ct.last_verified_game_version}`
-                              : ""}
-                          </div>
                         </div>
-                        <div className="row">
-                          {ct.install_state.state === "not_installed" && (
-                            <button
-                              className="btn"
-                              disabled={busyAction === `install:${ct.trainer_id}`}
-                              onClick={() =>
-                                void handleInstallOrUpdateCommunity(
-                                  ct.repository_id,
-                                  ct.trainer_id,
-                                )
-                              }
-                            >
-                              {busyAction === `install:${ct.trainer_id}`
-                                ? "Installing..."
-                                : "Install"}
-                            </button>
-                          )}
-                          {ct.install_state.state === "installed_up_to_date" && (
-                            <span className="badge official">Installed (Up to date)</span>
-                          )}
-                          {ct.install_state.state === "update_available" && (
-                            <button
-                              className="btn"
-                              disabled={busyAction === `install:${ct.trainer_id}`}
-                              onClick={() =>
-                                void handleInstallOrUpdateCommunity(
-                                  ct.repository_id,
-                                  ct.trainer_id,
-                                )
-                              }
-                            >
-                              Update to v{ct.install_state.latest_version}
-                            </button>
-                          )}
-                          {ct.install_state.state === "revoked" && (
-                            <span className="badge unverified">Revoked</span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
+                      ))
+                    )}
                   </div>
-                )}
-              </div>
-            )}
-          </div>
+                </details>
+              )}
+            </section>
+          </>
         )}
 
+        {/* ==================== SECONDARY TABS ==================== */}
         {tab === "community" && (
-          <div className="stack">
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <h2 style={{ margin: 0 }}>Community Repositories &amp; Updates</h2>
-              <button
-                className="btn"
-                disabled={busyAction === "sync"}
-                onClick={() => void handleSyncRegistries()}
-              >
-                {busyAction === "sync" ? "Syncing..." : "Sync All Feeds"}
-              </button>
-            </div>
-
-            <div className="card stack">
-              <h3 style={{ margin: 0 }}>
-                Available Trainer Updates ({updates.length})
-              </h3>
-              {updates.length === 0 ? (
-                <p className="muted" style={{ margin: 0 }}>
-                  All installed trainers match the latest synced registry versions.
-                </p>
-              ) : (
-                updates.map((u) => (
-                  <div
-                    key={`${u.repository_id}:${u.trainer_id}`}
-                    className="feature-row"
-                  >
-                    <div>
-                      <div className="row">
-                        <strong>{u.trainer_id}</strong>
-                        <span className="badge">{u.game_id}</span>
-                        {trustBadge(u.trust_tier)}
-                      </div>
-                      <div className="muted">
-                        Installed v{u.installed_version} &rarr; Available v{u.available_version} (
-                        {u.repository_id})
-                      </div>
-                    </div>
-                    <button
-                      className="btn"
-                      disabled={busyAction === `install:${u.trainer_id}`}
-                      onClick={() =>
-                        void handleInstallOrUpdateCommunity(
-                          u.repository_id,
-                          u.trainer_id,
-                        )
-                      }
-                    >
-                      {busyAction === `install:${u.trainer_id}`
-                        ? "Updating..."
-                        : `Update to v${u.available_version}`}
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <div className="card stack">
-              <h3 style={{ margin: 0 }}>
-                Registered Repositories ({registrySources.length})
-              </h3>
-              {registrySources.length === 0 ? (
-                <p className="muted" style={{ margin: 0 }}>
-                  No community registry sources registered yet.
-                </p>
-              ) : (
-                registrySources.map((s) => (
-                  <div key={s.source.repository_id} className="feature-row">
-                    <div>
-                      <div className="row">
-                        <strong>{s.source.repository_id}</strong>
-                        {trustBadge(s.source.authoritative_trust_tier)}
-                        <span className="badge">{s.last_status}</span>
-                      </div>
-                      <div className="muted">{s.source.index_url}</div>
-                      {s.etag && (
-                        <div className="muted">ETag: <code>{s.etag}</code></div>
-                      )}
-                      {s.last_error && (
-                        <div className="muted" style={{ color: "#f87171" }}>
-                          {s.last_error}
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => void handleRemoveRepo(s.source.repository_id)}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <div className="card stack">
-              <h3 style={{ margin: 0 }}>Add Third-Party Repository</h3>
-              <p className="muted" style={{ margin: 0 }}>
-                Add an HTTPS registry index feed (<code>registry-manifest.json</code>). All
-                third-party repositories enter as <strong>Unverified</strong> and cannot
-                self-promote to <strong>Official</strong>.
-              </p>
-              <div className="row">
-                <input
-                  className="search-input"
-                  style={{ width: 200 }}
-                  placeholder="Repository ID (kebab-case)"
-                  value={repoIdInput}
-                  onChange={(e) => setRepoIdInput(e.target.value)}
-                />
-                <input
-                  className="search-input"
-                  style={{ flex: 1 }}
-                  placeholder="https://example.org/nekod/registry-manifest.json"
-                  value={repoUrlInput}
-                  onChange={(e) => setRepoUrlInput(e.target.value)}
-                />
+          <div className="page-scroll">
+            <div className="page-inner stack">
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <h2 style={{ margin: 0 }}>社区仓库与更新</h2>
                 <button
                   className="btn"
-                  disabled={busyAction === "add-repo"}
-                  onClick={() => void handleAddThirdPartyRepo()}
+                  disabled={busyAction === "sync"}
+                  onClick={() => void handleSyncRegistries()}
                 >
-                  Add Repository
+                  {busyAction === "sync" ? "同步中..." : "同步所有源"}
                 </button>
+              </div>
+
+              <div className="card stack">
+                <h3 style={{ margin: 0 }}>可用更新 ({updates.length})</h3>
+                {updates.length === 0 ? (
+                  <p className="muted" style={{ margin: 0 }}>
+                    所有已安装模组均为最新版本。
+                  </p>
+                ) : (
+                  updates.map((u) => (
+                    <div
+                      key={`${u.repository_id}:${u.trainer_id}`}
+                      className="feature-row"
+                    >
+                      <div>
+                        <div className="row">
+                          <strong>{u.trainer_id}</strong>
+                          <span className="badge">{u.game_id}</span>
+                          {trustBadge(u.trust_tier)}
+                        </div>
+                        <div className="muted">
+                          已安装 v{u.installed_version} &rarr; 可更新 v
+                          {u.available_version} ({u.repository_id})
+                        </div>
+                      </div>
+                      <button
+                        className="btn btn-sm"
+                        disabled={busyAction === `install:${u.trainer_id}`}
+                        onClick={() =>
+                          void handleInstallOrUpdateCommunity(
+                            u.repository_id,
+                            u.trainer_id,
+                          )
+                        }
+                      >
+                        {busyAction === `install:${u.trainer_id}`
+                          ? "更新中..."
+                          : `更新至 v${u.available_version}`}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="card stack">
+                <h3 style={{ margin: 0 }}>
+                  已注册仓库 ({registrySources.length})
+                </h3>
+                {registrySources.length === 0 ? (
+                  <p className="muted" style={{ margin: 0 }}>
+                    尚未注册任何社区源。
+                  </p>
+                ) : (
+                  registrySources.map((s) => (
+                    <div key={s.source.repository_id} className="feature-row">
+                      <div>
+                        <div className="row">
+                          <strong>{s.source.repository_id}</strong>
+                          {trustBadge(s.source.authoritative_trust_tier)}
+                          <span className="badge">{s.last_status}</span>
+                        </div>
+                        <div className="muted">{s.source.index_url}</div>
+                        {s.etag && (
+                          <div className="muted">
+                            ETag: <code>{s.etag}</code>
+                          </div>
+                        )}
+                        {s.last_error && (
+                          <div className="muted" style={{ color: "#f87171" }}>
+                            {s.last_error}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() =>
+                          void handleRemoveRepo(s.source.repository_id)
+                        }
+                      >
+                        移除
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="card stack">
+                <h3 style={{ margin: 0 }}>添加第三方社区仓库</h3>
+                <p className="muted" style={{ margin: 0 }}>
+                  输入 HTTPS 协议的 <code>registry-manifest.json</code> 地址。所有第三方仓库默认归类为{" "}
+                  <strong>Unverified</strong>，无法自我提升为 Official。
+                </p>
+                <div className="row">
+                  <input
+                    className="search-input"
+                    style={{ width: 200 }}
+                    placeholder="Repository ID (kebab-case)"
+                    value={repoIdInput}
+                    onChange={(e) => setRepoIdInput(e.target.value)}
+                  />
+                  <input
+                    className="search-input"
+                    style={{ flex: 1 }}
+                    placeholder="https://example.org/nekod/registry-manifest.json"
+                    value={repoUrlInput}
+                    onChange={(e) => setRepoUrlInput(e.target.value)}
+                  />
+                  <button
+                    className="btn"
+                    disabled={busyAction === "add-repo"}
+                    onClick={() => void handleAddThirdPartyRepo()}
+                  >
+                    添加仓库
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         )}
 
         {tab === "import" && (
-          <div className="stack">
-            <h2 style={{ margin: 0 }}>Local Packages &amp; Game Manifests</h2>
-            <div className="card stack">
-              <h3 style={{ margin: 0 }}>1. Register Game Manifest JSON</h3>
-              <textarea
-                className="text-input"
-                rows={6}
-                placeholder="Paste a validated game-manifest.json..."
-                value={gameManifestJson}
-                onChange={(e) => setGameManifestJson(e.target.value)}
-              />
-              <div>
-                <button className="btn" onClick={() => void handleRegisterGameManifest()}>
-                  Validate &amp; Register Game Manifest
-                </button>
-              </div>
-            </div>
-
-            <div className="card stack">
-              <h3 style={{ margin: 0 }}>2. Ingest Local Trainer Folder</h3>
-              <p className="muted" style={{ margin: 0 }}>
-                Select a folder containing <code>trainer-manifest.json</code> and its verified
-                artifacts. SHA-256 checksums and JSON Schema checks are enforced before import.
-              </p>
-              <div className="row">
-                <input
+          <div className="page-scroll">
+            <div className="page-inner stack">
+              <h2 style={{ margin: 0 }}>本地包与游戏清单导入</h2>
+              <div className="card stack">
+                <h3 style={{ margin: 0 }}>1. 注册 Game Manifest JSON</h3>
+                <textarea
                   className="text-input"
-                  style={{ flex: 1 }}
-                  placeholder="C:\Trainers\my-trainer-package"
-                  value={trainerDir}
-                  onChange={(e) => setTrainerDir(e.target.value)}
+                  rows={6}
+                  placeholder="粘贴通过校验的 game-manifest.json..."
+                  value={gameManifestJson}
+                  onChange={(e) => setGameManifestJson(e.target.value)}
                 />
-                <select
-                  className="select-input"
-                  value={trainerTrust}
-                  onChange={(e) => setTrainerTrust(e.target.value as TrustTier)}
-                >
-                  <option value="official">Official</option>
-                  <option value="community_verified">Community Verified</option>
-                  <option value="unverified">Unverified</option>
-                </select>
-                <button className="btn" onClick={() => void handleIngestTrainer()}>
-                  Verify &amp; Import
-                </button>
+                <div>
+                  <button
+                    className="btn"
+                    onClick={() => void handleRegisterGameManifest()}
+                  >
+                    校验并注册游戏清单
+                  </button>
+                </div>
+              </div>
+
+              <div className="card stack">
+                <h3 style={{ margin: 0 }}>2. 导入本地模组目录</h3>
+                <p className="muted" style={{ margin: 0 }}>
+                  指定包含 <code>trainer-manifest.json</code> 及对应构件的本地文件夹，导入前自动强制校验 JSON Schema 与 SHA-256。
+                </p>
+                <div className="row">
+                  <input
+                    className="text-input"
+                    style={{ flex: 1 }}
+                    placeholder="C:\Trainers\my-trainer-package"
+                    value={trainerDir}
+                    onChange={(e) => setTrainerDir(e.target.value)}
+                  />
+                  <select
+                    className="select-input"
+                    value={trainerTrust}
+                    onChange={(e) =>
+                      setTrainerTrust(e.target.value as TrustTier)
+                    }
+                  >
+                    <option value="official">Official</option>
+                    <option value="community_verified">
+                      Community Verified
+                    </option>
+                    <option value="unverified">Unverified</option>
+                  </select>
+                  <button
+                    className="btn"
+                    onClick={() => void handleIngestTrainer()}
+                  >
+                    校验并导入
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         )}
 
         {tab === "settings" && (
-          <div className="stack">
-            <h2 style={{ margin: 0 }}>Settings &amp; Security Policy</h2>
-            <div className="card stack">
-              <h3 style={{ margin: 0 }}>Default-Deny Security Controls</h3>
-              <label className="row">
-                <input
-                  type="checkbox"
-                  checked={policy.allow_unverified_sources}
-                  onChange={(e) =>
-                    void handleTogglePolicy({
-                      ...policy,
-                      allow_unverified_sources: e.target.checked,
-                    })
-                  }
-                />
-                <span>Allow unverified local/third-party declarative trainers (with warnings)</span>
-              </label>
-              <label className="row">
-                <input
-                  type="checkbox"
-                  checked={policy.allow_third_party_native_modules}
-                  onChange={(e) =>
-                    void handleTogglePolicy({
-                      ...policy,
-                      allow_third_party_native_modules: e.target.checked,
-                    })
-                  }
-                />
-                <span>
-                  Allow third-party native runtime modules (high risk; disabled by default)
-                </span>
-              </label>
-            </div>
-
-            <div className="card stack">
-              <h3 style={{ margin: 0 }}>Custom Game Folders</h3>
-              <div className="row">
-                <input
-                  className="text-input"
-                  style={{ flex: 1 }}
-                  placeholder="Folder path (e.g. D:\Games\HollowKnight)"
-                  value={customDir}
-                  onChange={(e) => setCustomDir(e.target.value)}
-                />
-                <input
-                  className="text-input"
-                  placeholder="Optional label"
-                  value={customLabel}
-                  onChange={(e) => setCustomLabel(e.target.value)}
-                />
-                <button className="btn" onClick={() => void handleAddCustomPath()}>
-                  Add Folder
-                </button>
+          <div className="page-scroll">
+            <div className="page-inner stack">
+              <h2 style={{ margin: 0 }}>设置与安全策略</h2>
+              <div className="card stack">
+                <h3 style={{ margin: 0 }}>Default-Deny 安全控制</h3>
+                <label className="row">
+                  <input
+                    type="checkbox"
+                    checked={policy.allow_unverified_sources}
+                    onChange={(e) =>
+                      void handleTogglePolicy({
+                        ...policy,
+                        allow_unverified_sources: e.target.checked,
+                      })
+                    }
+                  />
+                  <span>允许未认证（Unverified）来源的声明式模组（附带风险提示）</span>
+                </label>
+                <label className="row">
+                  <input
+                    type="checkbox"
+                    checked={policy.allow_third_party_native_modules}
+                    onChange={(e) =>
+                      void handleTogglePolicy({
+                        ...policy,
+                        allow_third_party_native_modules: e.target.checked,
+                      })
+                    }
+                  />
+                  <span>允许第三方原生运行时模块（高风险，默认关闭）</span>
+                </label>
               </div>
 
-              {customPaths.map((cp) => (
-                <div key={cp.path} className="feature-row">
-                  <div>
-                    <strong>{cp.label ?? cp.path}</strong>
-                    <div className="muted">{cp.path}</div>
-                  </div>
+              <div className="card stack">
+                <h3 style={{ margin: 0 }}>自定义游戏目录</h3>
+                <div className="row">
+                  <input
+                    className="text-input"
+                    style={{ flex: 1 }}
+                    placeholder="目录路径（如 D:\Games\HollowKnight）"
+                    value={customDir}
+                    onChange={(e) => setCustomDir(e.target.value)}
+                  />
+                  <input
+                    className="text-input"
+                    placeholder="可选显示标签"
+                    value={customLabel}
+                    onChange={(e) => setCustomLabel(e.target.value)}
+                  />
                   <button
-                    className="btn btn-danger"
-                    onClick={async () => {
-                      try {
-                        setError(null);
-                        setCustomPaths(await nekodApi.removeCustomGamePath(cp.path));
-                        await handleRescan();
-                      } catch (e) {
-                        setError(String(e));
-                      }
-                    }}
+                    className="btn"
+                    onClick={() => void handleAddCustomPath()}
                   >
-                    Remove
+                    添加目录
                   </button>
                 </div>
-              ))}
+
+                {customPaths.map((cp) => (
+                  <div key={cp.path} className="feature-row">
+                    <div>
+                      <strong>{cp.label ?? cp.path}</strong>
+                      <div className="muted">{cp.path}</div>
+                    </div>
+                    <button
+                      className="btn btn-danger btn-sm"
+                      onClick={async () => {
+                        try {
+                          setError(null);
+                          setCustomPaths(
+                            await nekodApi.removeCustomGamePath(cp.path),
+                          );
+                          await handleRescan();
+                        } catch (e) {
+                          setError(String(e));
+                        }
+                      }}
+                    >
+                      移除
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}
 
         {tab === "logs" && (
-          <div className="stack">
-            <div className="header-row">
-              <h2 style={{ margin: 0 }}>Diagnostics &amp; Audit Logs</h2>
-              <div className="row">
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    const summary = JSON.stringify(
-                      {
-                        generated_at: new Date().toISOString(),
-                        security_policy: policy,
-                        active_session: sessionDiag,
-                        logs,
-                      },
-                      null,
-                      2,
-                    );
-                    setDiagnosticBundle(summary);
-                    setStatusMsg("Generated inspectable diagnostic bundle JSON below.");
-                  }}
-                >
-                  Export Diagnostic Bundle
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={async () => {
-                    try {
-                      setLogs(await nekodApi.getDiagnosticLogs());
-                    } catch (e) {
-                      setError(String(e));
-                    }
-                  }}
-                >
-                  Refresh
-                </button>
-              </div>
-            </div>
-            {diagnosticBundle && (
-              <div className="card stack">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <strong>Diagnostic Bundle (JSON)</strong>
+          <div className="page-scroll">
+            <div className="page-inner stack">
+              <div className="header-row">
+                <h2 style={{ margin: 0 }}>诊断与审计日志</h2>
+                <div className="row">
                   <button
                     className="btn btn-secondary"
-                    onClick={() => setDiagnosticBundle(null)}
+                    onClick={() => {
+                      const summary = JSON.stringify(
+                        {
+                          generated_at: new Date().toISOString(),
+                          security_policy: policy,
+                          active_session: sessionDiag,
+                          logs,
+                        },
+                        null,
+                        2,
+                      );
+                      setDiagnosticBundle(summary);
+                      setStatusMsg("已生成可审计诊断包 JSON。");
+                    }}
                   >
-                    Hide Bundle
+                    导出诊断包
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={async () => {
+                      try {
+                        setLogs(await nekodApi.getDiagnosticLogs());
+                      } catch (e) {
+                        setError(String(e));
+                      }
+                    }}
+                  >
+                    刷新日志
                   </button>
                 </div>
-                <textarea
-                  className="text-input"
-                  rows={8}
-                  readOnly
-                  value={diagnosticBundle}
-                />
               </div>
-            )}
-            <div className="card">
-              {logs.length === 0 ? (
-                <p className="muted" style={{ margin: 0 }}>
-                  No diagnostic events recorded yet.
-                </p>
-              ) : (
-                logs.map((entry, idx) => (
-                  <div key={idx} className="log-line">
-                    [{entry.level.toUpperCase()}] ({entry.category}) {entry.message}
+              {diagnosticBundle && (
+                <div className="card stack">
+                  <div
+                    className="row"
+                    style={{ justifyContent: "space-between" }}
+                  >
+                    <strong>Diagnostic Bundle (JSON)</strong>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setDiagnosticBundle(null)}
+                    >
+                      收起
+                    </button>
                   </div>
-                ))
+                  <textarea
+                    className="text-input"
+                    rows={8}
+                    readOnly
+                    value={diagnosticBundle}
+                  />
+                </div>
               )}
+              <div className="card">
+                {logs.length === 0 ? (
+                  <p className="muted" style={{ margin: 0 }}>
+                    暂无诊断事件记录。
+                  </p>
+                ) : (
+                  logs.map((entry, idx) => (
+                    <div key={idx} className="log-line">
+                      [{entry.level.toUpperCase()}] ({entry.category}){" "}
+                      {entry.message}
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           </div>
         )}
-      </main>
+      </div>
     </div>
   );
 }

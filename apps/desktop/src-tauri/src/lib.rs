@@ -1,24 +1,45 @@
 //! L1 Tauri 2 desktop shell delegating all business & security operations to `nekod-core`.
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nekod_core::{
     CommunityTrainerView, DiagnosticEvent, LibraryGameView, NekodAppService, TrainerDetailView,
     TrainerPermissionState, TrainerUpdateInfo,
 };
-use nekod_game_detection::GameEnvironmentProfile;
+use nekod_game_detection::{GameEngineKind, GameEnvironmentProfile};
 use nekod_manifest::{PermissionScope, TrustTier};
 use nekod_permission_manager::SecurityPolicyConfig;
 use nekod_profile_manager::{CustomGamePathRecord, GameProfile};
 use nekod_registry_client::{RegistrySourceState, RegistrySyncReport};
 use nekod_runtime_api::{FeatureCommand, ProcessIdentity, RuntimeDiagnostics, RuntimeSessionId};
-use nekod_trainer_manager::CompatibilityRecord;
-use nekod_trainer_runtime::CompositeRuntimeRouter;
+use nekod_trainer_manager::{CompatibilityRecord, sha256_hex};
+use nekod_trainer_runtime::{CompositeRuntimeRouter, DeploymentLedger, DeploymentState};
+use serde::Serialize;
 use tauri::{Manager, State};
 
 pub struct AppState {
     core: NekodAppService,
+    data_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BridgeDeploymentStatus {
+    pub deployed: bool,
+    pub engine: GameEngineKind,
+    pub active_files: Vec<String>,
+    pub suggested_source_file: Option<String>,
+    pub suggested_target_relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BridgeUndeploySummary {
+    pub removed_count: usize,
+    pub restored_originals: usize,
+    pub conflicts: usize,
+    pub conflict_paths: Vec<String>,
 }
 
 fn map_err(err: impl std::fmt::Display) -> String {
@@ -312,9 +333,184 @@ fn query_compatibility_matrix(
         .map_err(map_err)
 }
 
+fn bridge_ledger_paths(data_dir: &Path, game_key: &str) -> (PathBuf, PathBuf) {
+    let safe_key: String = game_key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let root = data_dir.join("deployments").join(safe_key);
+    (root.join("backups"), root.join("ledger.json"))
+}
+
+fn suggest_companion_bridge(engine: GameEngineKind) -> (Option<String>, Option<String>) {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..");
+    let (rel_src, target_rel) = match engine {
+        GameEngineKind::UnityIl2cpp => (
+            "plugins/unity-nekod-bridge/dist/il2cpp/NekodUnityBridge.IL2CPP.dll",
+            "BepInEx/plugins/NekodUnityBridge.IL2CPP.dll",
+        ),
+        GameEngineKind::UnityMono => (
+            "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll",
+            "BepInEx/plugins/NekodUnityBridge.Mono.dll",
+        ),
+        GameEngineKind::ReEngine => (
+            "plugins/reframework-nekod-bridge/reframework/autorun/nekod_bridge.lua",
+            "reframework/autorun/nekod_bridge.lua",
+        ),
+        GameEngineKind::UnrealEngine => (
+            "plugins/ue4ss-nekod-bridge/Scripts/main.lua",
+            "ue4ss/Mods/NekodBridge/Scripts/main.lua",
+        ),
+        _ => return (None, None),
+    };
+    let candidate = workspace_root.join(rel_src);
+    let source = if candidate.is_file() {
+        Some(candidate.display().to_string())
+    } else {
+        Some(rel_src.to_owned())
+    };
+    (source, Some(target_rel.to_owned()))
+}
+
+fn validate_bridge_target_path(rel_path: &str) -> Result<(), String> {
+    let normalized = rel_path.replace('\\', "/");
+    if normalized.contains("..") || normalized.starts_with('/') || normalized.contains(':') {
+        return Err(format!("unsafe bridge target path '{rel_path}'"));
+    }
+    let lower = normalized.to_ascii_lowercase();
+    let allowed_prefix = [
+        "bepinex/plugins/",
+        "reframework/autorun/",
+        "ue4ss/mods/",
+        "scripts/",
+    ]
+    .iter()
+    .any(|p| lower.starts_with(p));
+    if !allowed_prefix {
+        return Err(format!(
+            "target path '{rel_path}' must reside inside BepInEx/plugins/, reframework/autorun/, ue4ss/Mods/, or scripts/"
+        ));
+    }
+    if [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        return Err(format!(
+            "disallowed executable extension in bridge target '{rel_path}'"
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_bridge_deployment_status(
+    state: State<'_, AppState>,
+    game_key: String,
+    install_dir: String,
+) -> Result<BridgeDeploymentStatus, String> {
+    let env = state.core.inspect_installed_game_environment(&install_dir);
+    let (suggested_source_file, suggested_target_relative_path) =
+        suggest_companion_bridge(env.engine);
+    let mut active_files = Vec::new();
+    if env.dir_exists {
+        let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
+        if ledger_path.is_file()
+            && let Ok(ledger) = DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path)
+        {
+            for rec in ledger.records() {
+                if rec.state == DeploymentState::Deployed {
+                    active_files.push(rec.relative_path.clone());
+                }
+            }
+        }
+    }
+    Ok(BridgeDeploymentStatus {
+        deployed: !active_files.is_empty(),
+        engine: env.engine,
+        active_files,
+        suggested_source_file,
+        suggested_target_relative_path,
+    })
+}
+
+#[tauri::command]
+fn deploy_companion_bridge(
+    state: State<'_, AppState>,
+    game_key: String,
+    install_dir: String,
+    source_file: String,
+    target_relative_path: String,
+) -> Result<BridgeDeploymentStatus, String> {
+    validate_bridge_target_path(&target_relative_path)?;
+    let env = state.core.inspect_installed_game_environment(&install_dir);
+    if !env.dir_exists {
+        return Err(format!("game install directory '{install_dir}' not found"));
+    }
+    if !env.anti_cheat_files_present.is_empty() {
+        return Err(format!(
+            "refusing companion bridge deployment: anti-cheat markers present ({:?})",
+            env.anti_cheat_files_present
+        ));
+    }
+
+    let bytes = fs::read(&source_file)
+        .map_err(|e| format!("cannot read bridge source '{source_file}': {e}"))?;
+    let expected_sha = sha256_hex(&bytes);
+    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
+    let mut ledger =
+        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+    ledger
+        .stage_file(
+            &game_key,
+            "nekod.companion.bridge",
+            &target_relative_path,
+            &bytes,
+            &expected_sha,
+        )
+        .map_err(map_err)?;
+
+    get_bridge_deployment_status(state, game_key, install_dir)
+}
+
+#[tauri::command]
+fn undeploy_companion_bridge(
+    state: State<'_, AppState>,
+    game_key: String,
+    install_dir: String,
+) -> Result<BridgeUndeploySummary, String> {
+    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
+    let mut ledger =
+        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+    let report = ledger
+        .undeploy_package("nekod.companion.bridge")
+        .map_err(map_err)?;
+    Ok(BridgeUndeploySummary {
+        removed_count: report.removed_count,
+        restored_originals: report.restored_originals,
+        conflicts: report.conflicts,
+        conflict_paths: report.conflict_paths,
+    })
+}
+
 impl AppState {
     pub fn new(core: NekodAppService) -> Self {
-        Self { core }
+        Self {
+            core,
+            data_dir: std::env::temp_dir().join("nekod_desktop_state"),
+        }
+    }
+
+    pub fn with_data_dir(core: NekodAppService, data_dir: PathBuf) -> Self {
+        Self { core, data_dir }
     }
 }
 
@@ -352,6 +548,9 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         install_or_update_trainer_from_registry,
         inspect_game_environment,
         query_compatibility_matrix,
+        get_bridge_deployment_status,
+        deploy_companion_bridge,
+        undeploy_companion_bridge,
     ]
 }
 
@@ -363,11 +562,11 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             let core = NekodAppService::open_in_dir(
-                data_dir,
+                &data_dir,
                 Arc::new(CompositeRuntimeRouter::with_default_providers()),
             )
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-            app.manage(AppState { core });
+            app.manage(AppState::with_data_dir(core, data_dir));
             Ok(())
         })
         .invoke_handler(desktop_invoke_handler())

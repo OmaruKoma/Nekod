@@ -1,4 +1,6 @@
 import type {
+  BridgeDeploymentStatus,
+  BridgeUndeploySummary,
   CommunityTrainerView,
   CompatibilityRecord,
   CustomGamePathRecord,
@@ -208,6 +210,8 @@ export function createBrowserPreviewApi() {
   const pushLog = (level: string, category: string, message: string) => {
     logs = [...logs, { level, category, message }];
   };
+
+  const deployedBridges = new Map<string, string[]>();
 
   return {
     rescanGames: async (): Promise<LibraryGameView[]> => {
@@ -478,5 +482,57 @@ export function createBrowserPreviewApi() {
         recorded_at: 1763265600,
       },
     ],
+    getBridgeDeploymentStatus: async (
+      gameKey: string,
+      installDir: string,
+    ): Promise<BridgeDeploymentStatus> => {
+      const isHollow = installDir.toLowerCase().includes("hollow");
+      const files = deployedBridges.get(gameKey) ?? [];
+      return {
+        deployed: files.length > 0,
+        engine: isHollow ? "unity_mono" : "native_unknown",
+        active_files: files,
+        suggested_source_file: isHollow
+          ? "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll"
+          : null,
+        suggested_target_relative_path: isHollow
+          ? "BepInEx/plugins/NekodUnityBridge.Mono.dll"
+          : null,
+      };
+    },
+    deployCompanionBridge: async (
+      gameKey: string,
+      installDir: string,
+      _sourceFile: string,
+      targetRelativePath: string,
+    ): Promise<BridgeDeploymentStatus> => {
+      const isHollow = installDir.toLowerCase().includes("hollow");
+      const next = [targetRelativePath];
+      deployedBridges.set(gameKey, next);
+      pushLog("info", "deployment", `Staged companion bridge '${targetRelativePath}' for ${gameKey}`);
+      return {
+        deployed: true,
+        engine: isHollow ? "unity_mono" : "native_unknown",
+        active_files: next,
+        suggested_source_file: isHollow
+          ? "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll"
+          : null,
+        suggested_target_relative_path: targetRelativePath,
+      };
+    },
+    undeployCompanionBridge: async (
+      gameKey: string,
+      _installDir: string,
+    ): Promise<BridgeUndeploySummary> => {
+      const prev = deployedBridges.get(gameKey) ?? [];
+      deployedBridges.delete(gameKey);
+      pushLog("info", "deployment", `Cleanly undeployed ${prev.length} bridge file(s) for ${gameKey}`);
+      return {
+        removed_count: prev.length,
+        restored_originals: 0,
+        conflicts: 0,
+        conflict_paths: [],
+      };
+    },
   };
 }

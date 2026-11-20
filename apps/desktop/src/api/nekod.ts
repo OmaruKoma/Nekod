@@ -233,6 +233,21 @@ export interface CompatibilityRecord {
   recorded_at: number;
 }
 
+export interface BridgeDeploymentStatus {
+  deployed: boolean;
+  engine: GameEnvironmentProfile["engine"];
+  active_files: string[];
+  suggested_source_file: string | null;
+  suggested_target_relative_path: string | null;
+}
+
+export interface BridgeUndeploySummary {
+  removed_count: number;
+  restored_originals: number;
+  conflicts: number;
+  conflict_paths: string[];
+}
+
 const tauriApi = {
   rescanGames: () => invoke<LibraryGameView[]>("rescan_games"),
   listLibraryGames: () => invoke<LibraryGameView[]>("list_library_games"),
@@ -314,6 +329,28 @@ const tauriApi = {
       gameId,
       modId,
       gameVersion,
+    }),
+  getBridgeDeploymentStatus: (gameKey: string, installDir: string) =>
+    invoke<BridgeDeploymentStatus>("get_bridge_deployment_status", {
+      gameKey,
+      installDir,
+    }),
+  deployCompanionBridge: (
+    gameKey: string,
+    installDir: string,
+    sourceFile: string,
+    targetRelativePath: string,
+  ) =>
+    invoke<BridgeDeploymentStatus>("deploy_companion_bridge", {
+      gameKey,
+      installDir,
+      sourceFile,
+      targetRelativePath,
+    }),
+  undeployCompanionBridge: (gameKey: string, installDir: string) =>
+    invoke<BridgeUndeploySummary>("undeploy_companion_bridge", {
+      gameKey,
+      installDir,
     }),
 };
 

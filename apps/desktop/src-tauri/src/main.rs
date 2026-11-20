@@ -230,6 +230,72 @@ mod tests {
         .expect("query_compatibility_matrix");
         assert!(matrix.as_array().unwrap().is_empty());
 
+        // 7b. Verify companion bridge one-click deploy & undeploy (DeploymentLedger) + path safety checks.
+        let bridge_src = root.join("NekodUnityBridge.Mono.dll");
+        fs::write(&bridge_src, b"dummy-managed-plugin-bytes").unwrap();
+        let initial_bridge = invoke_json(
+            &webview,
+            "get_bridge_deployment_status",
+            serde_json::json!({
+                "gameKey": "custom:sample-rpg",
+                "installDir": custom_game_dir.to_string_lossy()
+            }),
+        )
+        .expect("get_bridge_deployment_status");
+        assert_eq!(initial_bridge["deployed"], false);
+
+        // Reject unsafe target paths (outside allowlisted plugin subdirs) and blocked executable extensions.
+        let bad_target = invoke_json(
+            &webview,
+            "deploy_companion_bridge",
+            serde_json::json!({
+                "gameKey": "custom:sample-rpg",
+                "installDir": custom_game_dir.to_string_lossy(),
+                "sourceFile": bridge_src.to_string_lossy(),
+                "targetRelativePath": "bad_root.dll"
+            }),
+        );
+        assert!(bad_target.is_err());
+
+        let deployed = invoke_json(
+            &webview,
+            "deploy_companion_bridge",
+            serde_json::json!({
+                "gameKey": "custom:sample-rpg",
+                "installDir": custom_game_dir.to_string_lossy(),
+                "sourceFile": bridge_src.to_string_lossy(),
+                "targetRelativePath": "BepInEx/plugins/NekodUnityBridge.Mono.dll"
+            }),
+        )
+        .expect("deploy_companion_bridge");
+        assert_eq!(deployed["deployed"], true);
+        assert!(
+            custom_game_dir
+                .join("BepInEx")
+                .join("plugins")
+                .join("NekodUnityBridge.Mono.dll")
+                .exists()
+        );
+
+        let undeploy = invoke_json(
+            &webview,
+            "undeploy_companion_bridge",
+            serde_json::json!({
+                "gameKey": "custom:sample-rpg",
+                "installDir": custom_game_dir.to_string_lossy()
+            }),
+        )
+        .expect("undeploy_companion_bridge");
+        assert_eq!(undeploy["removed_count"], 1);
+        assert_eq!(undeploy["conflicts"], 0);
+        assert!(
+            !custom_game_dir
+                .join("BepInEx")
+                .join("plugins")
+                .join("NekodUnityBridge.Mono.dll")
+                .exists()
+        );
+
         // 8. Remove custom path & verify diagnostic audit logs captured workflow.
         let after_remove = invoke_json(
             &webview,
