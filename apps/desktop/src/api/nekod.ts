@@ -294,6 +294,13 @@ export interface LaunchGameResult {
   target: string;
 }
 
+export interface LoaderProgressEvent {
+  stage: string;
+  current: number;
+  total: number;
+  message: string;
+}
+
 const tauriApi = {
   rescanGames: () => invoke<LibraryGameView[]>("rescan_games"),
   listLibraryGames: () => invoke<LibraryGameView[]>("list_library_games"),
@@ -466,6 +473,15 @@ const tauriApi = {
   ): Promise<() => void> => {
     const unlisten = await listen<GlobalHotkeyEvent>(
       "nekod://global-hotkey",
+      (ev) => handler(ev.payload),
+    );
+    return unlisten;
+  },
+  onLoaderProgress: async (
+    handler: (event: LoaderProgressEvent) => void,
+  ): Promise<() => void> => {
+    const unlisten = await listen<LoaderProgressEvent>(
+      "nekod://loader-progress",
       (ev) => handler(ev.payload),
     );
     return unlisten;

@@ -44,6 +44,7 @@ import {
   GameEnvironmentProfile,
   GameProfile,
   LibraryGameView,
+  LoaderProgressEvent,
   PermissionScope,
   ProcessIdentity,
   RegistrySourceState,
@@ -200,6 +201,8 @@ export default function App() {
   >({});
   const [bridgeSourceInput, setBridgeSourceInput] = useState("");
   const [bridgeTargetInput, setBridgeTargetInput] = useState("");
+  const [loaderProgress, setLoaderProgress] =
+    useState<LoaderProgressEvent | null>(null);
 
   // Community ecosystem & profiles state
   const [registrySources, setRegistrySources] = useState<RegistrySourceState[]>(
@@ -922,6 +925,12 @@ export default function App() {
     if (!selectedGame) return;
     try {
       setBusyAction("install-loader");
+      setLoaderProgress({
+        stage: "starting",
+        current: 0,
+        total: 0,
+        message: "正在初始化异步下载与安装任务...",
+      });
       setError(null);
       const next = await nekodApi.installBepInExLoader(
         selectedGame.library_key,
@@ -949,6 +958,7 @@ export default function App() {
       setError(String(e));
     } finally {
       setBusyAction(null);
+      setLoaderProgress(null);
     }
   }
 
@@ -1132,16 +1142,25 @@ export default function App() {
   };
 
   useEffect(() => {
-    let unlisten: (() => void) | null = null;
+    let unlistenHotkey: (() => void) | null = null;
+    let unlistenLoader: (() => void) | null = null;
     void nekodApi
       .onGlobalHotkey((ev) => {
         globalHotkeyHandlerRef.current(ev.feature_id, ev.hotkey);
       })
       .then((fn) => {
-        unlisten = fn;
+        unlistenHotkey = fn;
+      });
+    void nekodApi
+      .onLoaderProgress((ev) => {
+        setLoaderProgress(ev);
+      })
+      .then((fn) => {
+        unlistenLoader = fn;
       });
     return () => {
-      if (unlisten) unlisten();
+      if (unlistenHotkey) unlistenHotkey();
+      if (unlistenLoader) unlistenLoader();
     };
   }, []);
 
@@ -2254,7 +2273,35 @@ export default function App() {
                         </span>
                       </button>
                     </div>
-                    <div className="muted">{bridgeStatus.loader_warning}</div>
+                    <div className="muted">
+                      {busyAction === "install-loader" && loaderProgress ? (
+                        <div className="stack" style={{ gap: 6 }}>
+                          <span className="mono" style={{ color: "var(--text-primary)" }}>
+                            {loaderProgress.message}
+                          </span>
+                          <div className="progress-track">
+                            <div
+                              className="progress-fill"
+                              style={{
+                                width: `${
+                                  loaderProgress.total > 0
+                                    ? Math.min(
+                                        100,
+                                        Math.round(
+                                          (loaderProgress.current * 100) /
+                                            loaderProgress.total,
+                                        ),
+                                      )
+                                    : 28
+                                }%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        bridgeStatus.loader_warning
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -2685,9 +2732,15 @@ export default function App() {
                             </span>
                           </div>
                           <div className="muted" style={{ marginTop: 2 }}>
-                            {bridgeStatus.loader_installed
-                              ? "引导加载器已就绪，重启或运行游戏时将自动加载 NekodUnityBridge。"
-                              : "缺少引导加载器（winhttp.dll / BepInEx/core），可通过 DeploymentLedger 一键安装与无痕卸载。"}
+                            {busyAction === "install-loader" && loaderProgress ? (
+                              <span className="mono" style={{ color: "var(--text-primary)" }}>
+                                {loaderProgress.message}
+                              </span>
+                            ) : bridgeStatus.loader_installed ? (
+                              "引导加载器已就绪，重启或运行游戏时将自动加载 NekodUnityBridge。"
+                            ) : (
+                              "缺少引导加载器（winhttp.dll / BepInEx/core），可通过 DeploymentLedger 一键安装与无痕卸载。"
+                            )}
                           </div>
                         </div>
                         <div className="row">

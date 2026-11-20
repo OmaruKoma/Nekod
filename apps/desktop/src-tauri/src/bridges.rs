@@ -7,13 +7,21 @@
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nekod_game_detection::GameEngineKind;
 use nekod_trainer_manager::sha256_hex;
 use nekod_trainer_runtime::DeploymentLedger;
 use serde::Serialize;
 use zip::ZipArchive;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoaderProgressEvent {
+    pub stage: String,
+    pub current: u64,
+    pub total: u64,
+    pub message: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct BridgeSpec {
@@ -406,16 +414,52 @@ pub fn validate_bepinex_archive_entry_path(rel_path: &str) -> Result<String, Str
     Ok(trimmed.to_owned())
 }
 
-/// Extracts a verified BepInEx zip archive into `ledger` under `nekod.loader.bepinex`.
+/// Extracts a verified BepInEx zip archive into `ledger` under `nekod.loader.bepinex`,
+/// persisting in checkpoints (`flush` every 32 files and once at completion).
+#[allow(dead_code)]
 pub fn extract_bepinex_zip_to_ledger(
     zip_bytes: &[u8],
     game_key: &str,
     ledger: &mut DeploymentLedger,
 ) -> Result<usize, String> {
+    extract_bepinex_zip_to_ledger_with_progress(zip_bytes, game_key, ledger, |_| {})
+}
+
+/// Extracts a verified BepInEx zip archive into `ledger` with throttled progress callbacks.
+pub fn extract_bepinex_zip_to_ledger_with_progress<F>(
+    zip_bytes: &[u8],
+    game_key: &str,
+    ledger: &mut DeploymentLedger,
+    mut on_progress: F,
+) -> Result<usize, String>
+where
+    F: FnMut(LoaderProgressEvent),
+{
     let mut archive = ZipArchive::new(Cursor::new(zip_bytes))
         .map_err(|e| format!("failed to parse BepInEx zip archive: {e}"))?;
-    let mut staged_count = 0usize;
 
+    let mut total_files = 0u64;
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("failed inspecting archive entry #{i}: {e}"))?;
+        if !entry.is_dir() {
+            total_files += 1;
+        }
+    }
+
+    if total_files == 0 {
+        return Err("BepInEx archive contained no stageable files".to_owned());
+    }
+
+    on_progress(LoaderProgressEvent {
+        stage: "extracting".to_owned(),
+        current: 0,
+        total: total_files,
+        message: format!("开始写入引导加载器文件 (0 / {total_files})..."),
+    });
+
+    let mut staged_count = 0usize;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -432,22 +476,52 @@ pub fn extract_bepinex_zip_to_ledger(
             .map_err(|e| format!("failed reading archive entry '{clean_rel}': {e}"))?;
         let sha = sha256_hex(&buf);
         ledger
-            .stage_file(game_key, "nekod.loader.bepinex", &clean_rel, &buf, &sha)
+            .stage_file_deferred(game_key, "nekod.loader.bepinex", &clean_rel, &buf, &sha)
             .map_err(|e| e.to_string())?;
         staged_count += 1;
+
+        if staged_count % 32 == 0 {
+            ledger.flush().map_err(|e| e.to_string())?;
+        }
+        if staged_count % 8 == 0 || staged_count as u64 == total_files {
+            on_progress(LoaderProgressEvent {
+                stage: "extracting".to_owned(),
+                current: staged_count as u64,
+                total: total_files,
+                message: format!("安全写入引导文件 ({staged_count} / {total_files})"),
+            });
+        }
     }
 
-    if staged_count == 0 {
-        return Err("BepInEx archive contained no stageable files".to_owned());
-    }
+    ledger.flush().map_err(|e| e.to_string())?;
+    on_progress(LoaderProgressEvent {
+        stage: "done".to_owned(),
+        current: staged_count as u64,
+        total: total_files,
+        message: "BepInEx 安装完成".to_owned(),
+    });
     Ok(staged_count)
 }
 
 /// Loads a cached SHA-256-verified BepInEx zip or downloads and verifies it over HTTPS.
+#[allow(dead_code)]
 pub fn download_or_load_cached_bepinex_zip(
     data_dir: &Path,
     engine: GameEngineKind,
 ) -> Result<Vec<u8>, String> {
+    download_or_load_cached_bepinex_zip_with_progress(data_dir, engine, |_| {})
+}
+
+/// Streams a BepInEx zip download in 64 KiB chunks with live progress callbacks, then verifies
+/// the exact pinned SHA-256 checksum and writes it into `<data_dir>/loader-cache/`.
+pub fn download_or_load_cached_bepinex_zip_with_progress<F>(
+    data_dir: &Path,
+    engine: GameEngineKind,
+    mut on_progress: F,
+) -> Result<Vec<u8>, String>
+where
+    F: FnMut(LoaderProgressEvent),
+{
     let spec = bepinex_loader_spec_for_engine(engine).ok_or_else(|| {
         format!("no BepInEx loader package applies to detected engine '{engine:?}'")
     })?;
@@ -465,15 +539,30 @@ pub fn download_or_load_cached_bepinex_zip(
     {
         let cached_sha = sha256_hex(&cached_bytes);
         if cached_sha.eq_ignore_ascii_case(spec.pinned_sha256) {
+            let len = cached_bytes.len() as u64;
+            on_progress(LoaderProgressEvent {
+                stage: "cache_hit".to_owned(),
+                current: len,
+                total: len,
+                message: "命中本地 SHA-256 缓存，准备解压...".to_owned(),
+            });
             return Ok(cached_bytes);
         }
     }
 
+    on_progress(LoaderProgressEvent {
+        stage: "connecting".to_owned(),
+        current: 0,
+        total: 0,
+        message: format!("正在连接官方镜像下载 {}...", spec.display_name),
+    });
+
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(180))
         .build()
         .map_err(|e| format!("failed to build HTTP client for BepInEx download: {e}"))?;
-    let resp = client
+    let mut resp = client
         .get(spec.download_url)
         .send()
         .map_err(|e| format!("failed downloading {}: {e}", spec.display_name))?;
@@ -484,10 +573,55 @@ pub fn download_or_load_cached_bepinex_zip(
             spec.download_url
         ));
     }
-    let bytes = resp
-        .bytes()
-        .map_err(|e| format!("failed reading BepInEx download body: {e}"))?
-        .to_vec();
+
+    let total_bytes = resp.content_length().unwrap_or(0);
+    let mut bytes = if total_bytes > 0 {
+        Vec::with_capacity(total_bytes as usize)
+    } else {
+        Vec::new()
+    };
+    let mut chunk = [0u8; 64 * 1024];
+    let mut last_emit = Instant::now()
+        .checked_sub(Duration::from_millis(250))
+        .unwrap_or_else(Instant::now);
+
+    loop {
+        let n = resp
+            .read(&mut chunk)
+            .map_err(|e| format!("failed reading BepInEx download body: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        if last_emit.elapsed() >= Duration::from_millis(200) {
+            last_emit = Instant::now();
+            let downloaded_mb = bytes.len() as f64 / (1024.0 * 1024.0);
+            let msg = if total_bytes > 0 {
+                let total_mb = total_bytes as f64 / (1024.0 * 1024.0);
+                let pct = ((bytes.len() as u64).saturating_mul(100)) / total_bytes.max(1);
+                format!(
+                    "下载 {}: {downloaded_mb:.1} / {total_mb:.1} MB ({pct}%)",
+                    spec.display_name
+                )
+            } else {
+                format!("下载 {}: {downloaded_mb:.1} MB", spec.display_name)
+            };
+            on_progress(LoaderProgressEvent {
+                stage: "downloading".to_owned(),
+                current: bytes.len() as u64,
+                total: total_bytes,
+                message: msg,
+            });
+        }
+    }
+
+    let len = bytes.len() as u64;
+    on_progress(LoaderProgressEvent {
+        stage: "verifying".to_owned(),
+        current: len,
+        total: len,
+        message: "正在校验 SHA-256 完整性...".to_owned(),
+    });
 
     let actual_sha = sha256_hex(&bytes);
     if !actual_sha.eq_ignore_ascii_case(spec.pinned_sha256) {

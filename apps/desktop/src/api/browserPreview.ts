@@ -14,6 +14,7 @@ import type {
   GlobalHotkeyEvent,
   LaunchGameResult,
   LibraryGameView,
+  LoaderProgressEvent,
   PermissionScope,
   ProcessIdentity,
   QuickSetupResult,
@@ -755,6 +756,11 @@ export function createBrowserPreviewApi() {
     },
     onGlobalHotkey: async (
       _handler: (event: GlobalHotkeyEvent) => void,
+    ): Promise<() => void> => {
+      return () => {};
+    },
+    onLoaderProgress: async (
+      _handler: (event: LoaderProgressEvent) => void,
     ): Promise<() => void> => {
       return () => {};
     },

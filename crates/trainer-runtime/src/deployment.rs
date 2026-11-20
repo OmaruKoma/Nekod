@@ -133,8 +133,9 @@ impl DeploymentLedger {
         &self.records
     }
 
-    /// Stages a verified file into `game_dir/relative_path`, snapshotting any pre-existing file.
-    pub fn stage_file(
+    /// Stages a verified file into `game_dir/relative_path`, snapshotting any pre-existing file,
+    /// without immediately rewriting `ledger.json`. Call [`DeploymentLedger::flush`] afterwards.
+    pub fn stage_file_deferred(
         &mut self,
         game_id: &str,
         package_id: &str,
@@ -193,8 +194,27 @@ impl DeploymentLedger {
             original_sha256,
             state: DeploymentState::Deployed,
         });
-        self.persist()?;
 
+        Ok(self.records.last().expect("just pushed"))
+    }
+
+    /// Persists all currently staged records in `ledger.json`.
+    pub fn flush(&self) -> Result<(), DeploymentError> {
+        self.persist()
+    }
+
+    /// Stages a verified file into `game_dir/relative_path`, snapshotting any pre-existing file.
+    pub fn stage_file(
+        &mut self,
+        game_id: &str,
+        package_id: &str,
+        relative_path: &str,
+        bytes: &[u8],
+        expected_sha256: &str,
+    ) -> Result<&DeploymentRecord, DeploymentError> {
+        let _ =
+            self.stage_file_deferred(game_id, package_id, relative_path, bytes, expected_sha256)?;
+        self.persist()?;
         Ok(self.records.last().expect("just pushed"))
     }
 

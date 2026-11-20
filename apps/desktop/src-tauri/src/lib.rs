@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use artwork::{GameArtwork, resolve_game_artwork};
 use bridges::{
-    CompanionBridgeCatalogEntry, download_or_load_cached_bepinex_zip,
-    extract_bepinex_zip_to_ledger, inspect_bepinex_loader_readiness,
+    CompanionBridgeCatalogEntry, download_or_load_cached_bepinex_zip_with_progress,
+    extract_bepinex_zip_to_ledger_with_progress, inspect_bepinex_loader_readiness,
     list_catalog as list_bridge_catalog, resolve_bridge_bytes_for_engine,
 };
 use hotkeys::{GlobalHotkeyBinding, GlobalHotkeyService};
@@ -34,7 +34,7 @@ use serde_json::json;
 use tauri::{Emitter, Manager, State};
 
 pub struct AppState {
-    core: NekodAppService,
+    core: Arc<NekodAppService>,
     data_dir: PathBuf,
     hotkeys: GlobalHotkeyService,
 }
@@ -79,8 +79,11 @@ fn map_err(err: impl std::fmt::Display) -> String {
 }
 
 #[tauri::command]
-fn rescan_games(state: State<'_, AppState>) -> Result<Vec<LibraryGameView>, String> {
-    state.core.rescan_games().map_err(map_err)
+async fn rescan_games(state: State<'_, AppState>) -> Result<Vec<LibraryGameView>, String> {
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || core.rescan_games().map_err(map_err))
+        .await
+        .map_err(map_err)?
 }
 
 #[tauri::command]
@@ -227,33 +230,34 @@ fn get_diagnostic_logs(state: State<'_, AppState>) -> Vec<DiagnosticEvent> {
 }
 
 #[tauri::command]
-fn discover_running_processes(
+async fn discover_running_processes(
     state: State<'_, AppState>,
     game_id: Option<String>,
     install_dir: Option<String>,
 ) -> Result<Vec<ProcessIdentity>, String> {
-    if let Some(gid) = game_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let procs = state
-            .core
-            .discover_running_processes_for_game(gid)
-            .map_err(map_err)?;
-        if !procs.is_empty() {
-            return Ok(procs);
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(gid) = game_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let procs = core
+                .discover_running_processes_for_game(gid)
+                .map_err(map_err)?;
+            if !procs.is_empty() {
+                return Ok(procs);
+            }
         }
-    }
 
-    if let Some(dir) = install_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return state
-            .core
-            .discover_running_processes_in_dir(dir)
-            .map_err(map_err);
-    }
+        if let Some(dir) = install_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return core.discover_running_processes_in_dir(dir).map_err(map_err);
+        }
 
-    Ok(Vec::new())
+        Ok(Vec::new())
+    })
+    .await
+    .map_err(map_err)?
 }
 
 #[tauri::command]
@@ -330,8 +334,11 @@ fn remove_registry_source(state: State<'_, AppState>, repository_id: String) -> 
 }
 
 #[tauri::command]
-fn sync_registry_sources(state: State<'_, AppState>) -> Result<RegistrySyncReport, String> {
-    state.core.sync_registry_sources().map_err(map_err)
+async fn sync_registry_sources(state: State<'_, AppState>) -> Result<RegistrySyncReport, String> {
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || core.sync_registry_sources().map_err(map_err))
+        .await
+        .map_err(map_err)?
 }
 
 #[tauri::command]
@@ -351,16 +358,19 @@ fn check_trainer_updates(state: State<'_, AppState>) -> Result<Vec<TrainerUpdate
 }
 
 #[tauri::command]
-fn install_or_update_trainer_from_registry(
+async fn install_or_update_trainer_from_registry(
     state: State<'_, AppState>,
     repository_id: String,
     trainer_id: String,
 ) -> Result<(), String> {
-    state
-        .core
-        .install_or_update_trainer_from_registry(&repository_id, &trainer_id)
-        .map(|_| ())
-        .map_err(map_err)
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || {
+        core.install_or_update_trainer_from_registry(&repository_id, &trainer_id)
+            .map(|_| ())
+            .map_err(map_err)
+    })
+    .await
+    .map_err(map_err)?
 }
 
 #[tauri::command]
@@ -462,29 +472,29 @@ fn validate_bridge_target_path(rel_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn get_bridge_deployment_status(
-    state: State<'_, AppState>,
-    game_key: String,
-    install_dir: String,
+fn compute_bridge_deployment_status(
+    core: &NekodAppService,
+    data_dir: &Path,
+    game_key: &str,
+    install_dir: &str,
 ) -> Result<BridgeDeploymentStatus, String> {
-    let env = state.core.inspect_installed_game_environment(&install_dir);
+    let env = core.inspect_installed_game_environment(install_dir);
     let (suggested_source_file, suggested_target_relative_path) =
         suggest_companion_bridge(env.engine);
-    let matched_bridge = list_bridge_catalog(&state.data_dir)
+    let matched_bridge = list_bridge_catalog(data_dir)
         .into_iter()
         .find(|b| b.engine == env.engine);
     let (loader_installed, loader_display_name, loader_warning) = if env.dir_exists {
-        inspect_bepinex_loader_readiness(Path::new(&install_dir), env.engine)
+        inspect_bepinex_loader_readiness(Path::new(install_dir), env.engine)
     } else {
         (false, None, None)
     };
     let mut active_files = Vec::new();
     let mut loader_managed_by_nekod = false;
     if env.dir_exists {
-        let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
+        let (backup_dir, ledger_path) = bridge_ledger_paths(data_dir, game_key);
         if ledger_path.is_file()
-            && let Ok(ledger) = DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path)
+            && let Ok(ledger) = DeploymentLedger::open(install_dir, &backup_dir, &ledger_path)
         {
             for rec in ledger.records() {
                 if rec.state == DeploymentState::Deployed {
@@ -512,49 +522,81 @@ fn get_bridge_deployment_status(
 }
 
 #[tauri::command]
-fn install_bepinex_loader(
+async fn get_bridge_deployment_status(
     state: State<'_, AppState>,
     game_key: String,
     install_dir: String,
 ) -> Result<BridgeDeploymentStatus, String> {
-    let env = state.core.inspect_installed_game_environment(&install_dir);
-    if !env.dir_exists {
-        return Err(format!("game install directory '{install_dir}' not found"));
-    }
-    if !env.anti_cheat_files_present.is_empty() {
-        return Err(format!(
-            "refusing BepInEx loader installation: anti-cheat markers present ({:?})",
-            env.anti_cheat_files_present
-        ));
-    }
-
-    let zip_bytes = download_or_load_cached_bepinex_zip(&state.data_dir, env.engine)?;
-    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
-    let mut ledger =
-        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
-    extract_bepinex_zip_to_ledger(&zip_bytes, &game_key, &mut ledger)?;
-
-    get_bridge_deployment_status(state, game_key, install_dir)
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        compute_bridge_deployment_status(&core, &data_dir, &game_key, &install_dir)
+    })
+    .await
+    .map_err(map_err)?
 }
 
 #[tauri::command]
-fn undeploy_bepinex_loader(
+async fn install_bepinex_loader<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    game_key: String,
+    install_dir: String,
+) -> Result<BridgeDeploymentStatus, String> {
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let env = core.inspect_installed_game_environment(&install_dir);
+        if !env.dir_exists {
+            return Err(format!("game install directory '{install_dir}' not found"));
+        }
+        if !env.anti_cheat_files_present.is_empty() {
+            return Err(format!(
+                "refusing BepInEx loader installation: anti-cheat markers present ({:?})",
+                env.anti_cheat_files_present
+            ));
+        }
+
+        let zip_bytes =
+            download_or_load_cached_bepinex_zip_with_progress(&data_dir, env.engine, |ev| {
+                let _ = app.emit("nekod://loader-progress", ev);
+            })?;
+        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let mut ledger =
+            DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+        extract_bepinex_zip_to_ledger_with_progress(&zip_bytes, &game_key, &mut ledger, |ev| {
+            let _ = app.emit("nekod://loader-progress", ev);
+        })?;
+
+        compute_bridge_deployment_status(&core, &data_dir, &game_key, &install_dir)
+    })
+    .await
+    .map_err(map_err)?
+}
+
+#[tauri::command]
+async fn undeploy_bepinex_loader(
     state: State<'_, AppState>,
     game_key: String,
     install_dir: String,
 ) -> Result<BridgeUndeploySummary, String> {
-    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
-    let mut ledger =
-        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
-    let report = ledger
-        .undeploy_package("nekod.loader.bepinex")
-        .map_err(map_err)?;
-    Ok(BridgeUndeploySummary {
-        removed_count: report.removed_count,
-        restored_originals: report.restored_originals,
-        conflicts: report.conflicts,
-        conflict_paths: report.conflict_paths,
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let mut ledger =
+            DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+        let report = ledger
+            .undeploy_package("nekod.loader.bepinex")
+            .map_err(map_err)?;
+        Ok(BridgeUndeploySummary {
+            removed_count: report.removed_count,
+            restored_originals: report.restored_originals,
+            conflicts: report.conflicts,
+            conflict_paths: report.conflict_paths,
+        })
     })
+    .await
+    .map_err(map_err)?
 }
 
 fn slugify_kebab(title: &str, store_app_id: Option<&str>) -> String {
@@ -591,7 +633,7 @@ fn slugify_kebab(title: &str, store_app_id: Option<&str>) -> String {
 }
 
 #[tauri::command]
-fn quick_setup_unity_starter(
+async fn quick_setup_unity_starter(
     state: State<'_, AppState>,
     title: String,
     store_source: String,
@@ -599,7 +641,33 @@ fn quick_setup_unity_starter(
     store_build_id: Option<String>,
     install_dir: String,
 ) -> Result<QuickSetupResult, String> {
-    let env = state.core.inspect_installed_game_environment(&install_dir);
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        quick_setup_unity_starter_sync(
+            &core,
+            &data_dir,
+            title,
+            store_source,
+            store_app_id,
+            store_build_id,
+            install_dir,
+        )
+    })
+    .await
+    .map_err(map_err)?
+}
+
+fn quick_setup_unity_starter_sync(
+    core: &NekodAppService,
+    data_dir: &Path,
+    title: String,
+    store_source: String,
+    store_app_id: Option<String>,
+    store_build_id: Option<String>,
+    install_dir: String,
+) -> Result<QuickSetupResult, String> {
+    let env = core.inspect_installed_game_environment(&install_dir);
     if !env.dir_exists {
         return Err(format!("game install directory '{install_dir}' not found"));
     }
@@ -626,10 +694,7 @@ fn quick_setup_unity_starter(
         .next()
         .ok_or_else(|| format!("no primary game executable (.exe) found in '{install_dir}'"))?;
 
-    let existing_manifests = state
-        .core
-        .list_registered_game_manifests()
-        .map_err(map_err)?;
+    let existing_manifests = core.list_registered_game_manifests().map_err(map_err)?;
     let steam_app_u64 = if store_source.eq_ignore_ascii_case("steam") {
         store_app_id.as_deref().and_then(|s| s.parse::<u64>().ok())
     } else {
@@ -702,15 +767,11 @@ fn quick_setup_unity_starter(
             }
         });
         let raw_gm = serde_json::to_string_pretty(&game_manifest).map_err(map_err)?;
-        state
-            .core
-            .register_game_manifest(&raw_gm)
-            .map_err(map_err)?
-            .id
+        core.register_game_manifest(&raw_gm).map_err(map_err)?.id
     };
 
     let trainer_id = format!("org.nekod.unity-starter.{game_id}");
-    let pkg_dir = state.data_dir.join("generated-starters").join(&game_id);
+    let pkg_dir = data_dir.join("generated-starters").join(&game_id);
     let scripts_dir = pkg_dir.join("scripts");
     fs::create_dir_all(&scripts_dir).map_err(map_err)?;
 
@@ -857,11 +918,9 @@ fn quick_setup_unity_starter(
     let raw_tm = serde_json::to_string_pretty(&trainer_manifest).map_err(map_err)?;
     fs::write(pkg_dir.join("trainer-manifest.json"), raw_tm).map_err(map_err)?;
 
-    state
-        .core
-        .ingest_local_trainer(&pkg_dir, TrustTier::Official)
+    core.ingest_local_trainer(&pkg_dir, TrustTier::Official)
         .map_err(map_err)?;
-    state.core.rescan_games().map_err(map_err)?;
+    core.rescan_games().map_err(map_err)?;
 
     Ok(QuickSetupResult {
         game_id,
@@ -876,103 +935,120 @@ fn list_companion_bridge_catalog(state: State<'_, AppState>) -> Vec<CompanionBri
 }
 
 #[tauri::command]
-fn auto_deploy_companion_bridge(
+async fn auto_deploy_companion_bridge(
     state: State<'_, AppState>,
     game_key: String,
     install_dir: String,
     custom_source_override: Option<String>,
 ) -> Result<BridgeDeploymentStatus, String> {
-    let env = state.core.inspect_installed_game_environment(&install_dir);
-    if !env.dir_exists {
-        return Err(format!("game install directory '{install_dir}' not found"));
-    }
-    if !env.anti_cheat_files_present.is_empty() {
-        return Err(format!(
-            "refusing companion bridge deployment: anti-cheat markers present ({:?})",
-            env.anti_cheat_files_present
-        ));
-    }
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let env = core.inspect_installed_game_environment(&install_dir);
+        if !env.dir_exists {
+            return Err(format!("game install directory '{install_dir}' not found"));
+        }
+        if !env.anti_cheat_files_present.is_empty() {
+            return Err(format!(
+                "refusing companion bridge deployment: anti-cheat markers present ({:?})",
+                env.anti_cheat_files_present
+            ));
+        }
 
-    let (bytes, expected_sha, target_relative_path) = resolve_bridge_bytes_for_engine(
-        &state.data_dir,
-        env.engine,
-        custom_source_override.as_deref(),
-    )?;
-    validate_bridge_target_path(&target_relative_path)?;
+        let (bytes, expected_sha, target_relative_path) = resolve_bridge_bytes_for_engine(
+            &data_dir,
+            env.engine,
+            custom_source_override.as_deref(),
+        )?;
+        validate_bridge_target_path(&target_relative_path)?;
 
-    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
-    let mut ledger =
-        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
-    ledger
-        .stage_file(
-            &game_key,
-            "nekod.companion.bridge",
-            &target_relative_path,
-            &bytes,
-            &expected_sha,
-        )
-        .map_err(map_err)?;
+        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let mut ledger =
+            DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+        ledger
+            .stage_file(
+                &game_key,
+                "nekod.companion.bridge",
+                &target_relative_path,
+                &bytes,
+                &expected_sha,
+            )
+            .map_err(map_err)?;
 
-    get_bridge_deployment_status(state, game_key, install_dir)
+        compute_bridge_deployment_status(&core, &data_dir, &game_key, &install_dir)
+    })
+    .await
+    .map_err(map_err)?
 }
 
 #[tauri::command]
-fn deploy_companion_bridge(
+async fn deploy_companion_bridge(
     state: State<'_, AppState>,
     game_key: String,
     install_dir: String,
     source_file: String,
     target_relative_path: String,
 ) -> Result<BridgeDeploymentStatus, String> {
-    validate_bridge_target_path(&target_relative_path)?;
-    let env = state.core.inspect_installed_game_environment(&install_dir);
-    if !env.dir_exists {
-        return Err(format!("game install directory '{install_dir}' not found"));
-    }
-    if !env.anti_cheat_files_present.is_empty() {
-        return Err(format!(
-            "refusing companion bridge deployment: anti-cheat markers present ({:?})",
-            env.anti_cheat_files_present
-        ));
-    }
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_bridge_target_path(&target_relative_path)?;
+        let env = core.inspect_installed_game_environment(&install_dir);
+        if !env.dir_exists {
+            return Err(format!("game install directory '{install_dir}' not found"));
+        }
+        if !env.anti_cheat_files_present.is_empty() {
+            return Err(format!(
+                "refusing companion bridge deployment: anti-cheat markers present ({:?})",
+                env.anti_cheat_files_present
+            ));
+        }
 
-    let bytes = fs::read(&source_file)
-        .map_err(|e| format!("cannot read bridge source '{source_file}': {e}"))?;
-    let expected_sha = sha256_hex(&bytes);
-    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
-    let mut ledger =
-        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
-    ledger
-        .stage_file(
-            &game_key,
-            "nekod.companion.bridge",
-            &target_relative_path,
-            &bytes,
-            &expected_sha,
-        )
-        .map_err(map_err)?;
+        let bytes = fs::read(&source_file)
+            .map_err(|e| format!("cannot read bridge source '{source_file}': {e}"))?;
+        let expected_sha = sha256_hex(&bytes);
+        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let mut ledger =
+            DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+        ledger
+            .stage_file(
+                &game_key,
+                "nekod.companion.bridge",
+                &target_relative_path,
+                &bytes,
+                &expected_sha,
+            )
+            .map_err(map_err)?;
 
-    get_bridge_deployment_status(state, game_key, install_dir)
+        compute_bridge_deployment_status(&core, &data_dir, &game_key, &install_dir)
+    })
+    .await
+    .map_err(map_err)?
 }
 
 #[tauri::command]
-fn undeploy_companion_bridge(
+async fn undeploy_companion_bridge(
     state: State<'_, AppState>,
     game_key: String,
     install_dir: String,
 ) -> Result<BridgeUndeploySummary, String> {
-    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
-    let mut ledger =
-        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
-    let report = ledger
-        .undeploy_package("nekod.companion.bridge")
-        .map_err(map_err)?;
-    Ok(BridgeUndeploySummary {
-        removed_count: report.removed_count,
-        restored_originals: report.restored_originals,
-        conflicts: report.conflicts,
-        conflict_paths: report.conflict_paths,
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let mut ledger =
+            DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+        let report = ledger
+            .undeploy_package("nekod.companion.bridge")
+            .map_err(map_err)?;
+        Ok(BridgeUndeploySummary {
+            removed_count: report.removed_count,
+            restored_originals: report.restored_originals,
+            conflicts: report.conflicts,
+            conflict_paths: report.conflict_paths,
+        })
     })
+    .await
+    .map_err(map_err)?
 }
 
 #[tauri::command]
@@ -981,12 +1057,16 @@ fn sync_global_hotkeys(state: State<'_, AppState>, bindings: Vec<GlobalHotkeyBin
 }
 
 #[tauri::command]
-fn get_game_artwork(
+async fn get_game_artwork(
     store_source: String,
     store_app_id: Option<String>,
     install_dir: String,
-) -> GameArtwork {
-    resolve_game_artwork(&store_source, store_app_id.as_deref(), &install_dir)
+) -> Result<GameArtwork, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_game_artwork(&store_source, store_app_id.as_deref(), &install_dir)
+    })
+    .await
+    .map_err(map_err)
 }
 
 fn validate_direct_launch_executable(
@@ -1087,7 +1167,7 @@ fn launch_game(
 impl AppState {
     pub fn new(core: NekodAppService) -> Self {
         Self {
-            core,
+            core: Arc::new(core),
             data_dir: std::env::temp_dir().join("nekod_desktop_state"),
             hotkeys: GlobalHotkeyService::new(),
         }
@@ -1095,7 +1175,7 @@ impl AppState {
 
     pub fn with_data_dir(core: NekodAppService, data_dir: PathBuf) -> Self {
         Self {
-            core,
+            core: Arc::new(core),
             data_dir,
             hotkeys: GlobalHotkeyService::new(),
         }
