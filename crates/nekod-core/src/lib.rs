@@ -272,6 +272,7 @@ pub struct NekodAppService {
     packages_dir: PathBuf,
     steam_override: Option<PathBuf>,
     cached_games: Mutex<Vec<DetectedGame>>,
+    active_sessions: Mutex<std::collections::BTreeMap<String, String>>,
     logs: Mutex<Vec<DiagnosticEvent>>,
 }
 
@@ -306,6 +307,7 @@ impl NekodAppService {
             packages_dir,
             steam_override: None,
             cached_games: Mutex::new(Vec::new()),
+            active_sessions: Mutex::new(std::collections::BTreeMap::new()),
             logs: Mutex::new(Vec::new()),
         };
         service.record_log("info", "core", "Initialized Nekod core service");
@@ -349,6 +351,7 @@ impl NekodAppService {
             packages_dir,
             steam_override,
             cached_games: Mutex::new(Vec::new()),
+            active_sessions: Mutex::new(std::collections::BTreeMap::new()),
             logs: Mutex::new(Vec::new()),
         })
     }
@@ -440,13 +443,64 @@ impl NekodAppService {
         path: &str,
         label: Option<&str>,
     ) -> Result<Vec<CustomGamePathRecord>, CoreError> {
-        self.profiles.add_custom_game_path(path, label)?;
+        let cleaned = path.trim().trim_matches('"');
+        self.profiles.add_custom_game_path(cleaned, label)?;
         self.record_log(
             "info",
             "detection",
-            format!("Added custom game folder '{path}'"),
+            format!("Added custom game folder '{cleaned}'"),
         );
         Ok(self.profiles.list_custom_game_paths()?)
+    }
+
+    /// Safely uninstalls an installed trainer from the SQLite catalog, revokes all stored grants,
+    /// blocks removal if a runtime session for that trainer is currently active, and only deletes
+    /// package files on disk when `delete_managed_files` is true AND the directory resides strictly
+    /// inside Nekod's managed `packages_dir`.
+    pub fn uninstall_trainer(
+        &self,
+        trainer_id: &str,
+        delete_managed_files: bool,
+    ) -> Result<(InstalledTrainer, bool), CoreError> {
+        if let Ok(sessions) = self.active_sessions.lock()
+            && sessions.values().any(|tid| tid == trainer_id)
+        {
+            return Err(CoreError::IncompatiblePolicy(format!(
+                "cannot uninstall trainer '{trainer_id}' while an active runtime session is running; detach/stop the session first"
+            )));
+        }
+
+        let removed = self.trainers.remove_trainer(trainer_id)?;
+        self.grants.revoke_trainer_grants(trainer_id)?;
+
+        let mut removed_files = false;
+        if delete_managed_files
+            && let (Ok(canon_managed), Ok(canon_pkg)) = (
+                fs::canonicalize(&self.packages_dir),
+                fs::canonicalize(&removed.package_dir),
+            )
+            && canon_pkg != canon_managed
+            && canon_pkg.starts_with(&canon_managed)
+            && fs::remove_dir_all(&canon_pkg).is_ok()
+        {
+            removed_files = true;
+            if let Some(parent) = canon_pkg.parent()
+                && parent != canon_managed
+                && parent.starts_with(&canon_managed)
+            {
+                let _ = fs::remove_dir(parent);
+            }
+        }
+
+        self.record_log(
+            "info",
+            "trainer",
+            format!(
+                "Uninstalled trainer '{}@{}' (removed_managed_files={removed_files})",
+                removed.manifest.id, removed.manifest.version
+            ),
+        );
+        Ok((removed, removed_files))
     }
 
     pub fn remove_custom_game_path(
@@ -890,6 +944,9 @@ impl NekodAppService {
             granted_permissions,
             declarative_payload_json: Some(payload_json),
         })?;
+        if let Ok(mut sessions) = self.active_sessions.lock() {
+            sessions.insert(session_id.0.clone(), trainer_id.to_owned());
+        }
 
         self.record_log(
             "info",
@@ -938,6 +995,9 @@ impl NekodAppService {
         session_id: &RuntimeSessionId,
     ) -> Result<RuntimeDiagnostics, CoreError> {
         let diag = self.runtime.stop_session(session_id)?;
+        if let Ok(mut sessions) = self.active_sessions.lock() {
+            sessions.remove(&session_id.0);
+        }
         self.record_log(
             "info",
             "runtime",
@@ -1648,5 +1708,124 @@ mod tests {
         assert_eq!(exes, vec!["Sugar Lust - Hentai Harem.exe".to_owned()]);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn uninstall_trainer_blocks_active_session_revokes_grants_and_preserves_external_dirs() {
+        use nekod_trainer_runtime::DeclarativeRuntime;
+        use nekod_trainer_runtime::backend::mock::MockMemoryBackend;
+
+        let backend = Arc::new(MockMemoryBackend::new());
+        let mut mem = vec![0u8; 0x3000];
+        mem[0x0100..0x0106].copy_from_slice(&[0x29, 0x73, 0x10, 0x8B, 0x43, 0x10]);
+        backend.insert_process(MockMemoryBackend::sample_windows_process(
+            9101,
+            "SampleRPG.exe",
+            mem,
+        ));
+
+        let root = temp_dir("uninstall_core");
+        let data_dir = root.join("data");
+        let ext_pkg = root.join("external-pkg");
+        fs::create_dir_all(&ext_pkg).unwrap();
+
+        let payload = include_str!("../../../schemas/examples/declarative-patch.example.json");
+        fs::write(ext_pkg.join("trainer.json"), payload.as_bytes()).unwrap();
+        let mut trainer: TrainerManifest = serde_json::from_str(include_str!(
+            "../../../schemas/examples/trainer-manifest.example.json"
+        ))
+        .unwrap();
+        trainer.artifacts[0].sha256 = sha256_hex(payload.as_bytes());
+        trainer.artifacts[0].size_bytes = payload.len() as u64;
+        fs::write(
+            ext_pkg.join("trainer-manifest.json"),
+            serde_json::to_string_pretty(&trainer).unwrap(),
+        )
+        .unwrap();
+
+        let runtime = Arc::new(DeclarativeRuntime::with_backend(backend.clone()));
+        let service = NekodAppService::open_in_dir(&data_dir, runtime).unwrap();
+        service
+            .register_game_manifest(include_str!(
+                "../../../schemas/examples/game-manifest.example.json"
+            ))
+            .unwrap();
+        service
+            .ingest_local_trainer(&ext_pkg, TrustTier::CommunityVerified)
+            .unwrap();
+
+        let mut confirmed = BTreeSet::new();
+        confirmed.insert(PermissionScope::ProcessReadMemory);
+        confirmed.insert(PermissionScope::ProcessWriteMemory);
+        service
+            .grant_trainer_permissions("dev.example.sample-singleplayer-rpg", confirmed)
+            .unwrap();
+
+        let procs = service
+            .discover_running_processes_for_game("sample-singleplayer-rpg")
+            .unwrap();
+        let sid = service
+            .start_trainer_session(
+                "sample-singleplayer-rpg",
+                "dev.example.sample-singleplayer-rpg",
+                procs[0].clone(),
+            )
+            .unwrap();
+
+        // Must refuse uninstall while session is active.
+        assert!(matches!(
+            service.uninstall_trainer("dev.example.sample-singleplayer-rpg", true),
+            Err(CoreError::IncompatiblePolicy(_))
+        ));
+
+        service.stop_trainer_session(&sid).unwrap();
+
+        // External folder outside managed packages_dir must NOT be deleted on disk.
+        let (removed, removed_files) = service
+            .uninstall_trainer("dev.example.sample-singleplayer-rpg", true)
+            .unwrap();
+        assert_eq!(removed.manifest.id, "dev.example.sample-singleplayer-rpg");
+        assert!(!removed_files);
+        assert!(ext_pkg.exists());
+        assert!(
+            service
+                .list_trainers_for_game("sample-singleplayer-rpg", None)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Managed copy inside data_dir/packages must be cleaned up on disk while requiring fresh consent if re-installed.
+        let managed_pkg = data_dir
+            .join("packages")
+            .join("dev.example.sample-singleplayer-rpg")
+            .join("1.0.0");
+        fs::create_dir_all(&managed_pkg).unwrap();
+        fs::write(managed_pkg.join("trainer.json"), payload.as_bytes()).unwrap();
+        fs::write(
+            managed_pkg.join("trainer-manifest.json"),
+            serde_json::to_string_pretty(&trainer).unwrap(),
+        )
+        .unwrap();
+        service
+            .ingest_local_trainer(&managed_pkg, TrustTier::CommunityVerified)
+            .unwrap();
+        let views = service
+            .list_trainers_for_game("sample-singleplayer-rpg", None)
+            .unwrap();
+        assert!(
+            matches!(
+                views[0].permission_state,
+                TrainerPermissionState::RequiresConfirmation { .. }
+            ),
+            "grants must have been revoked on prior uninstall"
+        );
+
+        let (_, removed_managed) = service
+            .uninstall_trainer("dev.example.sample-singleplayer-rpg", true)
+            .unwrap();
+        assert!(removed_managed);
+        assert!(!managed_pkg.exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

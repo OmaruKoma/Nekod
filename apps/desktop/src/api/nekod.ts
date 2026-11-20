@@ -334,6 +334,12 @@ export interface LocalNmodCandidate {
   already_installed: boolean;
 }
 
+export interface UninstallTrainerResult {
+  trainer_id: string;
+  name: string;
+  removed_managed_files: boolean;
+}
+
 const tauriApi = {
   rescanGames: () => invoke<LibraryGameView[]>("rescan_games"),
   listLibraryGames: () => invoke<LibraryGameView[]>("list_library_games"),
@@ -349,6 +355,18 @@ const tauriApi = {
     }),
   revokeTrainerPermissions: (trainerId: string) =>
     invoke<void>("revoke_trainer_permissions", { trainerId }),
+  uninstallTrainer: (trainerId: string) =>
+    invoke<UninstallTrainerResult>("uninstall_trainer", { trainerId }),
+  pickLocalPath: (
+    mode: "folder" | "file",
+    title?: string | null,
+    extensions?: string[] | null,
+  ) =>
+    invoke<string | null>("pick_local_path", {
+      mode,
+      title: title ?? null,
+      extensions: extensions ?? null,
+    }),
   ingestLocalTrainer: (packageDir: string, trustTier: TrustTier) =>
     invoke<void>("ingest_local_trainer", { packageDir, trustTier }),
   registerGameManifest: (rawJson: string) =>

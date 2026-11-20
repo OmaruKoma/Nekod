@@ -410,6 +410,28 @@ impl SqliteTrainerCatalog {
 
         self.ingest_local_package(&target_dir, trust_tier)
     }
+
+    /// Removes an installed trainer record from the SQLite catalog without touching disk files.
+    pub fn remove_trainer(
+        &self,
+        trainer_id: &str,
+    ) -> Result<InstalledTrainer, TrainerManagerError> {
+        let existing = self.get_trainer(trainer_id)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TrainerManagerError::Storage("trainer db mutex poisoned".to_owned()))?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM installed_trainers WHERE trainer_id = ?1",
+                params![trainer_id],
+            )
+            .map_err(|e| TrainerManagerError::Storage(e.to_string()))?;
+        if deleted == 0 {
+            return Err(TrainerManagerError::NotFound(trainer_id.to_owned()));
+        }
+        Ok(existing)
+    }
 }
 
 fn row_to_installed(
@@ -772,6 +794,39 @@ mod tests {
         assert!(matches!(
             load_verified_entrypoint_str(&installed),
             Err(TrainerManagerError::IntegrityMismatch(_, _))
+        ));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn removes_installed_trainer_from_catalog() {
+        let dir = temp_pkg_dir("remove_trainer");
+        write_valid_package(&dir);
+
+        let catalog = SqliteTrainerCatalog::open_in_memory().unwrap();
+        let installed = catalog
+            .ingest_local_package(&dir, TrustTier::CommunityVerified)
+            .unwrap();
+        assert_eq!(
+            catalog
+                .list_for_game("sample-singleplayer-rpg")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let removed = catalog.remove_trainer(&installed.manifest.id).unwrap();
+        assert_eq!(removed.manifest.id, installed.manifest.id);
+        assert!(
+            catalog
+                .list_for_game("sample-singleplayer-rpg")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            catalog.remove_trainer(&installed.manifest.id),
+            Err(TrainerManagerError::NotFound(_))
         ));
 
         let _ = fs::remove_dir_all(dir);

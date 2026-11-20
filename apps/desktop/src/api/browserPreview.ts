@@ -28,6 +28,7 @@ import type {
   TrainerPermissionState,
   TrainerUpdateInfo,
   TrustTier,
+  UninstallTrainerResult,
 } from "./nekod";
 
 /**
@@ -258,6 +259,33 @@ export function createBrowserPreviewApi() {
         }
       }
     },
+    uninstallTrainer: async (trainerId: string): Promise<UninstallTrainerResult> => {
+      let removedName = trainerId;
+      for (const [gameId, list] of Object.entries(trainersByGame)) {
+        const idx = list.findIndex((t) => t.trainer_id === trainerId);
+        if (idx >= 0) {
+          removedName = list[idx].name;
+          list.splice(idx, 1);
+          games = games.map((g) =>
+            g.game.matched_game_id === gameId
+              ? { ...g, trainer_count: list.length }
+              : g,
+          );
+          break;
+        }
+      }
+      pushLog("info", "trainer", `Uninstalled trainer '${trainerId}' (preview)`);
+      return {
+        trainer_id: trainerId,
+        name: removedName,
+        removed_managed_files: true,
+      };
+    },
+    pickLocalPath: async (
+      _mode: "folder" | "file",
+      _title?: string | null,
+      _extensions?: string[] | null,
+    ): Promise<string | null> => null,
     ingestLocalTrainer: async (packageDir: string, trustTier: TrustTier): Promise<void> => {
       pushLog("info", "trainer", `Simulated ingest of '${packageDir}' (${trustTier})`);
     },
@@ -271,7 +299,33 @@ export function createBrowserPreviewApi() {
       path: string,
       label: string | null,
     ): Promise<CustomGamePathRecord[]> => {
+      const normalized = path.replace(/[\\/]+$/, "");
+      const isExe = normalized.toLowerCase().endsWith(".exe");
+      const installDir = isExe
+        ? normalized.slice(0, Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"))) || normalized
+        : normalized;
+      const baseName = normalized.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || "Custom Game";
+      const title = label?.trim() || baseName;
       customPaths = [...customPaths.filter((p) => p.path !== path), { path, label }];
+      if (!games.some((g) => g.game.install_dir === installDir)) {
+        games = [
+          ...games,
+          {
+            library_key: installDir,
+            game: {
+              matched_game_id: null,
+              title,
+              store_source: "custom_path",
+              store_app_id: null,
+              store_build_id: null,
+              install_dir: installDir,
+              executable_path: isExe ? normalized : `${installDir}\\${baseName}.exe`,
+              platform: "windows-x64",
+            },
+            trainer_count: 0,
+          },
+        ];
+      }
       pushLog("info", "detection", `Added custom path '${path}'`);
       return customPaths;
     },

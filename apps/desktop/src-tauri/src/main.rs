@@ -812,6 +812,54 @@ shellExecute("https://modengine.net")
             "quick_setup_unity_starter must stay generic and never hardcode game-specific packs"
         );
 
+        // 6. Uninstall managed .nmod cleanly removes SQLite entry & extracted managed files
+        let uninstall_res = invoke_json(
+            &webview,
+            "uninstall_trainer",
+            serde_json::json!({
+                "trainerId": "dev.example.archive-nmod"
+            }),
+        )
+        .expect("uninstall_trainer");
+        assert_eq!(uninstall_res["trainer_id"], "dev.example.archive-nmod");
+        assert_eq!(uninstall_res["removed_managed_files"], true);
+        let after_uninstall = invoke_json(
+            &webview,
+            "list_trainers_for_game",
+            serde_json::json!({
+                "gameId": "archive-demo-game",
+                "detectedBuildId": null
+            }),
+        )
+        .expect("list after uninstall");
+        assert_eq!(after_uninstall.as_array().unwrap().len(), 0);
+        assert!(
+            !root
+                .join("installed-nmods")
+                .join("dev.example.archive-nmod")
+                .exists(),
+            "managed installed-nmods folder should be cleaned up on uninstall"
+        );
+
+        // 7. Adding a custom local game via direct .exe path works cleanly
+        let exe_path = gsg2_dir.join("GunSoulGirl 2.exe");
+        let custom_paths = invoke_json(
+            &webview,
+            "add_custom_game_path",
+            serde_json::json!({
+                "path": exe_path.to_string_lossy(),
+                "label": null
+            }),
+        )
+        .expect("add_custom_game_path via exe");
+        assert!(
+            custom_paths
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["path"] == exe_path.to_string_lossy().as_ref())
+        );
+
         let _ = fs::remove_dir_all(&root);
     }
 }

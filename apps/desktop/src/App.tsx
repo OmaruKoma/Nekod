@@ -16,6 +16,7 @@ import {
   Layers,
   Package,
   Play,
+  Plus,
   Power,
   RefreshCw,
   RotateCcw,
@@ -176,6 +177,11 @@ export default function App() {
   // Import & custom folder form states
   const [customDir, setCustomDir] = useState("");
   const [customLabel, setCustomLabel] = useState("");
+  const [showAddGameModal, setShowAddGameModal] = useState(false);
+  const [confirmRemoveCustomGame, setConfirmRemoveCustomGame] = useState(false);
+  const [confirmDeleteTrainerId, setConfirmDeleteTrainerId] = useState<
+    string | null
+  >(null);
   const [trainerDir, setTrainerDir] = useState("");
   const [trainerTrust, setTrainerTrust] =
     useState<TrustTier>("community_verified");
@@ -423,7 +429,7 @@ export default function App() {
     };
   }, [games]);
 
-  async function handleRescan() {
+  async function handleRescan(showSummaryStatus = true): Promise<LibraryGameView[]> {
     try {
       setBusyAction("rescan");
       setError(null);
@@ -431,7 +437,9 @@ export default function App() {
       setGames(lib);
       setLogs(await nekodApi.getDiagnosticLogs());
       void loadArtworksForLibrary(lib);
-      setStatusMsg(`已重新扫描游戏库：发现 ${lib.length} 款已安装游戏。`);
+      if (showSummaryStatus) {
+        setStatusMsg(`已重新扫描游戏库：发现 ${lib.length} 款已安装游戏。`);
+      }
       if (lib.length > 0 && !selectedGame) {
         await openGame(lib[0], false);
       } else if (selectedGame) {
@@ -440,10 +448,18 @@ export default function App() {
         );
         if (refreshed) {
           await openGame(refreshed, false);
+        } else if (lib.length > 0) {
+          await openGame(lib[0], false);
+        } else {
+          setSelectedGame(null);
+          setTrainers([]);
+          setSelectedTrainerId(null);
         }
       }
+      return lib;
     } catch (e) {
       setError(String(e));
+      return [];
     } finally {
       setBusyAction(null);
     }
@@ -496,6 +512,8 @@ export default function App() {
     setError(null);
     setCopiedPath(false);
     setAwaitingPermInject(null);
+    setConfirmDeleteTrainerId(null);
+    setConfirmRemoveCustomGame(false);
     setRunningProcs([]);
     setSelectedPid(null);
     setGameEnv(null);
@@ -1255,20 +1273,124 @@ export default function App() {
     }
   }
 
-  async function handleAddCustomPath() {
-    if (!customDir.trim()) return;
+  function normalizePathForCompare(raw: string): string {
+    return raw
+      .trim()
+      .replace(/^"+|"+$/g, "")
+      .replace(/[\\/]+$/, "")
+      .toLowerCase();
+  }
+
+  function inferInstallDirFromInput(raw: string): string {
+    const cleaned = raw.trim().replace(/^"+|"+$/g, "").replace(/[\\/]+$/, "");
+    if (cleaned.toLowerCase().endsWith(".exe")) {
+      const sep = Math.max(cleaned.lastIndexOf("\\"), cleaned.lastIndexOf("/"));
+      return sep > 0 ? cleaned.slice(0, sep) : cleaned;
+    }
+    return cleaned;
+  }
+
+  async function pickPathInto(
+    mode: "folder" | "file",
+    title: string,
+    onPicked: (path: string) => void,
+    extensions?: string[],
+  ) {
     try {
+      const picked = await nekodApi.pickLocalPath(mode, title, extensions ?? null);
+      if (picked) {
+        onPicked(picked);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleAddCustomPath(switchToNew = false) {
+    const trimmed = customDir.trim().replace(/^"+|"+$/g, "");
+    if (!trimmed) return;
+    try {
+      setBusyAction("add-game");
       setError(null);
       const updated = await nekodApi.addCustomGamePath(
-        customDir.trim(),
+        trimmed,
         customLabel.trim() || null,
       );
       setCustomPaths(updated);
       setCustomDir("");
       setCustomLabel("");
-      await handleRescan();
+      setShowAddGameModal(false);
+
+      const lib = await handleRescan(false);
+      const targetDir = normalizePathForCompare(inferInstallDirFromInput(trimmed));
+      const matched =
+        lib.find(
+          (g) =>
+            g.game.store_source === "custom_path" &&
+            normalizePathForCompare(g.game.install_dir) === targetDir,
+        ) ??
+        lib.find((g) => normalizePathForCompare(g.game.install_dir) === targetDir);
+
+      if (matched && switchToNew) {
+        await openGame(matched, true);
+      }
+      const msg = matched
+        ? `已导入本地游戏「${matched.game.title}」并加入游戏库。`
+        : "已添加自定义游戏路径并完成扫描。";
+      setStatusMsg(msg);
+      pushHudToast(msg, "ok");
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleRemoveCustomGameEntry(entryPath: string) {
+    try {
+      setError(null);
+      setConfirmRemoveCustomGame(false);
+      const updated = await nekodApi.removeCustomGamePath(entryPath);
+      setCustomPaths(updated);
+      await handleRescan(false);
+      const msg = "已从游戏库移除该自定义本地游戏（未删除游戏源文件）。";
+      setStatusMsg(msg);
+      pushHudToast(msg, "info");
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function handleUninstallTrainer(trainer: TrainerDetailView) {
+    if (activeSessionId && activeTrainerId === trainer.trainer_id) {
+      setError("请先点击「解除注入」停止当前会话后再删除该模组。");
+      return;
+    }
+    try {
+      setBusyAction("uninstall-trainer");
+      setError(null);
+      const res = await nekodApi.uninstallTrainer(trainer.trainer_id);
+      setConfirmDeleteTrainerId(null);
+      if (awaitingPermInject === trainer.trainer_id) {
+        setAwaitingPermInject(null);
+      }
+      await handleRescan(false);
+      const [availUpdates, diagLogs] = await Promise.all([
+        nekodApi.checkTrainerUpdates(),
+        nekodApi.getDiagnosticLogs(),
+      ]);
+      setUpdates(availUpdates);
+      setLogs(diagLogs);
+      if (soundEnabled) soundFx.toggleOff();
+      const msg = `已删除模组「${res.name}」（权限授权已撤销）。`;
+      setStatusMsg(msg);
+      pushHudToast(msg, "info");
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -1762,6 +1884,71 @@ export default function App() {
     }
   }
 
+  function renderCustomGameForm(switchToNew: boolean, submitLabel: string) {
+    return (
+      <div className="stack">
+        <div className="row">
+          <input
+            className="text-input mono"
+            style={{ flex: 1, minWidth: 220 }}
+            placeholder="D:\Games\MyGame 或 D:\Games\MyGame\Game.exe"
+            value={customDir}
+            onChange={(e) => setCustomDir(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() =>
+              void pickPathInto(
+                "folder",
+                "选择本地游戏根目录",
+                setCustomDir,
+              )
+            }
+          >
+            <FolderOpen size={14} strokeWidth={1.5} />
+            <span>选择目录</span>
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() =>
+              void pickPathInto(
+                "file",
+                "选择游戏主程序 (.exe)",
+                setCustomDir,
+                ["exe"],
+              )
+            }
+          >
+            <Play size={14} strokeWidth={1.5} />
+            <span>选择 .exe</span>
+          </button>
+        </div>
+        <div className="row">
+          <input
+            className="text-input"
+            style={{ flex: 1 }}
+            placeholder="可选显示名称（留空则自动识别游戏名）"
+            value={customLabel}
+            onChange={(e) => setCustomLabel(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!customDir.trim() || busyAction === "add-game"}
+            onClick={() => void handleAddCustomPath(switchToNew)}
+          >
+            <Plus size={14} strokeWidth={1.5} />
+            <span>
+              {busyAction === "add-game" ? "正在导入..." : submitLabel}
+            </span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="workbench-shell">
       {/* ==================== LEFT SIDEBAR ==================== */}
@@ -1772,20 +1959,33 @@ export default function App() {
               <h1 className="brand-title">Nekod</h1>
               <span className="brand-tag">v0.1</span>
             </div>
-            <button
-              className="icon-btn"
-              disabled={busyAction === "rescan"}
-              onClick={() => void handleRescan()}
-              title="重新扫描游戏目录"
-              aria-label="重新扫描游戏目录"
-            >
-              <RefreshCw
-                size={14}
-                strokeWidth={1.5}
-                className={busyAction === "rescan" ? "spin" : ""}
-                aria-hidden="true"
-              />
-            </button>
+            <div className="row" style={{ gap: 4 }}>
+              <button
+                className="icon-btn"
+                onClick={() => {
+                  setError(null);
+                  setShowAddGameModal(true);
+                }}
+                title="添加本地游戏（选择目录或 .exe）"
+                aria-label="添加本地游戏"
+              >
+                <Plus size={14} strokeWidth={1.5} aria-hidden="true" />
+              </button>
+              <button
+                className="icon-btn"
+                disabled={busyAction === "rescan"}
+                onClick={() => void handleRescan()}
+                title="重新扫描游戏目录"
+                aria-label="重新扫描游戏目录"
+              >
+                <RefreshCw
+                  size={14}
+                  strokeWidth={1.5}
+                  className={busyAction === "rescan" ? "spin" : ""}
+                  aria-hidden="true"
+                />
+              </button>
+            </div>
           </div>
 
           <div className="search-wrap">
@@ -2085,6 +2285,60 @@ export default function App() {
                         }
                       />
                     </button>
+                    {selectedGame.game.store_source === "custom_path" &&
+                      (() => {
+                        const matchedCustom =
+                          customPaths.find(
+                            (cp) =>
+                              normalizePathForCompare(
+                                inferInstallDirFromInput(cp.path),
+                              ) ===
+                                normalizePathForCompare(
+                                  selectedGame.game.install_dir,
+                                ) ||
+                              normalizePathForCompare(cp.path) ===
+                                normalizePathForCompare(
+                                  selectedGame.game.install_dir,
+                                ),
+                          ) ?? null;
+                        if (!matchedCustom) return null;
+                        return confirmRemoveCustomGame ? (
+                          <div className="row" style={{ gap: 6, marginLeft: 8 }}>
+                            <button
+                              className="btn btn-danger-outline btn-sm"
+                              onClick={() =>
+                                void handleRemoveCustomGameEntry(
+                                  matchedCustom.path,
+                                )
+                              }
+                            >
+                              <Trash2 size={13} strokeWidth={1.5} />
+                              <span>确认移除</span>
+                            </button>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => setConfirmRemoveCustomGame(false)}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            style={{ marginLeft: 8 }}
+                            disabled={isSelectedGameInjected}
+                            title={
+                              isSelectedGameInjected
+                                ? "请先解除注入后再移除本地游戏"
+                                : "从游戏库移除此自定义游戏（不删除本地文件）"
+                            }
+                            onClick={() => setConfirmRemoveCustomGame(true)}
+                          >
+                            <Trash2 size={13} strokeWidth={1.5} />
+                            <span>移除本地游戏</span>
+                          </button>
+                        );
+                      })()}
                   </div>
 
                   {/* Single merged borderless monospace metadata row */}
@@ -2568,6 +2822,7 @@ export default function App() {
                               onClick={() => {
                                 setSelectedTrainerId(t.trainer_id);
                                 setAwaitingPermInject(null);
+                                setConfirmDeleteTrainerId(null);
                               }}
                             >
                               {isTabActive && <span className="status-dot ok" />}
@@ -2583,6 +2838,57 @@ export default function App() {
                         <span>compat:{selectedTrainer.compatibility_status}</span>
                         {selectedTrainer.revoked && (
                           <span className="tag unverified">revoked</span>
+                        )}
+                        {confirmDeleteTrainerId === selectedTrainer.trainer_id ? (
+                          <>
+                            <button
+                              className="btn btn-danger-outline btn-sm"
+                              disabled={
+                                busyAction === "uninstall-trainer" ||
+                                (isSelectedGameInjected &&
+                                  activeTrainerId === selectedTrainer.trainer_id)
+                              }
+                              onClick={() =>
+                                void handleUninstallTrainer(selectedTrainer)
+                              }
+                            >
+                              <Trash2 size={13} strokeWidth={1.5} />
+                              <span>
+                                {busyAction === "uninstall-trainer"
+                                  ? "删除中..."
+                                  : "确认删除"}
+                              </span>
+                            </button>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => setConfirmDeleteTrainerId(null)}
+                            >
+                              取消
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            className="btn btn-danger-outline btn-sm"
+                            disabled={
+                              busyAction === "uninstall-trainer" ||
+                              (isSelectedGameInjected &&
+                                activeTrainerId === selectedTrainer.trainer_id)
+                            }
+                            title={
+                              isSelectedGameInjected &&
+                              activeTrainerId === selectedTrainer.trainer_id
+                                ? "请先解除注入后再删除模组"
+                                : "从本地模组库卸载并删除此模组"
+                            }
+                            onClick={() =>
+                              setConfirmDeleteTrainerId(
+                                selectedTrainer.trainer_id,
+                              )
+                            }
+                          >
+                            <Trash2 size={13} strokeWidth={1.5} />
+                            <span>删除模组</span>
+                          </button>
                         )}
                       </div>
                     </div>
@@ -3537,6 +3843,18 @@ export default function App() {
               </div>
 
               <div className="surface-panel stack">
+                <div style={{ fontWeight: 600 }}>
+                  0. 添加本地游戏（非 Steam / 绿色版 / 独立游戏）
+                </div>
+                <div className="muted">
+                  支持直接选择游戏根目录或主程序{" "}
+                  <span className="mono">.exe</span>；添加后将自动扫描游戏引擎（Unity
+                  Mono / IL2CPP / UE / Godot 等）并支持一键启动与伴生桥接部署。
+                </div>
+                {renderCustomGameForm(true, "添加到游戏库")}
+              </div>
+
+              <div className="surface-panel stack">
                 <div style={{ fontWeight: 600 }}>1. 注册 Game Manifest JSON</div>
                 <textarea
                   className="text-input mono"
@@ -3568,11 +3886,40 @@ export default function App() {
                 <div className="row">
                   <input
                     className="text-input mono"
-                    style={{ flex: 1 }}
+                    style={{ flex: 1, minWidth: 220 }}
                     placeholder="C:\Mods\my-game.nmod 或 C:\Mods\my-nmod-dir"
                     value={trainerDir}
                     onChange={(e) => setTrainerDir(e.target.value)}
                   />
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() =>
+                      void pickPathInto(
+                        "file",
+                        "选择 .nmod 模组归档包",
+                        setTrainerDir,
+                        ["nmod", "zip"],
+                      )
+                    }
+                  >
+                    <Package size={14} strokeWidth={1.5} />
+                    <span>选择 .nmod</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() =>
+                      void pickPathInto(
+                        "folder",
+                        "选择已解包的模组目录",
+                        setTrainerDir,
+                      )
+                    }
+                  >
+                    <FolderOpen size={14} strokeWidth={1.5} />
+                    <span>选择目录</span>
+                  </button>
                   <select
                     className="select-input"
                     value={trainerTrust}
@@ -3671,11 +4018,26 @@ export default function App() {
                     <div className="row">
                       <input
                         className="text-input mono"
-                        style={{ flex: 2 }}
+                        style={{ flex: 2, minWidth: 200 }}
                         placeholder="C:\Users\...\Downloads\Game.CT"
                         value={ctPath}
                         onChange={(e) => setCtPath(e.target.value)}
                       />
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() =>
+                          void pickPathInto(
+                            "file",
+                            "选择 Cheat Engine .CT 表格文件",
+                            setCtPath,
+                            ["ct", "xml"],
+                          )
+                        }
+                      >
+                        <FileCode2 size={14} strokeWidth={1.5} />
+                        <span>选择 .CT</span>
+                      </button>
                       <input
                         className="text-input mono"
                         style={{ flex: 1 }}
@@ -3878,28 +4240,8 @@ export default function App() {
               </div>
 
               <div className="surface-panel stack">
-                <div style={{ fontWeight: 600 }}>自定义游戏目录</div>
-                <div className="row">
-                  <input
-                    className="text-input mono"
-                    style={{ flex: 1 }}
-                    placeholder="D:\Games\HollowKnight"
-                    value={customDir}
-                    onChange={(e) => setCustomDir(e.target.value)}
-                  />
-                  <input
-                    className="text-input"
-                    placeholder="可选显示标签"
-                    value={customLabel}
-                    onChange={(e) => setCustomLabel(e.target.value)}
-                  />
-                  <button
-                    className="btn btn-outline"
-                    onClick={() => void handleAddCustomPath()}
-                  >
-                    添加目录
-                  </button>
-                </div>
+                <div style={{ fontWeight: 600 }}>自定义游戏目录 / 本地游戏</div>
+                {renderCustomGameForm(false, "添加目录")}
 
                 {customPaths.map((cp) => (
                   <div key={cp.path} className="flat-row">
@@ -3909,17 +4251,7 @@ export default function App() {
                     </div>
                     <button
                       className="btn btn-danger-outline btn-sm"
-                      onClick={async () => {
-                        try {
-                          setError(null);
-                          setCustomPaths(
-                            await nekodApi.removeCustomGamePath(cp.path),
-                          );
-                          await handleRescan();
-                        } catch (e) {
-                          setError(String(e));
-                        }
-                      }}
+                      onClick={() => void handleRemoveCustomGameEntry(cp.path)}
                     >
                       移除
                     </button>
@@ -4026,6 +4358,43 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Add Local Game Modal */}
+      {showAddGameModal && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setShowAddGameModal(false)}
+        >
+          <div
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-local-game-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <h3
+                id="add-local-game-title"
+                style={{ margin: 0, fontSize: 15, fontWeight: 600 }}
+              >
+                添加本地游戏
+              </h3>
+              <button
+                className="icon-btn"
+                onClick={() => setShowAddGameModal(false)}
+                aria-label="关闭添加本地游戏窗口"
+              >
+                <X size={14} strokeWidth={1.5} />
+              </button>
+            </div>
+            <div className="muted">
+              Steam / GOG / Epic 游戏会自动扫描识别。对于免安装绿色版或自定义目录游戏，可选择游戏根目录或直接选择主程序{" "}
+              <span className="mono">.exe</span>。
+            </div>
+            {renderCustomGameForm(true, "添加到游戏库")}
+          </div>
+        </div>
+      )}
 
       {/* Floating HUD Toast Overlay */}
       {hudToasts.length > 0 && (

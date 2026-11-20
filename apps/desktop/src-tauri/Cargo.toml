@@ -30,6 +30,9 @@ serde_json.workspace = true
 tauri = { version = "2.11", features = [] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+rfd = { version = "0.15", default-features = false }
+
 [dev-dependencies]
 serde_json.workspace = true
 tauri = { version = "2.11", features = ["test"] }

@@ -374,6 +374,127 @@ async fn ingest_local_trainer(
     .map_err(map_err)?
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct UninstallTrainerResult {
+    pub trainer_id: String,
+    pub name: String,
+    pub removed_managed_files: bool,
+}
+
+fn remove_dir_if_strictly_inside(target: &Path, managed_roots: &[PathBuf]) -> bool {
+    let Ok(canon_target) = fs::canonicalize(target) else {
+        return false;
+    };
+    for root in managed_roots {
+        if let Ok(canon_root) = fs::canonicalize(root)
+            && canon_target != canon_root
+            && canon_target.starts_with(&canon_root)
+            && fs::remove_dir_all(&canon_target).is_ok()
+        {
+            if let Some(parent) = canon_target.parent()
+                && parent != canon_root
+                && parent.starts_with(&canon_root)
+            {
+                let _ = fs::remove_dir(parent);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+async fn uninstall_trainer(
+    state: State<'_, AppState>,
+    trainer_id: String,
+) -> Result<UninstallTrainerResult, String> {
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (removed, mut removed_files) =
+            core.uninstall_trainer(&trainer_id, true).map_err(map_err)?;
+        if !removed_files {
+            let extra_roots = [
+                data_dir.join("installed-nmods"),
+                data_dir.join("generated-starters"),
+                data_dir.join("imported-ct"),
+            ];
+            removed_files =
+                remove_dir_if_strictly_inside(Path::new(&removed.package_dir), &extra_roots);
+        }
+        let _ = core.rescan_games();
+        Ok(UninstallTrainerResult {
+            trainer_id: removed.manifest.id,
+            name: removed.manifest.name,
+            removed_managed_files: removed_files,
+        })
+    })
+    .await
+    .map_err(map_err)?
+}
+
+#[tauri::command]
+async fn pick_local_path(
+    mode: String,
+    title: Option<String>,
+    extensions: Option<Vec<String>>,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(t) = title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                dialog = dialog.set_title(t);
+            }
+            if mode == "folder" {
+                Ok(dialog.pick_folder().map(|p| p.display().to_string()))
+            } else {
+                if let Some(exts) = extensions.as_ref() {
+                    let clean: Vec<&str> = exts
+                        .iter()
+                        .map(|s| s.trim().trim_start_matches('.'))
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !clean.is_empty() {
+                        dialog = dialog.add_filter("Supported Files", &clean);
+                    }
+                }
+                Ok(dialog.pick_file().map(|p| p.display().to_string()))
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut cmd = Command::new("zenity");
+            cmd.arg("--file-selection");
+            if mode == "folder" {
+                cmd.arg("--directory");
+            }
+            if let Some(t) = title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                cmd.arg(format!("--title={t}"));
+            }
+            if mode != "folder"
+                && let Some(exts) = extensions.as_ref()
+                && !exts.is_empty()
+            {
+                let patterns: Vec<String> = exts
+                    .iter()
+                    .map(|s| format!("*.{}", s.trim().trim_start_matches('.')))
+                    .collect();
+                cmd.arg(format!("--file-filter={}", patterns.join(" ")));
+            }
+            match cmd.output() {
+                Ok(out) if out.status.success() => {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                    Ok((!s.is_empty()).then_some(s))
+                }
+                _ => Ok(None),
+            }
+        }
+    })
+    .await
+    .map_err(map_err)?
+}
+
 #[tauri::command]
 fn register_game_manifest(state: State<'_, AppState>, raw_json: String) -> Result<String, String> {
     state
@@ -389,9 +510,16 @@ fn add_custom_game_path(
     path: String,
     label: Option<String>,
 ) -> Result<Vec<CustomGamePathRecord>, String> {
+    let trimmed = path.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return Err("请输入游戏目录或可执行文件 (.exe) 路径。".to_owned());
+    }
+    if !Path::new(trimmed).exists() {
+        return Err(format!("路径 '{trimmed}' 不存在，请检查目录或文件位置。"));
+    }
     state
         .core
-        .add_custom_game_path(&path, label.as_deref())
+        .add_custom_game_path(trimmed, label.as_deref())
         .map_err(map_err)
 }
 
@@ -1462,14 +1590,24 @@ fn launch_game(
         });
     }
 
-    let exe_str = executable_path
+    let resolved_exe = executable_path
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            "cannot launch game: no Steam AppID and no executable path recorded for this game"
-                .to_owned()
-        })?;
+        .map(str::to_owned)
+        .or_else(|| {
+            nekod_game_detection::custom::detect_primary_executable(Path::new(&install_dir))
+                .or_else(|| {
+                    NekodAppService::collect_candidate_exes_in_dir(&install_dir)
+                        .into_iter()
+                        .next()
+                        .map(|name| Path::new(&install_dir).join(name))
+                })
+                .map(|p| p.display().to_string())
+        });
+    let exe_str = resolved_exe.as_deref().ok_or_else(|| {
+        "cannot launch game: no Steam AppID and no executable path found for this game".to_owned()
+    })?;
     let (dir_canon, exe_canon) = validate_direct_launch_executable(&install_dir, exe_str)?;
     Command::new(&exe_canon)
         .current_dir(&dir_canon)
@@ -1945,6 +2083,8 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         list_trainers_for_game,
         grant_trainer_permissions,
         revoke_trainer_permissions,
+        uninstall_trainer,
+        pick_local_path,
         ingest_local_trainer,
         register_game_manifest,
         add_custom_game_path,
