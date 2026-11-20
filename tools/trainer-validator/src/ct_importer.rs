@@ -81,12 +81,12 @@ struct RawCtEntry {
     children: Vec<RawCtEntry>,
 }
 
-/// Converts a raw Cheat Engine `.CT` XML document into a validated `GeneratedTrainerPackage`
-/// along with explicit diagnostics for any skipped/unsafe entries.
-pub fn convert_ct_xml_to_package(
+/// Converts a raw Cheat Engine `.CT` XML document and preserves full skip diagnostics
+/// even when zero entries can be safely represented as `declarative_patch_v1`.
+pub fn convert_ct_xml_with_diagnostics(
     ct_xml: &str,
     opts: &CtImportOptions,
-) -> Result<CtConversionOutput, CtImportError> {
+) -> Result<(Option<GeneratedTrainerPackage>, CtImportSummary), CtImportError> {
     if !is_valid_kebab_slug(&opts.game_id) {
         return Err(CtImportError::Metadata(format!(
             "game_id '{}' must be a valid U11 kebab-case slug",
@@ -251,7 +251,14 @@ pub fn convert_ct_xml_to_package(
     }
 
     if converted_features.is_empty() {
-        return Err(CtImportError::NoConvertibleFeatures(skipped_entries.len()));
+        return Ok((
+            None,
+            CtImportSummary {
+                converted_features,
+                skipped_entries,
+                modules: Vec::new(),
+            },
+        ));
     }
 
     let module_list: Vec<String> = modules.into_iter().collect();
@@ -261,14 +268,28 @@ pub fn convert_ct_xml_to_package(
     let payload = patch_builder.build().map_err(ValidationError::from)?;
     let package = build_trainer_package(manifest, payload).map_err(ValidationError::from)?;
 
-    Ok(CtConversionOutput {
-        package,
-        summary: CtImportSummary {
+    Ok((
+        Some(package),
+        CtImportSummary {
             converted_features,
             skipped_entries,
             modules: module_list,
         },
-    })
+    ))
+}
+
+/// Converts a raw Cheat Engine `.CT` XML document into a validated `GeneratedTrainerPackage`
+/// along with explicit diagnostics for any skipped/unsafe entries.
+pub fn convert_ct_xml_to_package(
+    ct_xml: &str,
+    opts: &CtImportOptions,
+) -> Result<CtConversionOutput, CtImportError> {
+    match convert_ct_xml_with_diagnostics(ct_xml, opts)? {
+        (Some(package), summary) => Ok(CtConversionOutput { package, summary }),
+        (None, summary) => Err(CtImportError::NoConvertibleFeatures(
+            summary.skipped_entries.len(),
+        )),
+    }
 }
 
 /// Converts a `.CT` file on disk, writes the validated package directory, and runs
@@ -857,5 +878,51 @@ dealloc(newmem)
         assert_eq!(validated.features.len(), 2);
 
         let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn diagnostics_preserve_skipped_entries_when_only_lua_present() {
+        let lua_only_ct = r#"<?xml version="1.0" encoding="utf-8"?>
+<CheatTable CheatEngineTableVersion="45">
+  <CheatEntries>
+    <CheatEntry>
+      <ID>1</ID>
+      <Description>"Download ModEngine"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>{$lua}
+if syntaxcheck then return end
+[ENABLE]
+shellExecute("https://modengine.net")
+[DISABLE]
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>2</ID>
+      <Description>"Get more trainers"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>{$lua}
+[ENABLE]
+shellExecute("https://modengine.net")
+[DISABLE]
+</AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+</CheatTable>"#;
+
+        let opts = CtImportOptions {
+            trainer_id: "local.ct.gun-soul-girl-2.fake".to_owned(),
+            trainer_name: "Fake ModEngine CT".to_owned(),
+            game_id: "gun-soul-girl-2".to_owned(),
+            game_name: "GunSoul Girl 2".to_owned(),
+            source_repository: "https://github.com/OmaruKoma/Nekod".to_owned(),
+            default_module: Some("GunSoulGirl 2.exe".to_owned()),
+        };
+
+        let (pkg, summary) = convert_ct_xml_with_diagnostics(lua_only_ct, &opts).unwrap();
+        assert!(pkg.is_none());
+        assert!(summary.converted_features.is_empty());
+        assert_eq!(summary.skipped_entries.len(), 2);
+        assert!(summary.skipped_entries[0].reason.contains("{$lua}"));
+        assert!(summary.skipped_entries[1].reason.contains("{$lua}"));
     }
 }

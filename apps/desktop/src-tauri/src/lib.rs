@@ -22,13 +22,17 @@ use nekod_core::{
     TrainerPermissionState, TrainerUpdateInfo,
 };
 use nekod_game_detection::{GameEngineKind, GameEnvironmentProfile};
-use nekod_manifest::{PermissionScope, TrustTier};
+use nekod_manifest::{PermissionScope, TrustTier, is_valid_kebab_slug};
 use nekod_permission_manager::SecurityPolicyConfig;
 use nekod_profile_manager::{CustomGamePathRecord, GameProfile};
 use nekod_registry_client::{RegistrySourceState, RegistrySyncReport};
 use nekod_runtime_api::{FeatureCommand, ProcessIdentity, RuntimeDiagnostics, RuntimeSessionId};
 use nekod_trainer_manager::{CompatibilityRecord, sha256_hex};
 use nekod_trainer_runtime::{CompositeRuntimeRouter, DeploymentLedger, DeploymentState};
+use nekod_validator::ct_importer::{
+    CtImportOptions, SkippedCtEntry, convert_ct_xml_with_diagnostics,
+};
+use nekod_validator::validate_trainer_package_dir;
 use serde::Serialize;
 use serde_json::json;
 use tauri::{Emitter, Manager, State};
@@ -73,6 +77,26 @@ pub struct LaunchGameResult {
     pub method: String,
     pub target: String,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CtImportUiReport {
+    pub imported: bool,
+    pub trainer_id: String,
+    pub game_id: String,
+    pub package_dir: Option<String>,
+    pub converted_features: Vec<String>,
+    pub skipped_entries: Vec<SkippedCtEntry>,
+    pub modules: Vec<String>,
+    pub message: String,
+}
+
+const MAX_CT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const GSG2_GAME_MANIFEST: &str =
+    include_str!("../../../../examples/gun-soul-girl-2/game-manifest.json");
+const GSG2_TRAINER_MANIFEST: &str =
+    include_str!("../../../../examples/gun-soul-girl-2/trainer-manifest.json");
+const GSG2_BRIDGE_PAYLOAD: &[u8] =
+    include_bytes!("../../../../examples/gun-soul-girl-2/scripts/unity_bridge.json");
 
 fn map_err(err: impl std::fmt::Display) -> String {
     err.to_string()
@@ -128,16 +152,27 @@ fn revoke_trainer_permissions(
 }
 
 #[tauri::command]
-fn ingest_local_trainer(
+async fn ingest_local_trainer(
     state: State<'_, AppState>,
     package_dir: String,
     trust_tier: TrustTier,
 ) -> Result<(), String> {
-    state
-        .core
-        .ingest_local_trainer(package_dir, trust_tier)
-        .map(|_| ())
-        .map_err(map_err)
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || {
+        let pkg_path = PathBuf::from(&package_dir);
+        let sibling_gm = pkg_path.join("game-manifest.json");
+        if sibling_gm.is_file() {
+            let raw_gm = fs::read_to_string(&sibling_gm).map_err(map_err)?;
+            core.register_game_manifest(&raw_gm).map_err(map_err)?;
+        }
+        core.ingest_local_trainer(&pkg_path, trust_tier)
+            .map(|_| ())
+            .map_err(map_err)?;
+        core.rescan_games().map_err(map_err)?;
+        Ok(())
+    })
+    .await
+    .map_err(map_err)?
 }
 
 #[tauri::command]
@@ -599,10 +634,10 @@ async fn undeploy_bepinex_loader(
     .map_err(map_err)?
 }
 
-fn slugify_kebab(title: &str, store_app_id: Option<&str>) -> String {
+fn ascii_kebab_segment(raw: &str, max_len: usize) -> String {
     let mut out = String::new();
     let mut prev_hyphen = true;
-    for ch in title.chars() {
+    for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_lowercase());
             prev_hyphen = false;
@@ -614,12 +649,17 @@ fn slugify_kebab(title: &str, store_app_id: Option<&str>) -> String {
     while out.ends_with('-') {
         out.pop();
     }
-    while out.len() > 44 {
+    while out.len() > max_len {
         out.pop();
     }
     while out.ends_with('-') {
         out.pop();
     }
+    out
+}
+
+fn slugify_kebab(title: &str, store_app_id: Option<&str>) -> String {
+    let out = ascii_kebab_segment(title, 44);
     if out.len() >= 2 {
         return out;
     }
@@ -658,6 +698,163 @@ async fn quick_setup_unity_starter(
     .map_err(map_err)?
 }
 
+fn parse_steam_app_u64(store_source: Option<&str>, store_app_id: Option<&str>) -> Option<u64> {
+    if store_source.is_some_and(|s| s.eq_ignore_ascii_case("steam")) {
+        store_app_id.and_then(|s| s.trim().parse::<u64>().ok())
+    } else {
+        None
+    }
+}
+
+fn resolve_game_id_candidate(
+    existing_manifests: &[nekod_manifest::GameManifest],
+    title: &str,
+    requested_game_id: Option<&str>,
+    steam_app_u64: Option<u64>,
+    primary_exe: Option<&str>,
+    install_dir: Option<&str>,
+    store_app_id: Option<&str>,
+) -> Result<(String, bool), String> {
+    if let Some(req) = requested_game_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if !is_valid_kebab_slug(req) {
+            return Err(format!(
+                "game_id '{req}' must be a valid kebab-case slug (lowercase ASCII letters, digits, hyphens)"
+            ));
+        }
+        let exists = existing_manifests.iter().any(|gm| gm.id == req);
+        return Ok((req.to_owned(), exists));
+    }
+
+    if let Some(gm) = existing_manifests.iter().find(|gm| {
+        if let Some(aid) = steam_app_u64
+            && gm.store_ids.steam_app_id == Some(aid)
+        {
+            return true;
+        }
+        if let Some(exe) = primary_exe
+            && gm
+                .executables
+                .iter()
+                .any(|ex| ex.process_name.eq_ignore_ascii_case(exe))
+        {
+            return true;
+        }
+        false
+    }) {
+        return Ok((gm.id.clone(), true));
+    }
+
+    let base_slug = slugify_kebab(title, store_app_id);
+    let candidate_id = if existing_manifests.iter().any(|gm| gm.id == base_slug) {
+        if let Some(aid) = steam_app_u64 {
+            format!("{base_slug}-{aid}")
+        } else {
+            let disambig_input = install_dir.unwrap_or(title);
+            let hash_suffix = &sha256_hex(disambig_input.as_bytes())[..8];
+            format!("{base_slug}-{hash_suffix}")
+        }
+    } else {
+        base_slug
+    };
+    Ok((candidate_id, false))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_minimal_game_manifest(
+    core: &NekodAppService,
+    candidate_id: &str,
+    title: &str,
+    steam_app_u64: Option<u64>,
+    store_build_id: Option<&str>,
+    primary_exe: &str,
+) -> Result<String, String> {
+    let mut store_ids = serde_json::Map::new();
+    if let Some(aid) = steam_app_u64 {
+        store_ids.insert("steam_app_id".to_owned(), json!(aid));
+    }
+
+    let known_versions = if let Some(bid) = store_build_id.map(str::trim).filter(|s| !s.is_empty())
+    {
+        vec![json!({
+            "version_id": "1.0.0",
+            "display_version": format!("Steam Build {bid}"),
+            "platform": "windows-x64",
+            "store_build_id": bid
+        })]
+    } else {
+        Vec::new()
+    };
+
+    let display_name = if title.trim().is_empty() {
+        candidate_id.to_owned()
+    } else {
+        title.trim().to_owned()
+    };
+
+    let game_manifest = json!({
+        "schema_version": "1.0.0",
+        "id": candidate_id,
+        "name": display_name,
+        "platforms": ["windows-x64"],
+        "store_ids": store_ids,
+        "executables": [{
+            "platform": "windows-x64",
+            "relative_path": primary_exe,
+            "process_name": primary_exe,
+            "architecture": "x86_64"
+        }],
+        "known_versions": known_versions,
+        "compatibility_policy": {
+            "multiplayer_mode": "singleplayer_only",
+            "anti_cheat_detected": [],
+            "trainer_policy": "allowed_singleplayer"
+        }
+    });
+    let raw_gm = serde_json::to_string_pretty(&game_manifest).map_err(map_err)?;
+    core.register_game_manifest(&raw_gm)
+        .map(|m| m.id)
+        .map_err(map_err)
+}
+
+fn setup_curated_gsg2_pack(
+    core: &NekodAppService,
+    data_dir: &Path,
+) -> Result<QuickSetupResult, String> {
+    core.register_game_manifest(GSG2_GAME_MANIFEST)
+        .map_err(map_err)?;
+
+    let pkg_dir = data_dir.join("generated-starters").join("gun-soul-girl-2");
+    let scripts_dir = pkg_dir.join("scripts");
+    fs::create_dir_all(&scripts_dir).map_err(map_err)?;
+    fs::write(scripts_dir.join("unity_bridge.json"), GSG2_BRIDGE_PAYLOAD).map_err(map_err)?;
+
+    let mut tm_val: serde_json::Value =
+        serde_json::from_str(GSG2_TRAINER_MANIFEST).map_err(map_err)?;
+    if let Some(artifact) = tm_val
+        .get_mut("artifacts")
+        .and_then(|a| a.get_mut(0))
+        .and_then(|v| v.as_object_mut())
+    {
+        artifact.insert("sha256".to_owned(), json!(sha256_hex(GSG2_BRIDGE_PAYLOAD)));
+        artifact.insert(
+            "size_bytes".to_owned(),
+            json!(GSG2_BRIDGE_PAYLOAD.len() as u64),
+        );
+    }
+    let raw_tm = serde_json::to_string_pretty(&tm_val).map_err(map_err)?;
+    fs::write(pkg_dir.join("trainer-manifest.json"), raw_tm).map_err(map_err)?;
+
+    core.ingest_local_trainer(&pkg_dir, TrustTier::Official)
+        .map_err(map_err)?;
+    core.rescan_games().map_err(map_err)?;
+
+    Ok(QuickSetupResult {
+        game_id: "gun-soul-girl-2".to_owned(),
+        trainer_id: "org.nekod.gun-soul-girl-2".to_owned(),
+        engine: GameEngineKind::UnityMono,
+    })
+}
+
 fn quick_setup_unity_starter_sync(
     core: &NekodAppService,
     data_dir: &Path,
@@ -694,80 +891,35 @@ fn quick_setup_unity_starter_sync(
         .next()
         .ok_or_else(|| format!("no primary game executable (.exe) found in '{install_dir}'"))?;
 
+    let steam_app_u64 = parse_steam_app_u64(Some(&store_source), store_app_id.as_deref());
+    if env.engine == GameEngineKind::UnityMono
+        && (steam_app_u64 == Some(1_948_700)
+            || primary_exe.eq_ignore_ascii_case("GunSoulGirl 2.exe"))
+    {
+        return setup_curated_gsg2_pack(core, data_dir);
+    }
+
     let existing_manifests = core.list_registered_game_manifests().map_err(map_err)?;
-    let steam_app_u64 = if store_source.eq_ignore_ascii_case("steam") {
-        store_app_id.as_deref().and_then(|s| s.parse::<u64>().ok())
+    let (candidate_id, already_exists) = resolve_game_id_candidate(
+        &existing_manifests,
+        &title,
+        None,
+        steam_app_u64,
+        Some(&primary_exe),
+        Some(&install_dir),
+        store_app_id.as_deref(),
+    )?;
+    let game_id = if already_exists {
+        candidate_id
     } else {
-        None
-    };
-
-    let existing_match = existing_manifests.iter().find(|gm| {
-        if let Some(aid) = steam_app_u64
-            && gm.store_ids.steam_app_id == Some(aid)
-        {
-            return true;
-        }
-        gm.executables
-            .iter()
-            .any(|ex| ex.process_name.eq_ignore_ascii_case(&primary_exe))
-    });
-
-    let game_id = if let Some(gm) = existing_match {
-        gm.id.clone()
-    } else {
-        let base_slug = slugify_kebab(&title, store_app_id.as_deref());
-        let candidate_id = if existing_manifests.iter().any(|gm| gm.id == base_slug) {
-            if let Some(aid) = steam_app_u64 {
-                format!("{base_slug}-{aid}")
-            } else {
-                let hash_suffix = &sha256_hex(install_dir.as_bytes())[..8];
-                format!("{base_slug}-{hash_suffix}")
-            }
-        } else {
-            base_slug
-        };
-
-        let mut store_ids = serde_json::Map::new();
-        if let Some(aid) = steam_app_u64 {
-            store_ids.insert("steam_app_id".to_owned(), json!(aid));
-        }
-
-        let known_versions = if let Some(bid) = store_build_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            vec![json!({
-                "version_id": "1.0.0",
-                "display_version": format!("Steam Build {bid}"),
-                "platform": "windows-x64",
-                "store_build_id": bid
-            })]
-        } else {
-            Vec::new()
-        };
-
-        let game_manifest = json!({
-            "schema_version": "1.0.0",
-            "id": candidate_id,
-            "name": if title.trim().is_empty() { candidate_id.clone() } else { title.trim().to_owned() },
-            "platforms": ["windows-x64"],
-            "store_ids": store_ids,
-            "executables": [{
-                "platform": "windows-x64",
-                "relative_path": primary_exe,
-                "process_name": primary_exe,
-                "architecture": "x86_64"
-            }],
-            "known_versions": known_versions,
-            "compatibility_policy": {
-                "multiplayer_mode": "singleplayer_only",
-                "anti_cheat_detected": [],
-                "trainer_policy": "allowed_singleplayer"
-            }
-        });
-        let raw_gm = serde_json::to_string_pretty(&game_manifest).map_err(map_err)?;
-        core.register_game_manifest(&raw_gm).map_err(map_err)?.id
+        register_minimal_game_manifest(
+            core,
+            &candidate_id,
+            &title,
+            steam_app_u64,
+            store_build_id.as_deref(),
+            &primary_exe,
+        )?
     };
 
     let trainer_id = format!("org.nekod.unity-starter.{game_id}");
@@ -1164,6 +1316,207 @@ fn launch_game(
     })
 }
 
+fn build_ct_trainer_id(game_id: &str, ct_path: &Path) -> String {
+    let stem = ct_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("table");
+    let stem_slug = ascii_kebab_segment(stem, 40);
+    let effective_stem = if stem_slug.is_empty() {
+        "table".to_owned()
+    } else {
+        stem_slug
+    };
+    let mut tid = format!("local.ct.{game_id}.{effective_stem}");
+    if tid.len() > 120 {
+        tid.truncate(120);
+        while tid.ends_with(['-', '.', '_']) {
+            tid.pop();
+        }
+    }
+    tid
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_ct_file_sync(
+    core: &NekodAppService,
+    data_dir: &Path,
+    ct_path: String,
+    game_id: Option<String>,
+    game_name: String,
+    default_module: Option<String>,
+    install_dir: Option<String>,
+    store_source: Option<String>,
+    store_app_id: Option<String>,
+    store_build_id: Option<String>,
+    trust_tier: TrustTier,
+) -> Result<CtImportUiReport, String> {
+    let trimmed_path = ct_path.trim().trim_matches('"');
+    if trimmed_path.is_empty() {
+        return Err("请填写 .CT Cheat Engine 表格文件路径。".to_owned());
+    }
+    let ct_file = Path::new(trimmed_path);
+    let meta = fs::metadata(ct_file)
+        .map_err(|e| format!("无法访问 .CT 文件 '{}': {e}", ct_file.display()))?;
+    if !meta.is_file() {
+        return Err(format!("路径 '{}' 不是有效文件。", ct_file.display()));
+    }
+    if meta.len() > MAX_CT_FILE_BYTES {
+        return Err(format!(
+            ".CT 文件体积 ({} bytes) 超过 16 MiB 安全上限。",
+            meta.len()
+        ));
+    }
+
+    let raw_xml = fs::read_to_string(ct_file)
+        .map_err(|e| format!("无法以 UTF-8 读取 .CT 文件 '{}': {e}", ct_file.display()))?;
+
+    let clean_install_dir = install_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let primary_exe = clean_install_dir.and_then(|dir| {
+        NekodAppService::collect_candidate_exes_in_dir(dir)
+            .into_iter()
+            .next()
+    });
+    let effective_module = default_module
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| primary_exe.clone());
+
+    let steam_app_u64 = parse_steam_app_u64(store_source.as_deref(), store_app_id.as_deref());
+    let existing_manifests = core.list_registered_game_manifests().map_err(map_err)?;
+    let (resolved_game_id, already_exists) = resolve_game_id_candidate(
+        &existing_manifests,
+        &game_name,
+        game_id.as_deref(),
+        steam_app_u64,
+        primary_exe.as_deref(),
+        clean_install_dir,
+        store_app_id.as_deref(),
+    )?;
+
+    let effective_game_name = if game_name.trim().is_empty() {
+        resolved_game_id.clone()
+    } else {
+        game_name.trim().to_owned()
+    };
+    let trainer_id = build_ct_trainer_id(&resolved_game_id, ct_file);
+    let table_title = ct_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|stem| format!("CT Import: {stem}"))
+        .unwrap_or_else(|| format!("{effective_game_name} (.CT Import)"));
+
+    let opts = CtImportOptions {
+        trainer_id: trainer_id.clone(),
+        trainer_name: table_title,
+        game_id: resolved_game_id.clone(),
+        game_name: effective_game_name.clone(),
+        source_repository: "https://github.com/OmaruKoma/Nekod".to_owned(),
+        default_module: effective_module.clone(),
+    };
+
+    let (maybe_pkg, summary) = convert_ct_xml_with_diagnostics(&raw_xml, &opts).map_err(map_err)?;
+
+    let Some(pkg) = maybe_pkg else {
+        return Ok(CtImportUiReport {
+            imported: false,
+            trainer_id,
+            game_id: resolved_game_id,
+            package_dir: None,
+            converted_features: summary.converted_features,
+            skipped_entries: summary.skipped_entries.clone(),
+            modules: summary.modules,
+            message: format!(
+                "未找到可安全静态转换的声明式修改项（已安全跳过 {} 条脚本/动态条目，例如 {{$lua}} 或 alloc）。",
+                summary.skipped_entries.len()
+            ),
+        });
+    };
+
+    if !already_exists {
+        let exe_for_manifest = primary_exe
+            .or_else(|| effective_module.clone())
+            .unwrap_or_else(|| format!("{resolved_game_id}.exe"));
+        register_minimal_game_manifest(
+            core,
+            &resolved_game_id,
+            &effective_game_name,
+            steam_app_u64,
+            store_build_id.as_deref(),
+            &exe_for_manifest,
+        )?;
+    }
+
+    let out_dir = data_dir.join("imported-ct").join(&trainer_id);
+    if out_dir.exists() {
+        let _ = fs::remove_dir_all(&out_dir);
+    }
+    fs::create_dir_all(&out_dir).map_err(map_err)?;
+    pkg.write_to_dir(&out_dir).map_err(map_err)?;
+    validate_trainer_package_dir(&out_dir).map_err(map_err)?;
+
+    core.ingest_local_trainer(&out_dir, trust_tier)
+        .map_err(map_err)?;
+    core.rescan_games().map_err(map_err)?;
+
+    Ok(CtImportUiReport {
+        imported: true,
+        trainer_id,
+        game_id: resolved_game_id,
+        package_dir: Some(out_dir.display().to_string()),
+        converted_features: summary.converted_features.clone(),
+        skipped_entries: summary.skipped_entries.clone(),
+        modules: summary.modules,
+        message: format!(
+            "已静态转换并导入 {} 项声明式功能（安全跳过 {} 项不安全或非声明式条目）。",
+            summary.converted_features.len(),
+            summary.skipped_entries.len()
+        ),
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn import_ct_file(
+    state: State<'_, AppState>,
+    ct_path: String,
+    game_id: Option<String>,
+    game_name: String,
+    default_module: Option<String>,
+    install_dir: Option<String>,
+    store_source: Option<String>,
+    store_app_id: Option<String>,
+    store_build_id: Option<String>,
+    trust_tier: TrustTier,
+) -> Result<CtImportUiReport, String> {
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        import_ct_file_sync(
+            &core,
+            &data_dir,
+            ct_path,
+            game_id,
+            game_name,
+            default_module,
+            install_dir,
+            store_source,
+            store_app_id,
+            store_build_id,
+            trust_tier,
+        )
+    })
+    .await
+    .map_err(map_err)?
+}
+
 impl AppState {
     pub fn new(core: NekodAppService) -> Self {
         Self {
@@ -1224,6 +1577,7 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         install_bepinex_loader,
         undeploy_bepinex_loader,
         quick_setup_unity_starter,
+        import_ct_file,
         sync_global_hotkeys,
         get_game_artwork,
         launch_game,

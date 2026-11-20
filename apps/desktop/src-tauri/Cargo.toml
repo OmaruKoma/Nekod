@@ -23,6 +23,7 @@ nekod-registry-client.workspace = true
 nekod-runtime-api.workspace = true
 nekod-trainer-manager.workspace = true
 nekod-trainer-runtime.workspace = true
+nekod-validator.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

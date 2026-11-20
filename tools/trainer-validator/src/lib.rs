@@ -416,4 +416,30 @@ mod tests {
             validate_trainer_package_dir(&pkg_dir).expect("standalone v1 bridge validates");
         assert_eq!(trainer_manifest.id, mod_manifest.id);
     }
+
+    #[test]
+    fn validates_gun_soul_girl_2_example_package() {
+        let pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("gun-soul-girl-2");
+
+        let gm_raw = fs::read_to_string(pkg_dir.join("game-manifest.json")).unwrap();
+        let game_manifest =
+            validate_game_manifest_str(&gm_raw).expect("gun-soul-girl-2 game manifest validates");
+        assert_eq!(game_manifest.id, "gun-soul-girl-2");
+        assert_eq!(game_manifest.store_ids.steam_app_id, Some(1_948_700));
+
+        let (mod_manifest, _) =
+            validate_nmod_package_dir(&pkg_dir).expect("gun-soul-girl-2 .nmod validates cleanly");
+        assert_eq!(mod_manifest.runtime.kind, RuntimeKind::UnityBridgeV1);
+        assert_eq!(mod_manifest.target_game.game_id, "gun-soul-girl-2");
+        assert_eq!(mod_manifest.features.len(), 21);
+
+        let (trainer_manifest, _) = validate_trainer_package_dir(&pkg_dir)
+            .expect("gun-soul-girl-2 v1 trainer validates cleanly");
+        assert_eq!(trainer_manifest.id, mod_manifest.id);
+        assert_eq!(trainer_manifest.features.len(), 21);
+    }
 }

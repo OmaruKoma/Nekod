@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "id": "gun-soul-girl-2",
+  "name": "GunSoul Girl 2",
+  "short_name": "GSG2",
+  "platforms": ["windows-x64"],
+  "store_ids": {
+    "steam_app_id": 1948700
+  },
+  "executables": [
+    {
+      "platform": "windows-x64",
+      "relative_path": "GunSoulGirl 2.exe",
+      "process_name": "GunSoulGirl 2.exe",
+      "architecture": "x86_64"
+    }
+  ],
+  "known_versions": [
+    {
+      "version_id": "1.01a",
+      "display_version": "Steam Build 13294226",
+      "platform": "windows-x64",
+      "store_build_id": "13294226"
+    }
+  ],
+  "compatibility_policy": {
+    "multiplayer_mode": "singleplayer_only",
+    "anti_cheat_detected": [],
+    "trainer_policy": "allowed_singleplayer"
+  }
+}

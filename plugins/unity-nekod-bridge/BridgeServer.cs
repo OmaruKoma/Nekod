@@ -431,6 +431,20 @@ namespace Nekod.UnityBridge
                             if (wrapped != null) results.Add(wrapped);
                         }
                     }
+
+                    if (results.Count == 0 && typeof(UnityEngine.ScriptableObject).IsAssignableFrom(targetType))
+                    {
+                        var assets = UnityEngine.Resources.FindObjectsOfTypeAll(il2cppType);
+                        if (assets != null)
+                        {
+                            foreach (UnityEngine.Object obj in assets)
+                            {
+                                if (obj == null) continue;
+                                object wrapped = Activator.CreateInstance(targetType, new object[] { obj.Pointer });
+                                if (wrapped != null) results.Add(wrapped);
+                            }
+                        }
+                    }
                 }
 #else
                 UnityEngine.Object[] found = UnityEngine.Object.FindObjectsOfType(targetType);
@@ -439,6 +453,18 @@ namespace Nekod.UnityBridge
                     foreach (UnityEngine.Object obj in found)
                     {
                         if (obj != null) results.Add(obj);
+                    }
+                }
+
+                if (results.Count == 0 && typeof(UnityEngine.ScriptableObject).IsAssignableFrom(targetType))
+                {
+                    UnityEngine.Object[] assets = UnityEngine.Resources.FindObjectsOfTypeAll(targetType);
+                    if (assets != null)
+                    {
+                        foreach (UnityEngine.Object obj in assets)
+                        {
+                            if (obj != null) results.Add(obj);
+                        }
                     }
                 }
 #endif

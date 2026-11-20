@@ -8,6 +8,7 @@ import {
   Copy,
   Cpu,
   Download,
+  FileCode2,
   FolderInput,
   FolderOpen,
   Globe,
@@ -37,6 +38,7 @@ import {
   CommunityTrainerView,
   CompanionBridgeCatalogEntry,
   CompatibilityRecord,
+  CtImportUiReport,
   CustomGamePathRecord,
   DiagnosticEvent,
   FeatureCommand,
@@ -177,6 +179,13 @@ export default function App() {
   const [trainerTrust, setTrainerTrust] =
     useState<TrustTier>("community_verified");
   const [gameManifestJson, setGameManifestJson] = useState("");
+  const [ctPath, setCtPath] = useState("");
+  const [ctTargetGameKey, setCtTargetGameKey] = useState("");
+  const [ctCustomGameId, setCtCustomGameId] = useState("");
+  const [ctCustomGameName, setCtCustomGameName] = useState("");
+  const [ctDefaultModule, setCtDefaultModule] = useState("");
+  const [ctTrust, setCtTrust] = useState<TrustTier>("unverified");
+  const [ctReport, setCtReport] = useState<CtImportUiReport | null>(null);
 
   // Runtime session state (One-Click Inject / Uninject)
   const [runningProcs, setRunningProcs] = useState<ProcessIdentity[]>([]);
@@ -1010,9 +1019,17 @@ export default function App() {
       setSelectedTrainerId(res.trainer_id);
       setAwaitingPermInject(res.trainer_id);
       if (soundEnabled) soundFx.injectSuccess();
-      const msg = `已初始化通用 Unity 控制模组 (${res.trainer_id})！请先确认运行权限，然后点击「一键注入 Mod」。`;
+      const isGsg2Pack = res.trainer_id === "org.nekod.gun-soul-girl-2";
+      const msg = isGsg2Pack
+        ? `已导入 GunSoul Girl 2 专属模组 (${res.trainer_id})！请先确认运行权限，然后点击「一键注入 Mod」。`
+        : `已初始化通用 Unity 控制模组 (${res.trainer_id})！请先确认运行权限，然后点击「一键注入 Mod」。`;
       setStatusMsg(msg);
-      pushHudToast("通用 Unity 控制模组初始化完成", "ok");
+      pushHudToast(
+        isGsg2Pack
+          ? "GunSoul Girl 2 专属模组初始化完成"
+          : "通用 Unity 控制模组初始化完成",
+        "ok",
+      );
     } catch (e) {
       if (soundEnabled) soundFx.error();
       setError(String(e));
@@ -1217,6 +1234,78 @@ export default function App() {
       setStatusMsg(`已注册游戏清单 '${gameId}'。`);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function handleImportCtFile() {
+    if (!ctPath.trim()) return;
+    const effectiveKey =
+      ctTargetGameKey ||
+      selectedGame?.library_key ||
+      games[0]?.library_key ||
+      "__custom__";
+    const targetGame =
+      effectiveKey === "__custom__"
+        ? null
+        : (games.find((g) => g.library_key === effectiveKey) ?? null);
+    const exeBase =
+      targetGame?.game.executable_path?.split(/[/\\]/).pop()?.trim() || null;
+    const gameName =
+      targetGame?.game.title ??
+      (ctCustomGameName.trim() || ctCustomGameId.trim() || "Custom Game");
+    const gameId =
+      targetGame?.game.matched_game_id ?? (ctCustomGameId.trim() || null);
+    const defaultModule = ctDefaultModule.trim() || exeBase;
+
+    try {
+      setBusyAction("import-ct");
+      setError(null);
+      const report = await nekodApi.importCtFile({
+        ctPath: ctPath.trim(),
+        gameId,
+        gameName,
+        defaultModule,
+        installDir: targetGame?.game.install_dir ?? null,
+        storeSource: targetGame?.game.store_source ?? null,
+        storeAppId: targetGame?.game.store_app_id ?? null,
+        storeBuildId: targetGame?.game.store_build_id ?? null,
+        trustTier: ctTrust,
+      });
+      setCtReport(report);
+      setStatusMsg(report.message);
+      if (report.imported) {
+        const [lib, diag] = await Promise.all([
+          nekodApi.rescanGames(),
+          nekodApi.getDiagnosticLogs(),
+        ]);
+        setGames(lib);
+        setLogs(diag);
+        if (selectedGame?.game.matched_game_id === report.game_id) {
+          setTrainers(
+            await nekodApi.listTrainersForGame(
+              report.game_id,
+              selectedGame.game.store_build_id,
+            ),
+          );
+        }
+        if (soundEnabled) soundFx.injectSuccess();
+        pushHudToast(
+          `已转换并导入 ${report.converted_features.length} 项 .CT 修改功能`,
+          "ok",
+        );
+      } else {
+        setLogs(await nekodApi.getDiagnosticLogs());
+        if (soundEnabled) soundFx.error();
+        pushHudToast(
+          `未能导入 .CT：已安全拦截 ${report.skipped_entries.length} 条非声明式条目`,
+          "warn",
+        );
+      }
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -2324,7 +2413,12 @@ export default function App() {
                           <span>
                             {busyAction === "quick-setup"
                               ? "初始化中..."
-                              : "一键初始化通用 Unity 控制模组"}
+                              : selectedGame.game.store_app_id === "1948700" ||
+                                  /gunsoul\s*girl\s*2/i.test(
+                                    selectedGame.game.title,
+                                  )
+                                ? "一键导入 GunSoul Girl 2 专属模组 (21 项功能)"
+                                : "一键初始化通用 Unity 控制模组"}
                           </span>
                         </button>
                       )}
@@ -2333,7 +2427,10 @@ export default function App() {
                     {gameEnv &&
                     (gameEnv.engine === "unity_mono" ||
                       gameEnv.engine === "unity_il2cpp")
-                      ? "检测到当前为 Unity 引擎游戏，尚未绑定专用模组。可点击右上角「一键初始化通用 Unity 控制模组」，自动配置暂停时间 (F8)、全局变速 (0.1x-8.0x) 与主线程资源清理（零 UnityExplorer 依赖）。"
+                      ? selectedGame.game.store_app_id === "1948700" ||
+                        /gunsoul\s*girl\s*2/i.test(selectedGame.game.title)
+                        ? "检测到 GunSoul Girl 2 (Unity Mono)。点击右上角「一键导入 GunSoul Girl 2 专属模组 (21 项功能)」，即可获得玩家无敌 (F1)、无限弹药 (F2)、无后坐力 (F3)、耐力/暴击/无冷却、角色攻速/移速/伤害、五类货币资源修改及关卡结算功能。"
+                        : "检测到当前为 Unity 引擎游戏，尚未绑定专用模组。可点击右上角「一键初始化通用 Unity 控制模组」，自动配置暂停时间 (F8)、全局变速 (0.1x-8.0x) 与主线程资源清理（零 UnityExplorer 依赖）。"
                       : "当前游戏尚未安装本地模组。可展开下方「社区可用模组」一键安装，或切换至「本地导入」导入本地模组包。"}
                   </div>
                 </div>
@@ -3376,6 +3473,235 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              {(() => {
+                const effectiveCtGameKey =
+                  ctTargetGameKey ||
+                  selectedGame?.library_key ||
+                  games[0]?.library_key ||
+                  "__custom__";
+                const isCustomCtTarget = effectiveCtGameKey === "__custom__";
+                return (
+                  <div className="surface-panel stack">
+                    <div className="row" style={{ justifyContent: "space-between" }}>
+                      <div style={{ fontWeight: 600 }}>
+                        3. 导入 Cheat Engine 表格 (.CT -&gt; 声明式模组)
+                      </div>
+                      <span className="tag">fail-closed static converter</span>
+                    </div>
+                    <div className="muted">
+                      仅静态转换模块相对偏移、指针链与纯{" "}
+                      <span className="mono">aobscanmodule + db</span>{" "}
+                      补丁，并生成带 SHA-256 校验的标准声明式模组包；任何{" "}
+                      <span className="mono">{"{$lua}"}</span>、
+                      <span className="mono">alloc()</span> 或远程脚本将被安全拒绝并列出原因。
+                    </div>
+
+                    <div className="row">
+                      <select
+                        className="select-input"
+                        style={{ flex: 1, minWidth: 220 }}
+                        value={effectiveCtGameKey}
+                        onChange={(e) => setCtTargetGameKey(e.target.value)}
+                      >
+                        {games.map((g) => (
+                          <option key={g.library_key} value={g.library_key}>
+                            {g.game.title} (
+                            {g.game.matched_game_id ?? g.game.store_source})
+                          </option>
+                        ))}
+                        <option value="__custom__">
+                          手动指定目标游戏 ID / 名称...
+                        </option>
+                      </select>
+
+                      <select
+                        className="select-input"
+                        value={ctTrust}
+                        onChange={(e) => setCtTrust(e.target.value as TrustTier)}
+                      >
+                        <option value="unverified">
+                          Unverified (需开启设置允许)
+                        </option>
+                        <option value="community_verified">
+                          Community Verified (已自行审计)
+                        </option>
+                        <option value="official">Official</option>
+                      </select>
+                    </div>
+
+                    {isCustomCtTarget && (
+                      <div className="row">
+                        <input
+                          className="text-input mono"
+                          style={{ flex: 1 }}
+                          placeholder="目标游戏 canonical slug (可选，例如 sample-rpg)"
+                          value={ctCustomGameId}
+                          onChange={(e) => setCtCustomGameId(e.target.value)}
+                        />
+                        <input
+                          className="text-input"
+                          style={{ flex: 1 }}
+                          placeholder="目标游戏显示名称 (例如 Sample RPG)"
+                          value={ctCustomGameName}
+                          onChange={(e) => setCtCustomGameName(e.target.value)}
+                        />
+                      </div>
+                    )}
+
+                    <div className="row">
+                      <input
+                        className="text-input mono"
+                        style={{ flex: 2 }}
+                        placeholder="C:\Users\...\Downloads\Game.CT"
+                        value={ctPath}
+                        onChange={(e) => setCtPath(e.target.value)}
+                      />
+                      <input
+                        className="text-input mono"
+                        style={{ flex: 1 }}
+                        placeholder="默认模块名 (可选，例如 Game.exe)"
+                        value={ctDefaultModule}
+                        onChange={(e) => setCtDefaultModule(e.target.value)}
+                      />
+                      <button
+                        className="btn btn-primary"
+                        disabled={!ctPath.trim() || busyAction === "import-ct"}
+                        onClick={() => void handleImportCtFile()}
+                      >
+                        {busyAction === "import-ct" ? (
+                          <RefreshCw
+                            size={14}
+                            strokeWidth={1.5}
+                            className="spin"
+                          />
+                        ) : (
+                          <FileCode2 size={14} strokeWidth={1.5} />
+                        )}
+                        <span>
+                          {busyAction === "import-ct"
+                            ? "静态解析中..."
+                            : "静态转换并导入"}
+                        </span>
+                      </button>
+                    </div>
+
+                    {ctTrust === "unverified" && (
+                      <div className="muted">
+                        提示：Default-Deny 安全策略默认阻止 Unverified
+                        模组授权；若需在本地调试未认证表格，请前往「设置与安全」开启允许未认证来源，或自行审计后选择{" "}
+                        <span className="mono">Community Verified</span>。
+                      </div>
+                    )}
+
+                    {ctReport && (
+                      <div
+                        className="stack"
+                        style={{
+                          paddingTop: 10,
+                          borderTop: "1px solid var(--border)",
+                        }}
+                      >
+                        <div
+                          className="row"
+                          style={{ justifyContent: "space-between" }}
+                        >
+                          <div className="row" style={{ gap: 6 }}>
+                            {ctReport.imported ? (
+                              <Check
+                                size={15}
+                                strokeWidth={1.5}
+                                style={{ color: "var(--ok)" }}
+                              />
+                            ) : (
+                              <ShieldAlert
+                                size={15}
+                                strokeWidth={1.5}
+                                style={{ color: "var(--warn)" }}
+                              />
+                            )}
+                            <span style={{ fontWeight: 500 }}>
+                              {ctReport.message}
+                            </span>
+                          </div>
+                          {ctReport.imported && (
+                            <button
+                              className="btn btn-outline btn-sm"
+                              onClick={() => {
+                                const target = games.find(
+                                  (g) =>
+                                    g.game.matched_game_id === ctReport.game_id,
+                                );
+                                if (target) {
+                                  void openGame(target, false).then(() => {
+                                    setSelectedTrainerId(ctReport.trainer_id);
+                                    setTab("workbench");
+                                  });
+                                } else {
+                                  setTab("workbench");
+                                }
+                              }}
+                            >
+                              前往工作台查看
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="muted mono">
+                          trainer_id={ctReport.trainer_id} · game_id=
+                          {ctReport.game_id}
+                          {ctReport.modules.length > 0
+                            ? ` · modules=${ctReport.modules.join(", ")}`
+                            : ""}
+                        </div>
+
+                        {ctReport.converted_features.length > 0 && (
+                          <div className="stack" style={{ gap: 4 }}>
+                            <div className="secondary" style={{ fontWeight: 500 }}>
+                              已转换声明式功能 ({ctReport.converted_features.length})
+                            </div>
+                            <div className="row">
+                              {ctReport.converted_features.map((fid) => (
+                                <span key={fid} className="tag official">
+                                  {fid}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {ctReport.skipped_entries.length > 0 && (
+                          <div className="stack" style={{ gap: 4 }}>
+                            <div className="secondary" style={{ fontWeight: 500 }}>
+                              已安全拦截/跳过条目 ({ctReport.skipped_entries.length})
+                            </div>
+                            {ctReport.skipped_entries.map((entry, idx) => (
+                              <div key={idx} className="flat-row">
+                                <div style={{ minWidth: 0 }}>
+                                  <div className="row">
+                                    <span style={{ fontWeight: 500 }}>
+                                      {entry.description || "(未命名条目)"}
+                                    </span>
+                                    <span className="tag unverified">
+                                      {entry.variable_type}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="muted mono"
+                                    style={{ marginTop: 2 }}
+                                  >
+                                    {entry.reason}
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}

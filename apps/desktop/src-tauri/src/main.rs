@@ -451,4 +451,228 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn tauri_ct_import_and_gun_soul_girl_2_preset_ipc_flow() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "nekod_tauri_ct_gsg2_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        let data_dir = root.join("data");
+        let ct_game_dir = root.join("CustomGames").join("CtSample");
+        fs::create_dir_all(&ct_game_dir).unwrap();
+        fs::write(ct_game_dir.join("CtSample.exe"), b"MZ").unwrap();
+
+        let core = NekodAppService::open_in_dir(
+            &data_dir,
+            Arc::new(CompositeRuntimeRouter::with_default_providers()),
+        )
+        .unwrap();
+
+        let app = mock_builder()
+            .manage(AppState::with_data_dir(core, data_dir))
+            .invoke_handler(desktop_invoke_handler())
+            .build(tauri::generate_context!())
+            .expect("build mock Tauri app");
+
+        let win_cfg = app.config().app.windows[0].clone();
+        let webview = tauri::WebviewWindowBuilder::from_config(&app, &win_cfg)
+            .expect("valid window config")
+            .build()
+            .expect("build main webview window");
+
+        // 1. Mixed convertible + unsafe Lua .CT import succeeds safely
+        let mixed_ct_path = root.join("CtSample.CT");
+        let mixed_ct_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<CheatTable CheatEngineTableVersion="45">
+  <CheatEntries>
+    <CheatEntry>
+      <ID>0</ID>
+      <Description>"Player Gold"</Description>
+      <VariableType>4 Bytes</VariableType>
+      <Address>"CtSample.exe"+0012ABCD</Address>
+      <Offsets>
+        <Offset>10</Offset>
+        <Offset>28</Offset>
+      </Offsets>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>1</ID>
+      <Description>"Infinite Health"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+aobscanmodule(HEALTH_SUB,CtSample.exe,29 73 10 8B 43 10)
+HEALTH_SUB:
+  db 90 90 90
+[DISABLE]
+HEALTH_SUB:
+  db 29 73 10
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>2</ID>
+      <Description>"Unsafe Lua Ad Shell"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>{$lua}
+[ENABLE]
+shellExecute("https://modengine.net")
+[DISABLE]
+</AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+</CheatTable>"#;
+        fs::write(&mixed_ct_path, mixed_ct_xml).unwrap();
+
+        let ct_report = invoke_json(
+            &webview,
+            "import_ct_file",
+            serde_json::json!({
+                "ctPath": mixed_ct_path.to_string_lossy(),
+                "gameId": "ct-sample",
+                "gameName": "CT Sample",
+                "defaultModule": "CtSample.exe",
+                "installDir": ct_game_dir.to_string_lossy(),
+                "storeSource": "custom_path",
+                "storeAppId": null,
+                "storeBuildId": null,
+                "trustTier": "community_verified"
+            }),
+        )
+        .expect("import_ct_file mixed");
+        assert_eq!(ct_report["imported"], true);
+        assert_eq!(ct_report["game_id"], "ct-sample");
+        assert_eq!(ct_report["converted_features"].as_array().unwrap().len(), 2);
+        assert_eq!(ct_report["skipped_entries"].as_array().unwrap().len(), 1);
+        assert!(
+            ct_report["skipped_entries"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("{$lua}")
+        );
+
+        let ct_trainers = invoke_json(
+            &webview,
+            "list_trainers_for_game",
+            serde_json::json!({
+                "gameId": "ct-sample",
+                "detectedBuildId": null
+            }),
+        )
+        .expect("list ct-sample trainers");
+        assert_eq!(ct_trainers.as_array().unwrap().len(), 1);
+        assert_eq!(
+            ct_trainers[0]["permission_state"]["status"],
+            "requires_confirmation"
+        );
+
+        // 2. Lua-only fake ModEngine .CT reports zero converted features with clear reasons
+        let lua_ct_path = root.join("G.S.G.2 v1.01a (E.A).CT");
+        let lua_ct_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<CheatTable CheatEngineTableVersion="45">
+  <CheatEntries>
+    <CheatEntry>
+      <ID>1</ID>
+      <Description>"Download ModEngine"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>{$lua}
+[ENABLE]
+shellExecute("https://modengine.net")
+[DISABLE]
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>2</ID>
+      <Description>"Get more trainers"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>{$lua}
+[ENABLE]
+shellExecute("https://modengine.net")
+[DISABLE]
+</AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+</CheatTable>"#;
+        fs::write(&lua_ct_path, lua_ct_xml).unwrap();
+
+        let rejected_report = invoke_json(
+            &webview,
+            "import_ct_file",
+            serde_json::json!({
+                "ctPath": lua_ct_path.to_string_lossy(),
+                "gameId": null,
+                "gameName": "GunSoul Girl 2",
+                "defaultModule": "GunSoulGirl 2.exe",
+                "installDir": null,
+                "storeSource": "steam",
+                "storeAppId": "1948700",
+                "storeBuildId": "13294226",
+                "trustTier": "unverified"
+            }),
+        )
+        .expect("import_ct_file lua-only returns structured diagnostics");
+        assert_eq!(rejected_report["imported"], false);
+        assert!(
+            rejected_report["converted_features"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            rejected_report["skipped_entries"].as_array().unwrap().len(),
+            2
+        );
+        assert!(
+            rejected_report["skipped_entries"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("{$lua}")
+        );
+
+        // 3. Curated GunSoul Girl 2 (Steam 1948700, Unity Mono) 1-click setup returns 21-feature pack
+        let gsg2_dir = root.join("GunSoulGirl 2");
+        fs::create_dir_all(gsg2_dir.join("GunSoulGirl 2_Data").join("Managed")).unwrap();
+        fs::create_dir_all(gsg2_dir.join("MonoBleedingEdge")).unwrap();
+        fs::write(gsg2_dir.join("UnityPlayer.dll"), b"MZ").unwrap();
+        fs::write(gsg2_dir.join("GunSoulGirl 2.exe"), b"MZ").unwrap();
+
+        let gsg2_setup = invoke_json(
+            &webview,
+            "quick_setup_unity_starter",
+            serde_json::json!({
+                "title": "GunSoul Girl 2",
+                "storeSource": "steam",
+                "storeAppId": "1948700",
+                "storeBuildId": "13294226",
+                "installDir": gsg2_dir.to_string_lossy()
+            }),
+        )
+        .expect("quick_setup_unity_starter gsg2 preset");
+        assert_eq!(gsg2_setup["game_id"], "gun-soul-girl-2");
+        assert_eq!(gsg2_setup["trainer_id"], "org.nekod.gun-soul-girl-2");
+        assert_eq!(gsg2_setup["engine"], "unity_mono");
+
+        let gsg2_trainers = invoke_json(
+            &webview,
+            "list_trainers_for_game",
+            serde_json::json!({
+                "gameId": "gun-soul-girl-2",
+                "detectedBuildId": "13294226"
+            }),
+        )
+        .expect("list gsg2 trainers");
+        let gsg2_trainer = &gsg2_trainers.as_array().unwrap()[0];
+        assert_eq!(gsg2_trainer["trainer_id"], "org.nekod.gun-soul-girl-2");
+        assert_eq!(gsg2_trainer["features"].as_array().unwrap().len(), 21);
+        assert_eq!(
+            gsg2_trainer["permission_state"]["status"],
+            "requires_confirmation"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

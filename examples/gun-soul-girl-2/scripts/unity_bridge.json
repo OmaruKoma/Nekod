@@ -1,0 +1,155 @@
+{
+  "schema_version": "1.0.0",
+  "protocol": "nekod_json_line_v1",
+  "flavor": "mono",
+  "loader": "bepinex_mono",
+  "host": "127.0.0.1",
+  "port": 19540,
+  "auto_discover_by_pid": true,
+  "features": [
+    {
+      "kind": "toggle_field",
+      "feature_id": "god-mode",
+      "class_name": "Invector.vCharacterController.vThirdPersonController",
+      "field_name": "isImmortal",
+      "enabled_value": true,
+      "disabled_value": false
+    },
+    {
+      "kind": "toggle_field",
+      "feature_id": "infinite-ammo",
+      "class_name": "Invector.vShooter.vShooterManager",
+      "field_name": "AllAmmoInfinity",
+      "enabled_value": true,
+      "disabled_value": false
+    },
+    {
+      "kind": "toggle_field",
+      "feature_id": "no-recoil",
+      "class_name": "Invector.vShooter.vShooterManager",
+      "field_name": "applyRecoilToCamera",
+      "enabled_value": false,
+      "disabled_value": true
+    },
+    {
+      "kind": "toggle_field",
+      "feature_id": "instant-stamina",
+      "class_name": "Invector.vCharacterController.vThirdPersonController",
+      "field_name": "staminaRecovery",
+      "enabled_value": 999.0,
+      "disabled_value": 1.2
+    },
+    {
+      "kind": "toggle_field",
+      "feature_id": "zero-sprint-stamina",
+      "class_name": "Invector.vCharacterController.vThirdPersonController",
+      "field_name": "sprintStamina",
+      "enabled_value": 0.0,
+      "disabled_value": 30.0
+    },
+    {
+      "kind": "toggle_field",
+      "feature_id": "guaranteed-crit",
+      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+      "field_name": "CriticalRate",
+      "enabled_value": 100.0,
+      "disabled_value": 10.0
+    },
+    {
+      "kind": "toggle_field",
+      "feature_id": "zero-cooldown",
+      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+      "field_name": "CoolDownReduction",
+      "enabled_value": 1.0,
+      "disabled_value": 0.0
+    },
+    {
+      "kind": "toggle_field",
+      "feature_id": "damage-reduction-max",
+      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+      "field_name": "DamageReduction",
+      "enabled_value": 1.0,
+      "disabled_value": 0.0
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "player-damage",
+      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+      "field_name": "Damage"
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "attack-speed",
+      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+      "field_name": "AtkSpd"
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "move-speed",
+      "class_name": "GunSoulGirl2.GS2_CharacterControllerStat",
+      "field_name": "MoveSpd"
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "health-regen",
+      "class_name": "Invector.vCharacterController.vThirdPersonController",
+      "field_name": "healthRecovery"
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "currency-scrap",
+      "class_name": "GunSoulGirl2.GS2Inventory",
+      "field_name": "废料"
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "currency-energy",
+      "class_name": "GunSoulGirl2.GS2Inventory",
+      "field_name": "能源"
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "currency-star-ore",
+      "class_name": "GunSoulGirl2.GS2Inventory",
+      "field_name": "星矿"
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "currency-titanium",
+      "class_name": "GunSoulGirl2.GS2Inventory",
+      "field_name": "钛金"
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "currency-primogem",
+      "class_name": "GunSoulGirl2.GS2Inventory",
+      "field_name": "原石"
+    },
+    {
+      "kind": "invoke_method",
+      "feature_id": "refresh-currency-ui",
+      "class_name": "GunSoulGirl2.BagData",
+      "method_name": "UpdateMoney"
+    },
+    {
+      "kind": "invoke_method",
+      "feature_id": "instant-stage-clear",
+      "class_name": "GunSoulGirl2.GS2_GameController",
+      "method_name": "MissionSuccess"
+    },
+    {
+      "kind": "toggle_field",
+      "feature_id": "time-pause",
+      "class_name": "UnityEngine.Time",
+      "field_name": "timeScale",
+      "enabled_value": 0.0,
+      "disabled_value": 1.0
+    },
+    {
+      "kind": "set_field",
+      "feature_id": "game-speed",
+      "class_name": "UnityEngine.Time",
+      "field_name": "timeScale"
+    }
+  ]
+}

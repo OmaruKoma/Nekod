@@ -4,6 +4,7 @@ import type {
   CommunityTrainerView,
   CompanionBridgeCatalogEntry,
   CompatibilityRecord,
+  CtImportUiReport,
   CustomGamePathRecord,
   DiagnosticEvent,
   FeatureCommand,
@@ -718,6 +719,52 @@ export function createBrowserPreviewApi() {
         game_id: gid,
         trainer_id: `org.nekod.unity-starter.${gid}`,
         engine: "unity_il2cpp",
+      };
+    },
+    importCtFile: async (params: {
+      ctPath: string;
+      gameId: string | null;
+      gameName: string;
+      defaultModule: string | null;
+      installDir: string | null;
+      storeSource: string | null;
+      storeAppId: string | null;
+      storeBuildId: string | null;
+      trustTier: TrustTier;
+    }): Promise<CtImportUiReport> => {
+      const gid =
+        params.gameId ??
+        (params.gameName.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "preview-game");
+      const lower = params.ctPath.toLowerCase();
+      if (lower.includes("gsg") || lower.includes("modengine") || lower.includes("lua")) {
+        return {
+          imported: false,
+          trainer_id: `local.ct.${gid}.preview`,
+          game_id: gid,
+          package_dir: null,
+          converted_features: [],
+          skipped_entries: [
+            {
+              description: "Download ModEngine",
+              variable_type: "Auto Assembler Script",
+              reason:
+                "script contains '{$lua}', which requires runtime execution rather than static declarative_patch_v1",
+            },
+          ],
+          modules: [],
+          message: "未找到可安全静态转换的声明式修改项（已安全跳过 1 条 Lua 脚本条目）。",
+        };
+      }
+      pushLog("info", "trainer", `Simulated static .CT import from '${params.ctPath}'`);
+      return {
+        imported: true,
+        trainer_id: `local.ct.${gid}.preview`,
+        game_id: gid,
+        package_dir: `preview/imported-ct/local.ct.${gid}.preview`,
+        converted_features: ["player-gold", "infinite-health"],
+        skipped_entries: [],
+        modules: [params.defaultModule ?? "SampleGame.exe"],
+        message: "已静态转换并导入 2 项声明式功能（安全跳过 0 项不安全条目）。",
       };
     },
     syncGlobalHotkeys: async (bindings: GlobalHotkeyBinding[]): Promise<number> => {

@@ -301,6 +301,23 @@ export interface LoaderProgressEvent {
   message: string;
 }
 
+export interface SkippedCtEntry {
+  description: string;
+  variable_type: string;
+  reason: string;
+}
+
+export interface CtImportUiReport {
+  imported: boolean;
+  trainer_id: string;
+  game_id: string;
+  package_dir: string | null;
+  converted_features: string[];
+  skipped_entries: SkippedCtEntry[];
+  modules: string[];
+  message: string;
+}
+
 const tauriApi = {
   rescanGames: () => invoke<LibraryGameView[]>("rescan_games"),
   listLibraryGames: () => invoke<LibraryGameView[]>("list_library_games"),
@@ -444,6 +461,17 @@ const tauriApi = {
       storeBuildId,
       installDir,
     }),
+  importCtFile: (params: {
+    ctPath: string;
+    gameId: string | null;
+    gameName: string;
+    defaultModule: string | null;
+    installDir: string | null;
+    storeSource: string | null;
+    storeAppId: string | null;
+    storeBuildId: string | null;
+    trustTier: TrustTier;
+  }) => invoke<CtImportUiReport>("import_ct_file", params),
   syncGlobalHotkeys: (bindings: GlobalHotkeyBinding[]) =>
     invoke<number>("sync_global_hotkeys", { bindings }),
   getGameArtwork: (
