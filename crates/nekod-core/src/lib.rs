@@ -766,6 +766,63 @@ impl NekodAppService {
         Ok(self.runtime.discover_matching_processes(&names)?)
     }
 
+    /// Lists all registered `GameManifest` definitions in the local catalog.
+    pub fn list_registered_game_manifests(&self) -> Result<Vec<GameManifest>, CoreError> {
+        Ok(self.trainers.list_game_manifests()?)
+    }
+
+    /// Collects primary top-level game executable names inside `install_dir`, skipping helper
+    /// crash handlers and installers.
+    pub fn collect_candidate_exes_in_dir(install_dir: &str) -> Vec<String> {
+        let dir = Path::new(install_dir);
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut names = BTreeSet::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let lower = file_name.to_ascii_lowercase();
+            if !lower.ends_with(".exe") {
+                continue;
+            }
+            if matches!(
+                lower.as_str(),
+                "unitycrashhandler64.exe"
+                    | "unitycrashhandler32.exe"
+                    | "crashreportclient.exe"
+                    | "unins000.exe"
+                    | "ueprereqsetup_x64.exe"
+                    | "vc_redist.x64.exe"
+                    | "dxsetup.exe"
+            ) || lower.contains("crashhandler")
+                || lower.starts_with("unins")
+            {
+                continue;
+            }
+            names.insert(file_name.to_owned());
+        }
+        names.into_iter().collect()
+    }
+
+    /// Discovers running processes matching top-level `.exe` files in `install_dir`
+    /// (works even before a `GameManifest` has been registered for the game).
+    pub fn discover_running_processes_in_dir(
+        &self,
+        install_dir: &str,
+    ) -> Result<Vec<ProcessIdentity>, CoreError> {
+        let names = Self::collect_candidate_exes_in_dir(install_dir);
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self.runtime.discover_matching_processes(&names)?)
+    }
+
     /// Verifies policy, manifest/artifact integrity, and player capability grants, then starts
     /// a controlled trainer runtime session bound to `target_process`.
     pub fn start_trainer_session(
@@ -1577,5 +1634,19 @@ mod tests {
         assert!(views_revoked[0].revoked);
 
         let _ = fs::remove_dir_all(pkgs_dir);
+    }
+
+    #[test]
+    fn collects_primary_exes_and_filters_crash_handlers_in_dir() {
+        let dir = temp_dir("collect_exes");
+        fs::write(dir.join("Sugar Lust - Hentai Harem.exe"), b"MZ").unwrap();
+        fs::write(dir.join("UnityCrashHandler64.exe"), b"MZ").unwrap();
+        fs::write(dir.join("unins000.exe"), b"MZ").unwrap();
+        fs::write(dir.join("UnityPlayer.dll"), b"MZ").unwrap();
+
+        let exes = NekodAppService::collect_candidate_exes_in_dir(dir.to_string_lossy().as_ref());
+        assert_eq!(exes, vec!["Sugar Lust - Hentai Harem.exe".to_owned()]);
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

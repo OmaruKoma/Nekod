@@ -25,7 +25,9 @@ nekod-trainer-manager.workspace = true
 nekod-trainer-runtime.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tauri = { version = "2.11", features = [] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 serde_json.workspace = true

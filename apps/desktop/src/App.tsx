@@ -381,10 +381,11 @@ export default function App() {
       const running = new Set<string>();
       await Promise.all(
         games.map(async (g) => {
-          const gid = g.game.matched_game_id;
-          if (!gid) return;
           try {
-            const procs = await nekodApi.discoverRunningProcesses(gid);
+            const procs = await nekodApi.discoverRunningProcesses(
+              g.game.matched_game_id,
+              g.game.install_dir,
+            );
             if (procs.length > 0) {
               running.add(g.library_key);
             }
@@ -434,9 +435,12 @@ export default function App() {
     }
   }
 
-  async function scanRunningProcesses(gameId: string): Promise<ProcessIdentity[]> {
+  async function scanRunningProcesses(
+    gameId: string | null,
+    installDir?: string | null,
+  ): Promise<ProcessIdentity[]> {
     try {
-      const procs = await nekodApi.discoverRunningProcesses(gameId);
+      const procs = await nekodApi.discoverRunningProcesses(gameId, installDir);
       setRunningProcs(procs);
       setSelectedPid((prev) =>
         procs.some((p) => p.pid === prev) ? prev : (procs[0]?.pid ?? null),
@@ -503,7 +507,7 @@ export default function App() {
       try {
         const [list, procs, community, matrix] = await Promise.all([
           nekodApi.listTrainersForGame(gameId, entry.game.store_build_id),
-          nekodApi.discoverRunningProcesses(gameId),
+          nekodApi.discoverRunningProcesses(gameId, entry.game.install_dir),
           nekodApi.listCommunityTrainersForGame(gameId),
           nekodApi.queryCompatibilityMatrix(gameId, null, null),
         ]);
@@ -548,6 +552,16 @@ export default function App() {
       setSelectedTrainerId(null);
       setCommunityTrainers([]);
       setCompatRecords([]);
+      try {
+        const procs = await nekodApi.discoverRunningProcesses(
+          null,
+          entry.game.install_dir,
+        );
+        setRunningProcs(procs);
+        setSelectedPid(procs[0]?.pid ?? null);
+      } catch {
+        // Non-fatal
+      }
     }
   }
 
@@ -636,7 +650,10 @@ export default function App() {
 
     let procs = runningProcs;
     if (procs.length === 0) {
-      procs = await scanRunningProcesses(selectedGame.game.matched_game_id);
+      procs = await scanRunningProcesses(
+        selectedGame.game.matched_game_id,
+        selectedGame.game.install_dir,
+      );
     }
     await startSessionInternal(trainer, procs, false);
   }
@@ -657,11 +674,16 @@ export default function App() {
         selectedGame.game.install_dir,
         selectedGame.game.executable_path,
       );
+      if (!selectedTrainer) {
+        setWaitingLaunchGameKey(null);
+        if (soundEnabled) soundFx.toggleOn();
+        const note = `已启动游戏 (${launched.target})。请先在下方点击「一键初始化通用 Unity 控制模组」（或导入模组）后再注入。`;
+        setStatusMsg(note);
+        pushHudToast(note, "info");
+        return;
+      }
       setWaitingLaunchGameKey(selectedGame.library_key);
-      if (
-        selectedTrainer &&
-        selectedTrainer.permission_state.status === "requires_confirmation"
-      ) {
+      if (selectedTrainer.permission_state.status === "requires_confirmation") {
         setAwaitingPermInject(selectedTrainer.trainer_id);
       }
       if (soundEnabled) soundFx.toggleOn();
@@ -717,6 +739,7 @@ export default function App() {
       }
       const procs = await scanRunningProcesses(
         snap.selectedGame.game.matched_game_id,
+        snap.selectedGame.game.install_dir,
       );
       if (procs.length > 0) {
         await startSessionInternal(trainer, procs, true);
@@ -756,7 +779,10 @@ export default function App() {
       if (andInject && selectedGame?.game.matched_game_id) {
         let procs = runningProcs;
         if (procs.length === 0) {
-          procs = await scanRunningProcesses(selectedGame.game.matched_game_id);
+          procs = await scanRunningProcesses(
+            selectedGame.game.matched_game_id,
+            selectedGame.game.install_dir,
+          );
         }
         await startSessionInternal(updatedTrainer, procs, false);
       } else {
@@ -884,6 +910,104 @@ export default function App() {
       const msg = `已解除伴生桥接：移除 ${summary.removed_count} 个文件，还原 ${summary.restored_originals} 个原文件（冲突: ${summary.conflicts}）`;
       setStatusMsg(msg);
       pushHudToast(msg, "info");
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleInstallBepInExLoader() {
+    if (!selectedGame) return;
+    try {
+      setBusyAction("install-loader");
+      setError(null);
+      const next = await nekodApi.installBepInExLoader(
+        selectedGame.library_key,
+        selectedGame.game.install_dir,
+      );
+      setBridgeStatus(next);
+      setBridgeStatusByGame((prev) => ({
+        ...prev,
+        [selectedGame.library_key]: next,
+      }));
+      try {
+        setGameEnv(
+          await nekodApi.inspectGameEnvironment(selectedGame.game.install_dir),
+        );
+      } catch {
+        // Non-fatal
+      }
+      setLogs(await nekodApi.getDiagnosticLogs());
+      if (soundEnabled) soundFx.injectSuccess();
+      const msg = `已安装 ${next.loader_display_name ?? "BepInEx"} 引导加载器。若游戏正在运行，请重启一次游戏即可自动加载桥接插件。`;
+      setStatusMsg(msg);
+      pushHudToast("BepInEx 加载器安装完成（重启游戏后生效）", "ok");
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleUndeployBepInExLoader() {
+    if (!selectedGame) return;
+    try {
+      setBusyAction("undeploy-loader");
+      setError(null);
+      const summary = await nekodApi.undeployBepInExLoader(
+        selectedGame.library_key,
+        selectedGame.game.install_dir,
+      );
+      await refreshBridgeStatus(selectedGame);
+      try {
+        setGameEnv(
+          await nekodApi.inspectGameEnvironment(selectedGame.game.install_dir),
+        );
+      } catch {
+        // Non-fatal
+      }
+      setLogs(await nekodApi.getDiagnosticLogs());
+      if (soundEnabled) soundFx.uninject();
+      const msg = `已卸载 BepInEx 加载器：移除 ${summary.removed_count} 个文件，还原 ${summary.restored_originals} 个原文件（冲突: ${summary.conflicts}）`;
+      setStatusMsg(msg);
+      pushHudToast(msg, "info");
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleQuickSetupUnityStarter() {
+    if (!selectedGame) return;
+    try {
+      setBusyAction("quick-setup");
+      setError(null);
+      const res = await nekodApi.quickSetupUnityStarter(
+        selectedGame.game.title,
+        selectedGame.game.store_source,
+        selectedGame.game.store_app_id,
+        selectedGame.game.store_build_id,
+        selectedGame.game.install_dir,
+      );
+      const lib = await nekodApi.rescanGames();
+      setGames(lib);
+      const refreshed =
+        lib.find((g) => g.library_key === selectedGame.library_key) ??
+        lib.find((g) => g.game.matched_game_id === res.game_id);
+      if (refreshed) {
+        await openGame(refreshed, false);
+      }
+      setSelectedTrainerId(res.trainer_id);
+      setAwaitingPermInject(res.trainer_id);
+      if (soundEnabled) soundFx.injectSuccess();
+      const msg = `已初始化通用 Unity 控制模组 (${res.trainer_id})！请先确认运行权限，然后点击「一键注入 Mod」。`;
+      setStatusMsg(msg);
+      pushHudToast("通用 Unity 控制模组初始化完成", "ok");
     } catch (e) {
       if (soundEnabled) soundFx.error();
       setError(String(e));
@@ -2006,42 +2130,39 @@ export default function App() {
               {/* Compact Process Bar */}
               <div className="game-hero-bar">
                 <div className="proc-bar-left">
-                  {selectedGame.game.matched_game_id && (
-                    <>
-                      <Cpu size={14} strokeWidth={1.5} aria-hidden="true" />
-                      {runningProcs.length > 0 ? (
-                        <select
-                          className="select-input"
-                          value={selectedPid ?? ""}
-                          onChange={(e) => setSelectedPid(Number(e.target.value))}
-                          disabled={activeSessionId !== null}
-                        >
-                          {runningProcs.map((p) => (
-                            <option key={p.pid} value={p.pid}>
-                              {p.process_name} (PID {p.pid}, {p.architecture})
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className="muted">
-                          未检测到进程（可点击「启动游戏并注入」或手动启动游戏）
-                        </span>
-                      )}
-                      <button
-                        className="icon-btn"
-                        onClick={() =>
-                          void scanRunningProcesses(
-                            selectedGame.game.matched_game_id!,
-                          )
-                        }
-                        disabled={activeSessionId !== null}
-                        title="扫描运行中的游戏进程"
-                        aria-label="扫描运行中的游戏进程"
-                      >
-                        <RefreshCw size={14} strokeWidth={1.5} />
-                      </button>
-                    </>
+                  <Cpu size={14} strokeWidth={1.5} aria-hidden="true" />
+                  {runningProcs.length > 0 ? (
+                    <select
+                      className="select-input"
+                      value={selectedPid ?? ""}
+                      onChange={(e) => setSelectedPid(Number(e.target.value))}
+                      disabled={activeSessionId !== null}
+                    >
+                      {runningProcs.map((p) => (
+                        <option key={p.pid} value={p.pid}>
+                          {p.process_name} (PID {p.pid}, {p.architecture})
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="muted">
+                      未检测到进程（可点击「启动游戏并注入」或手动启动游戏）
+                    </span>
                   )}
+                  <button
+                    className="icon-btn"
+                    onClick={() =>
+                      void scanRunningProcesses(
+                        selectedGame.game.matched_game_id,
+                        selectedGame.game.install_dir,
+                      )
+                    }
+                    disabled={activeSessionId !== null}
+                    title="扫描运行中的游戏进程"
+                    aria-label="扫描运行中的游戏进程"
+                  >
+                    <RefreshCw size={14} strokeWidth={1.5} />
+                  </button>
                 </div>
 
                 <div className="proc-status-inline">
@@ -2100,13 +2221,76 @@ export default function App() {
 
             {/* ---------- BOTTOM-RIGHT: Mod Workspace ---------- */}
             <section className="mod-workspace">
+              {bridgeStatus &&
+                !bridgeStatus.loader_installed &&
+                bridgeStatus.loader_warning &&
+                !hasAntiCheatMarkers && (
+                  <div
+                    className="permission-banner stack"
+                    style={{ marginTop: 14, marginBottom: 4 }}
+                  >
+                    <div
+                      className="row"
+                      style={{ justifyContent: "space-between" }}
+                    >
+                      <div className="row" style={{ gap: 6 }}>
+                        <AlertTriangle
+                          size={15}
+                          strokeWidth={1.5}
+                          style={{ color: "var(--warn)" }}
+                        />
+                        <strong>缺少 Unity 引导加载器</strong>
+                      </div>
+                      <button
+                        className="btn btn-outline btn-sm"
+                        disabled={busyAction === "install-loader"}
+                        onClick={() => void handleInstallBepInExLoader()}
+                      >
+                        <Download size={14} strokeWidth={1.5} />
+                        <span>
+                          {busyAction === "install-loader"
+                            ? "下载并校验安装中..."
+                            : `安装 ${bridgeStatus.loader_display_name ?? "BepInEx"}`}
+                        </span>
+                      </button>
+                    </div>
+                    <div className="muted">{bridgeStatus.loader_warning}</div>
+                  </div>
+                )}
+
               {trainers.length === 0 ? (
                 <div className="section-flat" style={{ paddingTop: 18 }}>
-                  <div className="feature-heading">
-                    <h3>模组功能</h3>
+                  <div
+                    className="row"
+                    style={{ justifyContent: "space-between" }}
+                  >
+                    <div className="feature-heading">
+                      <h3>模组功能</h3>
+                    </div>
+                    {gameEnv &&
+                      (gameEnv.engine === "unity_mono" ||
+                        gameEnv.engine === "unity_il2cpp") &&
+                      !hasAntiCheatMarkers && (
+                        <button
+                          className="btn btn-primary btn-sm"
+                          disabled={busyAction === "quick-setup"}
+                          onClick={() => void handleQuickSetupUnityStarter()}
+                        >
+                          <Zap size={14} strokeWidth={1.5} />
+                          <span>
+                            {busyAction === "quick-setup"
+                              ? "初始化中..."
+                              : "一键初始化通用 Unity 控制模组"}
+                          </span>
+                        </button>
+                      )}
                   </div>
                   <div className="muted">
-                    当前游戏尚未安装本地模组。可展开下方「社区可用模组」一键安装，或切换至「本地导入」导入本地模组包。
+                    {gameEnv &&
+                    (gameEnv.engine === "unity_mono" ||
+                      gameEnv.engine === "unity_il2cpp")
+                      ? "检测到当前为 Unity 引擎游戏，尚未绑定专用模组。可点击右上角「一键初始化通用 Unity 控制模组」，自动配置暂停时间 (F8)、全局变速 (0.1x-8.0x) 与主线程资源清理（零 UnityExplorer 依赖）。"
+                      : "当前游戏尚未安装本地模组。可展开下方「社区可用模组」一键安装，或切换至「本地导入」导入本地模组包。"}
                   </div>
                 </div>
               ) : (
@@ -2481,6 +2665,70 @@ export default function App() {
                     </span>
                   </summary>
                   <div className="drawer-body">
+                    {bridgeStatus?.loader_display_name && (
+                      <div className="flat-row">
+                        <div>
+                          <div className="row">
+                            <span style={{ fontWeight: 500 }}>
+                              {bridgeStatus.loader_display_name}
+                            </span>
+                            <span
+                              className={`tag ${
+                                bridgeStatus.loader_installed
+                                  ? "official"
+                                  : "unverified"
+                              }`}
+                            >
+                              {bridgeStatus.loader_installed
+                                ? "ready"
+                                : "missing"}
+                            </span>
+                          </div>
+                          <div className="muted" style={{ marginTop: 2 }}>
+                            {bridgeStatus.loader_installed
+                              ? "引导加载器已就绪，重启或运行游戏时将自动加载 NekodUnityBridge。"
+                              : "缺少引导加载器（winhttp.dll / BepInEx/core），可通过 DeploymentLedger 一键安装与无痕卸载。"}
+                          </div>
+                        </div>
+                        <div className="row">
+                          {!bridgeStatus.loader_installed ? (
+                            <button
+                              className="btn btn-outline btn-sm"
+                              disabled={
+                                busyAction === "install-loader" ||
+                                hasAntiCheatMarkers
+                              }
+                              onClick={() => void handleInstallBepInExLoader()}
+                            >
+                              <Download size={14} strokeWidth={1.5} />
+                              <span>
+                                {busyAction === "install-loader"
+                                  ? "安装中..."
+                                  : "安装加载器"}
+                              </span>
+                            </button>
+                          ) : (
+                            bridgeStatus.loader_managed_by_nekod && (
+                              <button
+                                className="btn btn-danger-outline btn-sm"
+                                disabled={busyAction === "undeploy-loader"}
+                                onClick={() =>
+                                  void handleUndeployBepInExLoader()
+                                }
+                              >
+                                <Trash2 size={14} strokeWidth={1.5} />
+                                <span>
+                                  {busyAction === "undeploy-loader"
+                                    ? "卸载中..."
+                                    : "卸载加载器"}
+                                </span>
+                              </button>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     {bridgeStatus?.matched_bridge ? (
                       <div className="flat-row">
                         <div>

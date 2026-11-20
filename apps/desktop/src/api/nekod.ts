@@ -255,6 +255,16 @@ export interface BridgeDeploymentStatus {
   suggested_source_file: string | null;
   suggested_target_relative_path: string | null;
   matched_bridge: CompanionBridgeCatalogEntry | null;
+  loader_installed: boolean;
+  loader_managed_by_nekod: boolean;
+  loader_display_name: string | null;
+  loader_warning: string | null;
+}
+
+export interface QuickSetupResult {
+  game_id: string;
+  trainer_id: string;
+  engine: GameEnvironmentProfile["engine"];
 }
 
 export interface BridgeUndeploySummary {
@@ -318,8 +328,11 @@ const tauriApi = {
     invoke<string>("export_profile_json", { gameId, trainerId }),
   importProfileJson: (rawJson: string) => invoke<GameProfile>("import_profile_json", { rawJson }),
   getDiagnosticLogs: () => invoke<DiagnosticEvent[]>("get_diagnostic_logs"),
-  discoverRunningProcesses: (gameId: string) =>
-    invoke<ProcessIdentity[]>("discover_running_processes", { gameId }),
+  discoverRunningProcesses: (gameId: string | null, installDir?: string | null) =>
+    invoke<ProcessIdentity[]>("discover_running_processes", {
+      gameId,
+      installDir: installDir ?? null,
+    }),
   startTrainerSession: (
     gameId: string,
     trainerId: string,
@@ -398,6 +411,30 @@ const tauriApi = {
   undeployCompanionBridge: (gameKey: string, installDir: string) =>
     invoke<BridgeUndeploySummary>("undeploy_companion_bridge", {
       gameKey,
+      installDir,
+    }),
+  installBepInExLoader: (gameKey: string, installDir: string) =>
+    invoke<BridgeDeploymentStatus>("install_bepinex_loader", {
+      gameKey,
+      installDir,
+    }),
+  undeployBepInExLoader: (gameKey: string, installDir: string) =>
+    invoke<BridgeUndeploySummary>("undeploy_bepinex_loader", {
+      gameKey,
+      installDir,
+    }),
+  quickSetupUnityStarter: (
+    title: string,
+    storeSource: string,
+    storeAppId: string | null,
+    storeBuildId: string | null,
+    installDir: string,
+  ) =>
+    invoke<QuickSetupResult>("quick_setup_unity_starter", {
+      title,
+      storeSource,
+      storeAppId,
+      storeBuildId,
       installDir,
     }),
   syncGlobalHotkeys: (bindings: GlobalHotkeyBinding[]) =>

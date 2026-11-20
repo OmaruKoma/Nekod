@@ -65,7 +65,7 @@ mod tests {
         .unwrap();
 
         let app = mock_builder()
-            .manage(AppState::new(core))
+            .manage(AppState::with_data_dir(core, data_dir.clone()))
             .invoke_handler(desktop_invoke_handler())
             .build(tauri::generate_context!())
             .expect("build mock Tauri app with real context & capabilities");
@@ -345,6 +345,7 @@ mod tests {
         let unity_game_dir = root.join("UnityMonoDemo");
         fs::create_dir_all(unity_game_dir.join("UnityMonoDemo_Data").join("Managed")).unwrap();
         fs::write(unity_game_dir.join("UnityPlayer.dll"), b"MZ").unwrap();
+        fs::write(unity_game_dir.join("UnityMonoDemo.exe"), b"MZ").unwrap();
         let auto_deployed = invoke_json(
             &webview,
             "auto_deploy_companion_bridge",
@@ -356,6 +357,8 @@ mod tests {
         )
         .expect("auto_deploy_companion_bridge");
         assert_eq!(auto_deployed["deployed"], true);
+        assert_eq!(auto_deployed["loader_installed"], false);
+        assert!(auto_deployed["loader_warning"].as_str().is_some());
         assert!(
             unity_game_dir
                 .join("BepInEx")
@@ -373,6 +376,50 @@ mod tests {
         )
         .expect("undeploy auto-deployed bridge");
         assert_eq!(auto_undeploy["removed_count"], 1);
+
+        // Unregistered game process discovery fallback via installDir (should return Vec cleanly without error)
+        let unregistered_procs = invoke_json(
+            &webview,
+            "discover_running_processes",
+            serde_json::json!({
+                "gameId": null,
+                "installDir": unity_game_dir.to_string_lossy()
+            }),
+        )
+        .expect("discover_running_processes by install_dir");
+        assert!(unregistered_procs.is_array());
+
+        // One-click universal Unity starter setup: registers GameManifest + ingests starter Trainer in requires_confirmation state
+        let quick = invoke_json(
+            &webview,
+            "quick_setup_unity_starter",
+            serde_json::json!({
+                "title": "Unity Mono Demo",
+                "storeSource": "custom_path",
+                "storeAppId": null,
+                "storeBuildId": null,
+                "installDir": unity_game_dir.to_string_lossy()
+            }),
+        )
+        .expect("quick_setup_unity_starter");
+        let quick_game_id = quick["game_id"].as_str().unwrap();
+        let quick_trainer_id = quick["trainer_id"].as_str().unwrap();
+        assert_eq!(quick["engine"], "unity_mono");
+        let starter_trainers = invoke_json(
+            &webview,
+            "list_trainers_for_game",
+            serde_json::json!({
+                "gameId": quick_game_id,
+                "detectedBuildId": null
+            }),
+        )
+        .expect("list starter trainers");
+        let starter = &starter_trainers.as_array().unwrap()[0];
+        assert_eq!(starter["trainer_id"], quick_trainer_id);
+        assert_eq!(
+            starter["permission_state"]["status"],
+            "requires_confirmation"
+        );
 
         // Security check: launch_game must reject executables outside install_dir
         let outside_exe = root.join("outside.exe");

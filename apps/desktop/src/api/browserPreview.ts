@@ -16,6 +16,7 @@ import type {
   LibraryGameView,
   PermissionScope,
   ProcessIdentity,
+  QuickSetupResult,
   RegistrySourceState,
   RegistrySyncReport,
   RuntimeDiagnostics,
@@ -309,7 +310,10 @@ export function createBrowserPreviewApi() {
       return parsed;
     },
     getDiagnosticLogs: async (): Promise<DiagnosticEvent[]> => [...logs],
-    discoverRunningProcesses: async (gameId: string): Promise<ProcessIdentity[]> => [
+    discoverRunningProcesses: async (
+      gameId: string | null,
+      _installDir?: string | null,
+    ): Promise<ProcessIdentity[]> => [
       {
         pid: 14820,
         process_name: gameId === "hollow-knight" ? "hollow_knight.exe" : "SampleRPG.exe",
@@ -515,6 +519,10 @@ export function createBrowserPreviewApi() {
         suggested_source_file: matched?.resolved_path ?? null,
         suggested_target_relative_path: matched?.target_relative_path ?? null,
         matched_bridge: matched,
+        loader_installed: true,
+        loader_managed_by_nekod: false,
+        loader_display_name: isHollow ? "BepInEx 5 (Mono)" : null,
+        loader_warning: null,
       };
     },
     listCompanionBridgeCatalog: async (): Promise<CompanionBridgeCatalogEntry[]> => [
@@ -617,6 +625,10 @@ export function createBrowserPreviewApi() {
           sha256: "preview-mono-sha256",
           download_url: null,
         },
+        loader_installed: true,
+        loader_managed_by_nekod: false,
+        loader_display_name: "BepInEx 5 (Mono)",
+        loader_warning: null,
       };
     },
     deployCompanionBridge: async (
@@ -638,6 +650,10 @@ export function createBrowserPreviewApi() {
           : null,
         suggested_target_relative_path: targetRelativePath,
         matched_bridge: null,
+        loader_installed: true,
+        loader_managed_by_nekod: false,
+        loader_display_name: isHollow ? "BepInEx 5 (Mono)" : null,
+        loader_warning: null,
       };
     },
     undeployCompanionBridge: async (
@@ -652,6 +668,55 @@ export function createBrowserPreviewApi() {
         restored_originals: 0,
         conflicts: 0,
         conflict_paths: [],
+      };
+    },
+    installBepInExLoader: async (
+      gameKey: string,
+      installDir: string,
+    ): Promise<BridgeDeploymentStatus> => {
+      const isHollow = installDir.toLowerCase().includes("hollow");
+      const files = deployedBridges.get(gameKey) ?? [];
+      pushLog("info", "deployment", `Installed preview BepInEx loader for ${gameKey}`);
+      return {
+        deployed: files.length > 0,
+        engine: isHollow ? "unity_mono" : "unity_il2cpp",
+        active_files: files,
+        suggested_source_file: null,
+        suggested_target_relative_path: null,
+        matched_bridge: null,
+        loader_installed: true,
+        loader_managed_by_nekod: true,
+        loader_display_name: isHollow
+          ? "BepInEx 5 (Mono)"
+          : "BepInEx 6 (IL2CPP · Unity 6)",
+        loader_warning: null,
+      };
+    },
+    undeployBepInExLoader: async (
+      gameKey: string,
+      _installDir: string,
+    ): Promise<BridgeUndeploySummary> => {
+      pushLog("info", "deployment", `Undeployed preview BepInEx loader for ${gameKey}`);
+      return {
+        removed_count: 1,
+        restored_originals: 0,
+        conflicts: 0,
+        conflict_paths: [],
+      };
+    },
+    quickSetupUnityStarter: async (
+      title: string,
+      _storeSource: string,
+      _storeAppId: string | null,
+      _storeBuildId: string | null,
+      _installDir: string,
+    ): Promise<QuickSetupResult> => {
+      const gid = title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "unity-game";
+      pushLog("info", "trainer", `Initialized universal Unity starter for ${gid}`);
+      return {
+        game_id: gid,
+        trainer_id: `org.nekod.unity-starter.${gid}`,
+        engine: "unity_il2cpp",
       };
     },
     syncGlobalHotkeys: async (bindings: GlobalHotkeyBinding[]): Promise<number> => {

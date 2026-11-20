@@ -5,12 +5,15 @@
 //! HTTPS download — eliminating manual DLL path entry while enforcing `DeploymentLedger` rollback.
 
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nekod_game_detection::GameEngineKind;
 use nekod_trainer_manager::sha256_hex;
+use nekod_trainer_runtime::DeploymentLedger;
 use serde::Serialize;
+use zip::ZipArchive;
 
 #[derive(Debug, Clone)]
 pub struct BridgeSpec {
@@ -296,9 +299,216 @@ pub fn resolve_bridge_bytes_for_engine(
     ))
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct BepInExLoaderSpec {
+    pub display_name: &'static str,
+    pub cache_filename: &'static str,
+    pub download_url: &'static str,
+    pub pinned_sha256: &'static str,
+}
+
+const BEPINEX_MONO_SPEC: BepInExLoaderSpec = BepInExLoaderSpec {
+    display_name: "BepInEx 5 (Mono)",
+    cache_filename: "BepInEx_win_x64_5.4.23.5.zip",
+    download_url: "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_win_x64_5.4.23.5.zip",
+    pinned_sha256: "82f9878551030f54657792c0740d9d51a09500eeae1fba21106b0c441e6732c4",
+};
+
+const BEPINEX_IL2CPP_SPEC: BepInExLoaderSpec = BepInExLoaderSpec {
+    display_name: "BepInEx 6 (IL2CPP · Unity 6)",
+    cache_filename: "BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.793+dbc82f0.zip",
+    download_url: "https://builds.bepinex.dev/projects/bepinex_be/793/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.793%2Bdbc82f0.zip",
+    pinned_sha256: "5b63d7d0e92a2448ccd13b738ff95ff1cc1026c6d718555d4df8e6c824953ac4",
+};
+
+pub fn bepinex_loader_spec_for_engine(
+    engine: GameEngineKind,
+) -> Option<&'static BepInExLoaderSpec> {
+    match engine {
+        GameEngineKind::UnityMono => Some(&BEPINEX_MONO_SPEC),
+        GameEngineKind::UnityIl2cpp => Some(&BEPINEX_IL2CPP_SPEC),
+        _ => None,
+    }
+}
+
+/// Checks whether the appropriate BepInEx doorstop proxy + core runtime is present in `install_dir`.
+/// Returns `(loader_installed, loader_display_name, warning_if_missing)`.
+pub fn inspect_bepinex_loader_readiness(
+    install_dir: &Path,
+    engine: GameEngineKind,
+) -> (bool, Option<String>, Option<String>) {
+    let Some(spec) = bepinex_loader_spec_for_engine(engine) else {
+        return (true, None, None);
+    };
+
+    let has_proxy =
+        install_dir.join("winhttp.dll").is_file() || install_dir.join("version.dll").is_file();
+    let core_dir = install_dir.join("BepInEx").join("core");
+    let has_core = match engine {
+        GameEngineKind::UnityIl2cpp => {
+            core_dir.join("BepInEx.Unity.IL2CPP.dll").is_file()
+                || core_dir.join("BepInEx.IL2CPP.dll").is_file()
+        }
+        GameEngineKind::UnityMono => core_dir.join("BepInEx.dll").is_file(),
+        _ => true,
+    };
+
+    let ready = has_proxy && has_core;
+    let warning = if ready {
+        None
+    } else {
+        let label = match engine {
+            GameEngineKind::UnityIl2cpp => "BepInEx 6 (IL2CPP)",
+            GameEngineKind::UnityMono => "BepInEx 5 (Mono)",
+            _ => "BepInEx",
+        };
+        Some(format!(
+            "缺少 {label} 引导加载器（winhttp.dll / BepInEx/core），Unity 启动时不会加载桥接插件。请先一键安装加载器并重启游戏。"
+        ))
+    };
+
+    (ready, Some(spec.display_name.to_owned()), warning)
+}
+
+/// Validates and normalizes an archive entry path before staging into a game directory.
+pub fn validate_bepinex_archive_entry_path(rel_path: &str) -> Result<String, String> {
+    let normalized = rel_path.replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./");
+    if trimmed.is_empty()
+        || trimmed.contains("..")
+        || trimmed.starts_with('/')
+        || trimmed.contains(':')
+    {
+        return Err(format!("unsafe BepInEx archive entry path '{rel_path}'"));
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let allowed = matches!(
+        lower.as_str(),
+        "winhttp.dll" | "doorstop_config.ini" | ".doorstop_version" | "changelog.txt"
+    ) || lower.starts_with("bepinex/")
+        || lower.starts_with("dotnet/");
+    if !allowed {
+        return Err(format!(
+            "archive entry '{rel_path}' is outside the BepInEx allowlisted file tree"
+        ));
+    }
+
+    if [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        return Err(format!(
+            "disallowed executable extension in BepInEx archive entry '{rel_path}'"
+        ));
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+/// Extracts a verified BepInEx zip archive into `ledger` under `nekod.loader.bepinex`.
+pub fn extract_bepinex_zip_to_ledger(
+    zip_bytes: &[u8],
+    game_key: &str,
+    ledger: &mut DeploymentLedger,
+) -> Result<usize, String> {
+    let mut archive = ZipArchive::new(Cursor::new(zip_bytes))
+        .map_err(|e| format!("failed to parse BepInEx zip archive: {e}"))?;
+    let mut staged_count = 0usize;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("failed reading archive entry #{i}: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let raw_name = entry.name().to_owned();
+        let clean_rel = validate_bepinex_archive_entry_path(&raw_name)?;
+
+        let mut buf = Vec::new();
+        entry
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("failed reading archive entry '{clean_rel}': {e}"))?;
+        let sha = sha256_hex(&buf);
+        ledger
+            .stage_file(game_key, "nekod.loader.bepinex", &clean_rel, &buf, &sha)
+            .map_err(|e| e.to_string())?;
+        staged_count += 1;
+    }
+
+    if staged_count == 0 {
+        return Err("BepInEx archive contained no stageable files".to_owned());
+    }
+    Ok(staged_count)
+}
+
+/// Loads a cached SHA-256-verified BepInEx zip or downloads and verifies it over HTTPS.
+pub fn download_or_load_cached_bepinex_zip(
+    data_dir: &Path,
+    engine: GameEngineKind,
+) -> Result<Vec<u8>, String> {
+    let spec = bepinex_loader_spec_for_engine(engine).ok_or_else(|| {
+        format!("no BepInEx loader package applies to detected engine '{engine:?}'")
+    })?;
+
+    if !spec.download_url.starts_with("https://") {
+        return Err(format!(
+            "refusing non-HTTPS loader URL '{}'",
+            spec.download_url
+        ));
+    }
+
+    let cache_file = data_dir.join("loader-cache").join(spec.cache_filename);
+    if cache_file.is_file()
+        && let Ok(cached_bytes) = fs::read(&cache_file)
+    {
+        let cached_sha = sha256_hex(&cached_bytes);
+        if cached_sha.eq_ignore_ascii_case(spec.pinned_sha256) {
+            return Ok(cached_bytes);
+        }
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client for BepInEx download: {e}"))?;
+    let resp = client
+        .get(spec.download_url)
+        .send()
+        .map_err(|e| format!("failed downloading {}: {e}", spec.display_name))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "BepInEx download failed with HTTP {} from {}",
+            resp.status(),
+            spec.download_url
+        ));
+    }
+    let bytes = resp
+        .bytes()
+        .map_err(|e| format!("failed reading BepInEx download body: {e}"))?
+        .to_vec();
+
+    let actual_sha = sha256_hex(&bytes);
+    if !actual_sha.eq_ignore_ascii_case(spec.pinned_sha256) {
+        return Err(format!(
+            "SHA-256 integrity mismatch for '{}': expected {}, got {actual_sha}",
+            spec.cache_filename, spec.pinned_sha256
+        ));
+    }
+
+    if let Some(parent) = cache_file.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("failed creating loader cache dir: {e}"))?;
+    }
+    fs::write(&cache_file, &bytes)
+        .map_err(|e| format!("failed caching downloaded BepInEx zip: {e}"))?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn resolves_builtin_catalog_and_rejects_http_downloads() {
@@ -328,5 +538,77 @@ mod tests {
         assert!(err.contains("non-HTTPS"));
 
         let _ = fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn detects_missing_bepinex_loader_and_extracts_mock_archive_safely() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nekod_bepinex_test_{nanos}"));
+        let game_dir = root.join("Game");
+        let backup_dir = root.join("backups");
+        let ledger_path = root.join("ledger.json");
+
+        // Even with NekodUnityBridge plugin present, missing winhttp.dll + BepInEx/core must report not installed.
+        fs::create_dir_all(game_dir.join("BepInEx").join("plugins")).unwrap();
+        fs::write(
+            game_dir
+                .join("BepInEx")
+                .join("plugins")
+                .join("NekodUnityBridge.IL2CPP.dll"),
+            b"dll",
+        )
+        .unwrap();
+
+        let (ready_before, name_before, warn_before) =
+            inspect_bepinex_loader_readiness(&game_dir, GameEngineKind::UnityIl2cpp);
+        assert!(!ready_before);
+        assert!(name_before.unwrap().contains("BepInEx 6"));
+        assert!(warn_before.is_some());
+
+        // Reject zip-slip and executable entries
+        assert!(validate_bepinex_archive_entry_path("../evil.dll").is_err());
+        assert!(validate_bepinex_archive_entry_path("BepInEx/payload.exe").is_err());
+        assert!(validate_bepinex_archive_entry_path("random_root_file.dll").is_err());
+
+        // Build mock BepInEx zip and extract via DeploymentLedger
+        let mut zip_buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut zip_buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            writer.start_file("winhttp.dll", opts).unwrap();
+            writer.write_all(b"MZ-proxy").unwrap();
+            writer
+                .start_file("BepInEx/core/BepInEx.Unity.IL2CPP.dll", opts)
+                .unwrap();
+            writer.write_all(b"MZ-core").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let mut ledger = DeploymentLedger::open(&game_dir, &backup_dir, &ledger_path).unwrap();
+        let staged =
+            extract_bepinex_zip_to_ledger(&zip_buf.into_inner(), "test-game", &mut ledger).unwrap();
+        assert_eq!(staged, 2);
+
+        let (ready_after, _, warn_after) =
+            inspect_bepinex_loader_readiness(&game_dir, GameEngineKind::UnityIl2cpp);
+        assert!(ready_after);
+        assert!(warn_after.is_none());
+
+        // Clean LIFO undeploy removes BepInEx loader without touching NekodUnityBridge plugin
+        let report = ledger.undeploy_package("nekod.loader.bepinex").unwrap();
+        assert_eq!(report.removed_count, 2);
+        assert!(!game_dir.join("winhttp.dll").exists());
+        assert!(
+            game_dir
+                .join("BepInEx")
+                .join("plugins")
+                .join("NekodUnityBridge.IL2CPP.dll")
+                .exists()
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

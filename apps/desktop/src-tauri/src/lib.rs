@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use artwork::{GameArtwork, resolve_game_artwork};
 use bridges::{
-    CompanionBridgeCatalogEntry, list_catalog as list_bridge_catalog,
-    resolve_bridge_bytes_for_engine,
+    CompanionBridgeCatalogEntry, download_or_load_cached_bepinex_zip,
+    extract_bepinex_zip_to_ledger, inspect_bepinex_loader_readiness,
+    list_catalog as list_bridge_catalog, resolve_bridge_bytes_for_engine,
 };
 use hotkeys::{GlobalHotkeyBinding, GlobalHotkeyService};
 use nekod_core::{
@@ -29,6 +30,7 @@ use nekod_runtime_api::{FeatureCommand, ProcessIdentity, RuntimeDiagnostics, Run
 use nekod_trainer_manager::{CompatibilityRecord, sha256_hex};
 use nekod_trainer_runtime::{CompositeRuntimeRouter, DeploymentLedger, DeploymentState};
 use serde::Serialize;
+use serde_json::json;
 use tauri::{Emitter, Manager, State};
 
 pub struct AppState {
@@ -45,6 +47,17 @@ pub struct BridgeDeploymentStatus {
     pub suggested_source_file: Option<String>,
     pub suggested_target_relative_path: Option<String>,
     pub matched_bridge: Option<CompanionBridgeCatalogEntry>,
+    pub loader_installed: bool,
+    pub loader_managed_by_nekod: bool,
+    pub loader_display_name: Option<String>,
+    pub loader_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuickSetupResult {
+    pub game_id: String,
+    pub trainer_id: String,
+    pub engine: GameEngineKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -216,12 +229,31 @@ fn get_diagnostic_logs(state: State<'_, AppState>) -> Vec<DiagnosticEvent> {
 #[tauri::command]
 fn discover_running_processes(
     state: State<'_, AppState>,
-    game_id: String,
+    game_id: Option<String>,
+    install_dir: Option<String>,
 ) -> Result<Vec<ProcessIdentity>, String> {
-    state
-        .core
-        .discover_running_processes_for_game(&game_id)
-        .map_err(map_err)
+    if let Some(gid) = game_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let procs = state
+            .core
+            .discover_running_processes_for_game(gid)
+            .map_err(map_err)?;
+        if !procs.is_empty() {
+            return Ok(procs);
+        }
+    }
+
+    if let Some(dir) = install_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return state
+            .core
+            .discover_running_processes_in_dir(dir)
+            .map_err(map_err);
+    }
+
+    Ok(Vec::new())
 }
 
 #[tauri::command]
@@ -442,7 +474,13 @@ fn get_bridge_deployment_status(
     let matched_bridge = list_bridge_catalog(&state.data_dir)
         .into_iter()
         .find(|b| b.engine == env.engine);
+    let (loader_installed, loader_display_name, loader_warning) = if env.dir_exists {
+        inspect_bepinex_loader_readiness(Path::new(&install_dir), env.engine)
+    } else {
+        (false, None, None)
+    };
     let mut active_files = Vec::new();
+    let mut loader_managed_by_nekod = false;
     if env.dir_exists {
         let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
         if ledger_path.is_file()
@@ -450,7 +488,11 @@ fn get_bridge_deployment_status(
         {
             for rec in ledger.records() {
                 if rec.state == DeploymentState::Deployed {
-                    active_files.push(rec.relative_path.clone());
+                    if rec.package_id == "nekod.companion.bridge" {
+                        active_files.push(rec.relative_path.clone());
+                    } else if rec.package_id == "nekod.loader.bepinex" {
+                        loader_managed_by_nekod = true;
+                    }
                 }
             }
         }
@@ -462,6 +504,369 @@ fn get_bridge_deployment_status(
         suggested_source_file,
         suggested_target_relative_path,
         matched_bridge,
+        loader_installed,
+        loader_managed_by_nekod,
+        loader_display_name,
+        loader_warning,
+    })
+}
+
+#[tauri::command]
+fn install_bepinex_loader(
+    state: State<'_, AppState>,
+    game_key: String,
+    install_dir: String,
+) -> Result<BridgeDeploymentStatus, String> {
+    let env = state.core.inspect_installed_game_environment(&install_dir);
+    if !env.dir_exists {
+        return Err(format!("game install directory '{install_dir}' not found"));
+    }
+    if !env.anti_cheat_files_present.is_empty() {
+        return Err(format!(
+            "refusing BepInEx loader installation: anti-cheat markers present ({:?})",
+            env.anti_cheat_files_present
+        ));
+    }
+
+    let zip_bytes = download_or_load_cached_bepinex_zip(&state.data_dir, env.engine)?;
+    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
+    let mut ledger =
+        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+    extract_bepinex_zip_to_ledger(&zip_bytes, &game_key, &mut ledger)?;
+
+    get_bridge_deployment_status(state, game_key, install_dir)
+}
+
+#[tauri::command]
+fn undeploy_bepinex_loader(
+    state: State<'_, AppState>,
+    game_key: String,
+    install_dir: String,
+) -> Result<BridgeUndeploySummary, String> {
+    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
+    let mut ledger =
+        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+    let report = ledger
+        .undeploy_package("nekod.loader.bepinex")
+        .map_err(map_err)?;
+    Ok(BridgeUndeploySummary {
+        removed_count: report.removed_count,
+        restored_originals: report.restored_originals,
+        conflicts: report.conflicts,
+        conflict_paths: report.conflict_paths,
+    })
+}
+
+fn slugify_kebab(title: &str, store_app_id: Option<&str>) -> String {
+    let mut out = String::new();
+    let mut prev_hyphen = true;
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_hyphen = false;
+        } else if !prev_hyphen && !out.is_empty() {
+            out.push('-');
+            prev_hyphen = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    while out.len() > 44 {
+        out.pop();
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.len() >= 2 {
+        return out;
+    }
+    if let Some(app_id) = store_app_id
+        && !app_id.is_empty()
+        && app_id.chars().all(|c| c.is_ascii_digit())
+    {
+        return format!("unity-app-{app_id}");
+    }
+    "unity-local-game".to_owned()
+}
+
+#[tauri::command]
+fn quick_setup_unity_starter(
+    state: State<'_, AppState>,
+    title: String,
+    store_source: String,
+    store_app_id: Option<String>,
+    store_build_id: Option<String>,
+    install_dir: String,
+) -> Result<QuickSetupResult, String> {
+    let env = state.core.inspect_installed_game_environment(&install_dir);
+    if !env.dir_exists {
+        return Err(format!("game install directory '{install_dir}' not found"));
+    }
+    if !env.anti_cheat_files_present.is_empty() {
+        return Err(format!(
+            "refusing Unity starter setup: anti-cheat markers present ({:?})",
+            env.anti_cheat_files_present
+        ));
+    }
+
+    let (flavor, loader) = match env.engine {
+        GameEngineKind::UnityIl2cpp => ("il2cpp", "bepinex_il2cpp"),
+        GameEngineKind::UnityMono => ("mono", "bepinex_mono"),
+        other => {
+            return Err(format!(
+                "universal Unity starter only supports Unity Mono / IL2CPP games (detected '{other:?}')"
+            ));
+        }
+    };
+
+    let candidate_exes = NekodAppService::collect_candidate_exes_in_dir(&install_dir);
+    let primary_exe = candidate_exes
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("no primary game executable (.exe) found in '{install_dir}'"))?;
+
+    let existing_manifests = state
+        .core
+        .list_registered_game_manifests()
+        .map_err(map_err)?;
+    let steam_app_u64 = if store_source.eq_ignore_ascii_case("steam") {
+        store_app_id.as_deref().and_then(|s| s.parse::<u64>().ok())
+    } else {
+        None
+    };
+
+    let existing_match = existing_manifests.iter().find(|gm| {
+        if let Some(aid) = steam_app_u64
+            && gm.store_ids.steam_app_id == Some(aid)
+        {
+            return true;
+        }
+        gm.executables
+            .iter()
+            .any(|ex| ex.process_name.eq_ignore_ascii_case(&primary_exe))
+    });
+
+    let game_id = if let Some(gm) = existing_match {
+        gm.id.clone()
+    } else {
+        let base_slug = slugify_kebab(&title, store_app_id.as_deref());
+        let candidate_id = if existing_manifests.iter().any(|gm| gm.id == base_slug) {
+            if let Some(aid) = steam_app_u64 {
+                format!("{base_slug}-{aid}")
+            } else {
+                let hash_suffix = &sha256_hex(install_dir.as_bytes())[..8];
+                format!("{base_slug}-{hash_suffix}")
+            }
+        } else {
+            base_slug
+        };
+
+        let mut store_ids = serde_json::Map::new();
+        if let Some(aid) = steam_app_u64 {
+            store_ids.insert("steam_app_id".to_owned(), json!(aid));
+        }
+
+        let known_versions = if let Some(bid) = store_build_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            vec![json!({
+                "version_id": "1.0.0",
+                "display_version": format!("Steam Build {bid}"),
+                "platform": "windows-x64",
+                "store_build_id": bid
+            })]
+        } else {
+            Vec::new()
+        };
+
+        let game_manifest = json!({
+            "schema_version": "1.0.0",
+            "id": candidate_id,
+            "name": if title.trim().is_empty() { candidate_id.clone() } else { title.trim().to_owned() },
+            "platforms": ["windows-x64"],
+            "store_ids": store_ids,
+            "executables": [{
+                "platform": "windows-x64",
+                "relative_path": primary_exe,
+                "process_name": primary_exe,
+                "architecture": "x86_64"
+            }],
+            "known_versions": known_versions,
+            "compatibility_policy": {
+                "multiplayer_mode": "singleplayer_only",
+                "anti_cheat_detected": [],
+                "trainer_policy": "allowed_singleplayer"
+            }
+        });
+        let raw_gm = serde_json::to_string_pretty(&game_manifest).map_err(map_err)?;
+        state
+            .core
+            .register_game_manifest(&raw_gm)
+            .map_err(map_err)?
+            .id
+    };
+
+    let trainer_id = format!("org.nekod.unity-starter.{game_id}");
+    let pkg_dir = state.data_dir.join("generated-starters").join(&game_id);
+    let scripts_dir = pkg_dir.join("scripts");
+    fs::create_dir_all(&scripts_dir).map_err(map_err)?;
+
+    let bridge_payload = json!({
+        "schema_version": "1.0.0",
+        "protocol": "nekod_json_line_v1",
+        "flavor": flavor,
+        "loader": loader,
+        "host": "127.0.0.1",
+        "port": 19540,
+        "auto_discover_by_pid": true,
+        "features": [
+            {
+                "kind": "toggle_field",
+                "feature_id": "time-pause",
+                "class_name": "UnityEngine.Time",
+                "field_name": "timeScale",
+                "enabled_value": 0.0,
+                "disabled_value": 1.0
+            },
+            {
+                "kind": "set_field",
+                "feature_id": "game-speed",
+                "class_name": "UnityEngine.Time",
+                "field_name": "timeScale"
+            },
+            {
+                "kind": "invoke_method",
+                "feature_id": "unload-unused-assets",
+                "class_name": "UnityEngine.Resources",
+                "method_name": "UnloadUnusedAssets"
+            }
+        ]
+    });
+    let payload_bytes = serde_json::to_vec_pretty(&bridge_payload).map_err(map_err)?;
+    fs::write(scripts_dir.join("unity_bridge.json"), &payload_bytes).map_err(map_err)?;
+
+    let payload_sha = sha256_hex(&payload_bytes);
+    let payload_len = payload_bytes.len() as u64;
+
+    let mut target_game = serde_json::Map::new();
+    target_game.insert("game_id".to_owned(), json!(game_id));
+    target_game.insert(
+        "game_name".to_owned(),
+        json!(if title.trim().is_empty() {
+            game_id.as_str()
+        } else {
+            title.trim()
+        }),
+    );
+    if let Some(aid) = steam_app_u64 {
+        target_game.insert("store_ids".to_owned(), json!({ "steam_app_id": aid }));
+    }
+
+    let trainer_manifest = json!({
+        "schema_version": "1.0.0",
+        "id": trainer_id,
+        "version": "1.0.0",
+        "name": "Nekod Universal Unity Control Pack",
+        "description": "Zero-UnityExplorer control pack powered by NekodUnityBridge (Time Scale pause/multiplier and main-thread asset cleanup).",
+        "authors": [{
+            "name": "Nekod Contributors",
+            "github": "OmaruKoma",
+            "url": "https://github.com/OmaruKoma/Nekod"
+        }],
+        "license": "MIT",
+        "source_repository": "https://github.com/OmaruKoma/Nekod",
+        "target_game": target_game,
+        "supported_versions": [{
+            "platform": "windows-x64",
+            "version_pattern": "*",
+            "status": "verified"
+        }],
+        "runtime": {
+            "kind": "unity_bridge_v1",
+            "api_version": "1.0.0",
+            "min_nekod_version": "0.1.0-alpha.0",
+            "entrypoint": "scripts/unity_bridge.json",
+            "supported_platforms": ["windows-x64"]
+        },
+        "permissions": [
+            {
+                "scope": "process.discover",
+                "reason": "Match target Unity game PID with %LOCALAPPDATA%\\Nekod\\bridges\\unity-<pid>.json.",
+                "required": true
+            },
+            {
+                "scope": "process.write_memory",
+                "reason": "Modify Unity fields/properties and invoke methods through NekodUnityBridge loopback RPC.",
+                "required": true
+            }
+        ],
+        "features": [
+            {
+                "id": "time-pause",
+                "name": "Pause Game Time",
+                "description": "Sets UnityEngine.Time.timeScale to 0.0 and restores 1.0 cleanly on LIFO rollback.",
+                "category": "time",
+                "control_type": "toggle",
+                "default_hotkey": "F8",
+                "mutates_memory": true,
+                "supports_rollback": true,
+                "risk_level": "low"
+            },
+            {
+                "id": "game-speed",
+                "name": "Game Speed Multiplier",
+                "description": "Adjusts UnityEngine.Time.timeScale dynamically via NekodUnityBridge.",
+                "category": "time",
+                "control_type": "float",
+                "value_range": {
+                    "min": 0.1,
+                    "max": 8.0,
+                    "step": 0.25,
+                    "default": 1.0
+                },
+                "mutates_memory": true,
+                "supports_rollback": true,
+                "risk_level": "low"
+            },
+            {
+                "id": "unload-unused-assets",
+                "name": "Unload Unused Assets",
+                "description": "Calls UnityEngine.Resources.UnloadUnusedAssets on the Unity main thread.",
+                "category": "other",
+                "control_type": "action",
+                "mutates_memory": false,
+                "supports_rollback": false,
+                "risk_level": "low"
+            }
+        ],
+        "compatibility": {
+            "singleplayer_only": true,
+            "requires_offline_mode": false,
+            "anti_cheat_incompatible": []
+        },
+        "artifacts": [{
+            "filename": "scripts/unity_bridge.json",
+            "sha256": payload_sha,
+            "size_bytes": payload_len,
+            "platform": "windows-x64"
+        }]
+    });
+    let raw_tm = serde_json::to_string_pretty(&trainer_manifest).map_err(map_err)?;
+    fs::write(pkg_dir.join("trainer-manifest.json"), raw_tm).map_err(map_err)?;
+
+    state
+        .core
+        .ingest_local_trainer(&pkg_dir, TrustTier::Official)
+        .map_err(map_err)?;
+    state.core.rescan_games().map_err(map_err)?;
+
+    Ok(QuickSetupResult {
+        game_id,
+        trainer_id,
+        engine: env.engine,
     })
 }
 
@@ -736,6 +1141,9 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         auto_deploy_companion_bridge,
         deploy_companion_bridge,
         undeploy_companion_bridge,
+        install_bepinex_loader,
+        undeploy_bepinex_loader,
+        quick_setup_unity_starter,
         sync_global_hotkeys,
         get_game_artwork,
         launch_game,
