@@ -448,12 +448,25 @@ impl RuntimeProvider for UnityBridgeRuntime {
                 payload.discovery_dir.as_deref(),
             ) {
                 let tok = if payload.auth_token.trim().is_empty() {
-                    disc.auth_token.unwrap_or_default()
+                    let discovered_tok = disc.auth_token.unwrap_or_default();
+                    if discovered_tok.trim().is_empty() {
+                        return Err(RuntimeError::ExecutionFailed(format!(
+                            "NekodUnityBridge discovery record unity-{}.json is missing auth_token",
+                            req.target_process.pid
+                        )));
+                    }
+                    discovered_tok
                 } else {
                     payload.auth_token.clone()
                 };
                 (disc.port, tok)
             } else {
+                if payload.auth_token.trim().is_empty() {
+                    return Err(RuntimeError::ExecutionFailed(format!(
+                        "NekodUnityBridge not ready for PID {}: discovery record unity-{}.json not found yet (wait for game/BepInEx to finish loading, or deploy NekodUnityBridge first)",
+                        req.target_process.pid, req.target_process.pid
+                    )));
+                }
                 (payload.port, payload.auth_token.clone())
             }
         } else {
@@ -1317,6 +1330,54 @@ mod tests {
         assert_eq!(field["value"], 1.0);
 
         server.join().unwrap();
+        let _ = fs::remove_dir_all(discovery_dir);
+    }
+
+    #[test]
+    fn auto_discover_missing_file_reports_bridge_not_ready_instead_of_invalid_token() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let discovery_dir = std::env::temp_dir().join(format!("nekod_missing_bridge_{nanos}"));
+        fs::create_dir_all(&discovery_dir).unwrap();
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Mono, UnityLoaderKind::BepinexMono, 19540);
+        req.target_process.pid = 58692;
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "protocol": "nekod_json_line_v1",
+                "flavor": "mono",
+                "loader": "bepinex_mono",
+                "host": "127.0.0.1",
+                "port": 19540,
+                "auto_discover_by_pid": true,
+                "discovery_dir": discovery_dir.display().to_string(),
+                "features": [{
+                    "kind": "toggle_field",
+                    "feature_id": "infinite-stamina",
+                    "class_name": "PlayerController",
+                    "field_name": "drainRate",
+                    "enabled_value": 0.0,
+                    "disabled_value": 1.0
+                }]
+            })
+            .to_string(),
+        );
+
+        let err = runtime.start_session(req).unwrap_err();
+        match err {
+            RuntimeError::ExecutionFailed(msg) => {
+                assert!(msg.contains("not ready"), "unexpected msg: {msg}");
+                assert!(msg.contains("unity-58692.json"), "unexpected msg: {msg}");
+            }
+            other => panic!("expected ExecutionFailed for missing discovery record, got {other:?}"),
+        }
+
         let _ = fs::remove_dir_all(discovery_dir);
     }
 }

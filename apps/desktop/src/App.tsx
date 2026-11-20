@@ -643,8 +643,24 @@ export default function App() {
       setStatusMsg(msg);
       pushHudToast(msg, "ok");
     } catch (e) {
-      if (soundEnabled) soundFx.error();
-      setError(String(e));
+      const errText = String(e);
+      const lower = errText.toLowerCase();
+      const isTransientBridgeStartup =
+        fromAutoAttach &&
+        (lower.includes("not ready") ||
+          lower.includes("discovery record") ||
+          lower.includes("connection refused") ||
+          lower.includes("10061") ||
+          lower.includes("timed out") ||
+          lower.includes("10060"));
+      if (isTransientBridgeStartup) {
+        setStatusMsg(
+          `检测到游戏进程 (${proc.process_name} · PID ${proc.pid})，正在等待伴生桥接就绪...`,
+        );
+      } else {
+        if (soundEnabled) soundFx.error();
+        setError(errText);
+      }
     } finally {
       setBusyAction(null);
     }

@@ -494,40 +494,52 @@ async fn discover_running_processes(
     .map_err(map_err)?
 }
 
+async fn spawn_core<T: Send + 'static>(
+    core: Arc<NekodAppService>,
+    work: impl FnOnce(&NekodAppService) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || work(&core))
+        .await
+        .map_err(map_err)?
+}
+
 #[tauri::command]
-fn start_trainer_session(
+async fn start_trainer_session(
     state: State<'_, AppState>,
     game_id: String,
     trainer_id: String,
     target_process: ProcessIdentity,
 ) -> Result<RuntimeSessionId, String> {
-    state
-        .core
-        .start_trainer_session(&game_id, &trainer_id, target_process)
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.start_trainer_session(&game_id, &trainer_id, target_process)
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn apply_trainer_feature(
+async fn apply_trainer_feature(
     state: State<'_, AppState>,
     session_id: String,
     command: FeatureCommand,
 ) -> Result<(), String> {
-    state
-        .core
-        .apply_trainer_feature(&RuntimeSessionId(session_id), command)
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.apply_trainer_feature(&RuntimeSessionId(session_id), command)
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]
-fn stop_trainer_session(
+async fn stop_trainer_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<RuntimeDiagnostics, String> {
-    state
-        .core
-        .stop_trainer_session(&RuntimeSessionId(session_id))
-        .map_err(map_err)
+    spawn_core(Arc::clone(&state.core), move |core| {
+        core.stop_trainer_session(&RuntimeSessionId(session_id))
+            .map_err(map_err)
+    })
+    .await
 }
 
 #[tauri::command]

@@ -315,11 +315,11 @@ pub(crate) fn send_bridge_rpc(
     req: &BridgeRpcRequest,
 ) -> Result<BridgeRpcResponse, RuntimeError> {
     let mut stream =
-        TcpStream::connect_timeout(&endpoint, Duration::from_millis(800)).map_err(|e| {
+        TcpStream::connect_timeout(&endpoint, Duration::from_millis(1500)).map_err(|e| {
             RuntimeError::ExecutionFailed(format!("bridge connect {endpoint} failed: {e}"))
         })?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(1200)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(6500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
 
     let line = serde_json::to_string(req)
         .map_err(|e| RuntimeError::InvalidPayload(format!("serialize bridge RPC failed: {e}")))?;
@@ -329,9 +329,18 @@ pub(crate) fn send_bridge_rpc(
 
     let mut reader = BufReader::new(stream);
     let mut resp_line = String::new();
-    let n = reader
-        .read_line(&mut resp_line)
-        .map_err(|e| RuntimeError::ExecutionFailed(format!("bridge read failed: {e}")))?;
+    let n = reader.read_line(&mut resp_line).map_err(|e| {
+        if matches!(
+            e.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            RuntimeError::ExecutionFailed(format!(
+                "bridge read timed out after 6.5s (Unity main thread may be paused while game window is unfocused or loading; focus the game window or update NekodUnityBridge): {e}"
+            ))
+        } else {
+            RuntimeError::ExecutionFailed(format!("bridge read failed: {e}"))
+        }
+    })?;
     if n == 0 {
         return Err(RuntimeError::ExecutionFailed(
             "bridge closed connection without response".to_owned(),

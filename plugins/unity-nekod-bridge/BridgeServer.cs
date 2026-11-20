@@ -20,9 +20,12 @@ namespace Nekod.UnityBridge
     /// </summary>
     internal sealed class BridgeServer
     {
+        public const string BridgeVersion = "0.2.1";
+
         private sealed class PendingWork
         {
-            public string RawLine;
+            public string Op;
+            public Dictionary<string, object> Params;
             public string ResponseLine;
             public readonly ManualResetEventSlim Done = new ManualResetEventSlim(false);
         }
@@ -31,11 +34,14 @@ namespace Nekod.UnityBridge
         private readonly Queue<PendingWork> _queue = new Queue<PendingWork>();
         private readonly object _queueLock = new object();
         private readonly Action<string> _log;
+        private readonly string _unityVersion;
+        private readonly int _pid;
 
         private TcpListener _listener;
         private Thread _acceptThread;
         private volatile bool _running;
         private string _discoveryPath;
+        private long _mainThreadTicks;
 
         public int Port { get; private set; }
         public string AuthToken { get; private set; }
@@ -57,6 +63,8 @@ namespace Nekod.UnityBridge
         public BridgeServer(int preferredPort, string configuredToken, Action<string> log)
         {
             _log = log ?? (_ => { });
+            _unityVersion = Application.unityVersion ?? "";
+            _pid = Process.GetCurrentProcess().Id;
             Port = preferredPort > 0 ? preferredPort : 19540;
             AuthToken = !string.IsNullOrWhiteSpace(configuredToken) && configuredToken.Trim().Length >= 16
                 ? configuredToken.Trim()
@@ -105,6 +113,7 @@ namespace Nekod.UnityBridge
         /// <summary>Must be invoked from MonoBehaviour.Update() on the Unity main thread.</summary>
         public void PumpMainThread()
         {
+            Interlocked.Increment(ref _mainThreadTicks);
             while (true)
             {
                 PendingWork work;
@@ -116,7 +125,7 @@ namespace Nekod.UnityBridge
 
                 try
                 {
-                    work.ResponseLine = ProcessRequestOnMainThread(work.RawLine);
+                    work.ResponseLine = ProcessRequestOnMainThread(work.Op, work.Params);
                 }
                 catch (Exception ex)
                 {
@@ -160,15 +169,65 @@ namespace Nekod.UnityBridge
                     string line = reader.ReadLine();
                     if (string.IsNullOrWhiteSpace(line)) return;
 
-                    var work = new PendingWork { RawLine = line };
-                    lock (_queueLock)
+                    Dictionary<string, object> req;
+                    try
                     {
-                        _queue.Enqueue(work);
+                        req = MiniJson.Deserialize(line) as Dictionary<string, object>;
+                    }
+                    catch
+                    {
+                        req = null;
                     }
 
-                    string reply = work.Done.Wait(5000)
-                        ? work.ResponseLine
-                        : ErrorJson("main thread dispatch timeout");
+                    string reply;
+                    if (req == null)
+                    {
+                        reply = ErrorJson("invalid JSON object");
+                    }
+                    else
+                    {
+                        string token = GetString(req, "token");
+                        if (!ConstantTimeEquals(token, AuthToken))
+                        {
+                            reply = ErrorJson("unauthorized token");
+                        }
+                        else
+                        {
+                            string op = GetString(req, "op") ?? "";
+                            var p = req.TryGetValue("params", out object pObj)
+                                ? pObj as Dictionary<string, object>
+                                : null;
+
+                            if (op == "ping")
+                            {
+                                // Reply immediately on the socket thread so handshake succeeds even while
+                                // the game window is unfocused or still loading scenes.
+                                reply = OkJson(new Dictionary<string, object>
+                                {
+                                    { "flavor", Flavor },
+                                    { "loader", LoaderKind },
+                                    { "pid", _pid },
+                                    { "port", Port },
+                                    { "unity_version", _unityVersion },
+                                    { "bridge_version", BridgeVersion },
+                                    { "main_thread_ticks", Interlocked.Read(ref _mainThreadTicks) }
+                                });
+                            }
+                            else
+                            {
+                                var work = new PendingWork { Op = op, Params = p };
+                                lock (_queueLock)
+                                {
+                                    _queue.Enqueue(work);
+                                }
+
+                                reply = work.Done.Wait(5000)
+                                    ? work.ResponseLine
+                                    : ErrorJson("main thread dispatch timeout (game main thread may be paused while unfocused or loading; focus the game window briefly or ensure KeepRunningInBackground=true)");
+                            }
+                        }
+                    }
+
                     writer.WriteLine(reply);
                     writer.Flush();
                 }
@@ -179,33 +238,10 @@ namespace Nekod.UnityBridge
             }
         }
 
-        private string ProcessRequestOnMainThread(string rawLine)
+        private string ProcessRequestOnMainThread(string op, Dictionary<string, object> p)
         {
-            if (!(MiniJson.Deserialize(rawLine) is Dictionary<string, object> req))
-                return ErrorJson("invalid JSON object");
-
-            string token = GetString(req, "token");
-            if (!ConstantTimeEquals(token, AuthToken))
-                return ErrorJson("unauthorized token");
-
-            string op = GetString(req, "op") ?? "";
-            var p = req.TryGetValue("params", out object pObj)
-                ? pObj as Dictionary<string, object>
-                : null;
-
             switch (op)
             {
-                case "ping":
-                    return OkJson(new Dictionary<string, object>
-                    {
-                        { "flavor", Flavor },
-                        { "loader", LoaderKind },
-                        { "pid", Process.GetCurrentProcess().Id },
-                        { "port", Port },
-                        { "unity_version", Application.unityVersion },
-                        { "bridge_version", "0.1.0" }
-                    });
-
                 case "list_types":
                     return HandleListTypes(p);
 
@@ -496,18 +532,17 @@ namespace Nekod.UnityBridge
                 if (string.IsNullOrEmpty(baseDir)) baseDir = Path.GetTempPath();
                 string dir = Path.Combine(Path.Combine(baseDir, "Nekod"), "bridges");
                 Directory.CreateDirectory(dir);
-                int pid = Process.GetCurrentProcess().Id;
-                _discoveryPath = Path.Combine(dir, $"unity-{pid}.json");
+                _discoveryPath = Path.Combine(dir, $"unity-{_pid}.json");
 
                 var record = new Dictionary<string, object>
                 {
-                    { "pid", pid },
+                    { "pid", _pid },
                     { "port", Port },
                     { "flavor", Flavor },
                     { "loader", LoaderKind },
                     { "auth_token", AuthToken },
-                    { "unity_version", Application.unityVersion },
-                    { "bridge_version", "0.1.0" }
+                    { "unity_version", _unityVersion },
+                    { "bridge_version", BridgeVersion }
                 };
                 string tmp = _discoveryPath + ".tmp";
                 File.WriteAllText(tmp, MiniJson.Serialize(record), new UTF8Encoding(false));
