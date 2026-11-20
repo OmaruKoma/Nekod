@@ -377,4 +377,21 @@ mod tests {
             validate_mod_manifest_str(raw).expect("mod v2 example passes schema + semantic");
         assert_eq!(parsed.id, "dev.example.retroarch-qol-pack");
     }
+
+    #[test]
+    fn validates_unity_explorer_mcp_starter_nmod_package() {
+        let pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("unity-explorer-mcp-starter");
+        let (mod_manifest, _) =
+            validate_nmod_package_dir(&pkg_dir).expect("starter .nmod validates cleanly");
+        assert_eq!(mod_manifest.runtime.kind, RuntimeKind::UnityBridgeV1);
+        assert_eq!(mod_manifest.features.len(), 3);
+
+        let (trainer_manifest, _) =
+            validate_trainer_package_dir(&pkg_dir).expect("starter v1 trainer bridge validates");
+        assert_eq!(trainer_manifest.id, mod_manifest.id);
+    }
 }

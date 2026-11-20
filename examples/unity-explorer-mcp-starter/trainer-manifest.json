@@ -1,0 +1,99 @@
+{
+  "schema_version": "1.0.0",
+  "id": "dev.omarukoma.unity-explorer-mcp-starter",
+  "version": "1.0.0",
+  "name": "UnityExplorerMCP Universal Control Pack",
+  "description": "First live .nmod recipe bridging Nekod unity_bridge_v1 directly to OmaruKoma/UnityExplorerMCP (MCPBridge.dll) for any Unity IL2CPP singleplayer game.",
+  "authors": [
+    {
+      "name": "OmaruKoma",
+      "github": "OmaruKoma",
+      "url": "https://github.com/OmaruKoma/UnityExplorerMCP"
+    }
+  ],
+  "license": "MIT",
+  "source_repository": "https://github.com/OmaruKoma/Nekod",
+  "homepage": "https://github.com/OmaruKoma/UnityExplorerMCP",
+  "target_game": {
+    "game_id": "unity-il2cpp-starter",
+    "game_name": "Unity IL2CPP Starter Target"
+  },
+  "supported_versions": [
+    {
+      "platform": "windows-x64",
+      "version_pattern": "*",
+      "status": "verified"
+    }
+  ],
+  "runtime": {
+    "kind": "unity_bridge_v1",
+    "api_version": "1.0.0",
+    "min_nekod_version": "0.1.0-alpha.0",
+    "entrypoint": "scripts/unity_mcp_bridge.json",
+    "supported_platforms": ["windows-x64"]
+  },
+  "permissions": [
+    {
+      "scope": "process.discover",
+      "reason": "Match target Unity game PID with %LOCALAPPDATA%\\UnityExplorerMCP\\bridges\\bridge-<pid>.json.",
+      "required": true
+    },
+    {
+      "scope": "process.write_memory",
+      "reason": "Set static Unity fields/properties and invoke static methods via loopback MCPBridge.dll HTTP RPC.",
+      "required": true
+    }
+  ],
+  "features": [
+    {
+      "id": "time-pause",
+      "name": "Pause Game Time",
+      "description": "Sets UnityEngine.Time.timeScale to 0.0 and restores 1.0 cleanly on LIFO rollback.",
+      "category": "time",
+      "control_type": "toggle",
+      "default_hotkey": "F8",
+      "mutates_memory": true,
+      "supports_rollback": true,
+      "risk_level": "low"
+    },
+    {
+      "id": "game-speed",
+      "name": "Game Speed Multiplier",
+      "description": "Adjusts UnityEngine.Time.timeScale and records UndoStore entry for rollback.",
+      "category": "time",
+      "control_type": "float",
+      "value_range": {
+        "min": 0.1,
+        "max": 8.0,
+        "step": 0.25,
+        "default": 1.0
+      },
+      "mutates_memory": true,
+      "supports_rollback": true,
+      "risk_level": "low"
+    },
+    {
+      "id": "unload-unused-assets",
+      "name": "Unload Unused Assets",
+      "description": "Calls UnityEngine.Resources.UnloadUnusedAssets via MCPBridge.dll invoke_static.",
+      "category": "other",
+      "control_type": "action",
+      "mutates_memory": false,
+      "supports_rollback": false,
+      "risk_level": "low"
+    }
+  ],
+  "compatibility": {
+    "singleplayer_only": true,
+    "requires_offline_mode": false,
+    "anti_cheat_incompatible": []
+  },
+  "artifacts": [
+    {
+      "filename": "scripts/unity_mcp_bridge.json",
+      "sha256": "d677a7700a0c4cf78f7404050b2f92273c46102b58fefe9b3fc879fa32b89a11",
+      "size_bytes": 747,
+      "platform": "windows-x64"
+    }
+  ]
+}

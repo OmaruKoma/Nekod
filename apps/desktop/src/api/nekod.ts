@@ -193,6 +193,7 @@ export interface DetectedLoader {
     | "bep_in_ex_mono"
     | "bep_in_ex_il2cpp"
     | "melon_loader"
+    | "unity_explorer_mcp_bridge"
     | "ue4ss"
     | "re_framework"
     | "script_hook_v"

@@ -195,6 +195,9 @@ fn matches_loader_id(dependency_id: &str, kind: InstalledLoaderKind) -> bool {
         InstalledLoaderKind::BepInExMono => low == "bepinex-mono" || low == "bepinex",
         InstalledLoaderKind::BepInExIl2cpp => low == "bepinex-il2cpp" || low == "bepinex",
         InstalledLoaderKind::MelonLoader => low.contains("melonloader"),
+        InstalledLoaderKind::UnityExplorerMcpBridge => {
+            low.contains("unity-explorer-mcp") || low.contains("mcpbridge")
+        }
         InstalledLoaderKind::Ue4ss => low.contains("ue4ss"),
         InstalledLoaderKind::ReFramework => low.contains("reframework"),
         InstalledLoaderKind::ScriptHookV => low.contains("scripthookv") || low == "scripthook-v",

@@ -28,6 +28,7 @@ pub enum InstalledLoaderKind {
     BepInExMono,
     BepInExIl2cpp,
     MelonLoader,
+    UnityExplorerMcpBridge,
     Ue4ss,
     ReFramework,
     ScriptHookV,
@@ -176,6 +177,14 @@ fn detect_loaders(root: &Path) -> Vec<DetectedLoader> {
         });
     }
 
+    if let Some(mcp_rel) = find_mcp_bridge_rel(&root.join("BepInEx").join("plugins")) {
+        loaders.push(DetectedLoader {
+            kind: InstalledLoaderKind::UnityExplorerMcpBridge,
+            entry_path: mcp_rel,
+            detected_version: Some("1.3.1".to_owned()),
+        });
+    }
+
     if root.join("ue4ss").join("UE4SS.dll").is_file()
         || root.join("UE4SS.dll").is_file()
         || find_nested_ue4ss(root)
@@ -212,6 +221,37 @@ fn detect_loaders(root: &Path) -> Vec<DetectedLoader> {
     }
 
     loaders
+}
+
+fn find_mcp_bridge_rel(plugins_dir: &Path) -> Option<String> {
+    let entries = fs::read_dir(plugins_dir).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file()
+            && let Some(name) = p.file_name().and_then(|n| n.to_str())
+        {
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("mcpbridge") && lower.ends_with(".dll") {
+                return Some(format!("BepInEx/plugins/{name}"));
+            }
+        } else if p.is_dir()
+            && let Some(dir_name) = p.file_name().and_then(|n| n.to_str())
+            && let Ok(sub) = fs::read_dir(&p)
+        {
+            for sub_entry in sub.flatten() {
+                let sp = sub_entry.path();
+                if sp.is_file()
+                    && let Some(name) = sp.file_name().and_then(|n| n.to_str())
+                {
+                    let lower = name.to_ascii_lowercase();
+                    if lower.contains("mcpbridge") && lower.ends_with(".dll") {
+                        return Some(format!("BepInEx/plugins/{dir_name}/{name}"));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn find_nested_ue4ss(root: &Path) -> bool {
@@ -336,11 +376,20 @@ mod tests {
         fs::write(il2cpp_root.join("GameAssembly.dll"), b"MZ").unwrap();
         fs::create_dir_all(il2cpp_root.join("EasyAntiCheat")).unwrap();
         fs::create_dir_all(il2cpp_root.join("BepInEx").join("core")).unwrap();
+        fs::create_dir_all(il2cpp_root.join("BepInEx").join("plugins")).unwrap();
         fs::write(
             il2cpp_root
                 .join("BepInEx")
                 .join("core")
                 .join("BepInEx.Unity.IL2CPP.dll"),
+            b"MZ",
+        )
+        .unwrap();
+        fs::write(
+            il2cpp_root
+                .join("BepInEx")
+                .join("plugins")
+                .join("MCPBridge.dll"),
             b"MZ",
         )
         .unwrap();
@@ -350,6 +399,12 @@ mod tests {
         assert_eq!(
             il2cpp_profile.installed_loaders[0].kind,
             InstalledLoaderKind::BepInExIl2cpp
+        );
+        assert!(
+            il2cpp_profile
+                .installed_loaders
+                .iter()
+                .any(|l| l.kind == InstalledLoaderKind::UnityExplorerMcpBridge)
         );
         assert_eq!(
             il2cpp_profile.anti_cheat_files_present,

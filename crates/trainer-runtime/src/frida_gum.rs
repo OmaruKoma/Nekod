@@ -332,6 +332,7 @@ impl RuntimeProvider for FridaGumRuntime {
                 auth_token: payload.auth_token.clone(),
                 target_process: req.target_process.clone(),
                 runtime_kind: RuntimeKind::FridaGumV1,
+                use_unity_explorer_http: false,
                 state: SessionLifecycleState::Attached,
                 rollback_stack: Vec::new(),
                 rollback_failures: 0,

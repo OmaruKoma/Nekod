@@ -217,6 +217,7 @@ impl RuntimeProvider for Ue4ssBridgeRuntime {
             auth_token: payload.auth_token.clone(),
             target_process: req.target_process,
             runtime_kind: RuntimeKind::Ue4ssBridgeV1,
+            use_unity_explorer_http: false,
             state: SessionLifecycleState::Attached,
             rollback_stack: Vec::new(),
             rollback_failures: 0,

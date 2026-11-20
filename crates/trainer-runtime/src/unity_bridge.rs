@@ -4,7 +4,8 @@
 //! over loopback JSON-line IPC, strictly separating `Mono` vs. `IL2CPP` runtime flavors
 //! and restoring modified class fields in LIFO order on session teardown.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use nekod_manifest::{PermissionScope, RuntimeDependencySpec, RuntimeKind};
 use nekod_runtime_api::{
@@ -18,9 +19,20 @@ use serde_json::{Value, json};
 
 use crate::bridge_ipc::{
     BridgeRpcRequest, BridgeSessionStore, ManagedBridgeSession, send_bridge_rpc,
-    validate_loopback_bridge,
+    send_unity_explorer_http_rpc, validate_loopback_bridge, validate_loopback_host_port,
 };
 use crate::session::validate_session_preflight_for_kind;
+
+/// Wire protocol spoken between Nekod and an in-game Unity companion plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UnityBridgeProtocol {
+    /// Nekod default authenticated newline-delimited JSON RPC.
+    #[default]
+    NekodJsonLineV1,
+    /// Native compatibility with `OmaruKoma/UnityExplorerMCP` (`MCPBridge.dll`) HTTP POST `/`.
+    UnityExplorerMcpHttpV1,
+}
 
 /// Explicit Unity scripting backend flavor (Mono and IL2CPP are never assumed identical).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,10 +65,18 @@ pub enum UnityLoaderKind {
 #[serde(deny_unknown_fields)]
 pub struct UnityBridgePayload {
     pub schema_version: String,
+    #[serde(default)]
+    pub protocol: UnityBridgeProtocol,
     pub flavor: UnityFlavor,
     pub loader: UnityLoaderKind,
     pub host: String,
+    #[serde(default)]
     pub port: u16,
+    #[serde(default)]
+    pub auto_discover_by_pid: bool,
+    #[serde(default)]
+    pub discovery_dir: Option<String>,
+    #[serde(default)]
     pub auth_token: String,
     pub features: Vec<UnityFeatureBinding>,
 }
@@ -141,6 +161,83 @@ impl UnityBridgeRuntime {
     }
 }
 
+/// Resolves a live `UnityExplorerMCP` loopback port from `<dir>/bridge-<pid>.json` written by
+/// `MCPBridge.dll` (`OmaruKoma/UnityExplorerMCP`).
+pub fn resolve_unity_explorer_discovery_port(
+    target_pid: u32,
+    custom_dir: Option<&str>,
+) -> Option<u16> {
+    let dir: PathBuf = match custom_dir {
+        Some(custom) => PathBuf::from(custom),
+        None => {
+            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                PathBuf::from(local_app_data)
+                    .join("UnityExplorerMCP")
+                    .join("bridges")
+            } else {
+                std::env::temp_dir()
+                    .join("UnityExplorerMCP")
+                    .join("bridges")
+            }
+        }
+    };
+    let file = dir.join(format!("bridge-{target_pid}.json"));
+    let raw = fs::read_to_string(file).ok()?;
+    let val: Value = serde_json::from_str(&raw).ok()?;
+    let port_u64 = val.get("port").or_else(|| val.get("Port"))?.as_u64()?;
+    u16::try_from(port_u64).ok().filter(|p| *p != 0)
+}
+
+fn find_mcp_bridge_dll(plugins_dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(plugins_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        {
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("mcpbridge") && lower.ends_with(".dll") {
+                return Some(path);
+            }
+        } else if path.is_dir()
+            && let Some(found) = fs::read_dir(&path).ok().and_then(|sub| {
+                sub.flatten().map(|e| e.path()).find(|p| {
+                    p.is_file()
+                        && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                            let lower = n.to_ascii_lowercase();
+                            lower.contains("mcpbridge") && lower.ends_with(".dll")
+                        })
+                })
+            })
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn send_unity_rpc(
+    use_http: bool,
+    endpoint: std::net::SocketAddr,
+    token: &str,
+    op: &str,
+    params: Value,
+) -> Result<Value, RuntimeError> {
+    if use_http {
+        send_unity_explorer_http_rpc(endpoint, op, &params)
+    } else {
+        send_bridge_rpc(
+            endpoint,
+            &BridgeRpcRequest {
+                token: token.to_owned(),
+                op: op.to_owned(),
+                params,
+            },
+        )
+        .map(|resp| resp.data)
+    }
+}
+
 impl RuntimeProvider for UnityBridgeRuntime {
     fn kind(&self) -> RuntimeKind {
         RuntimeKind::UnityBridgeV1
@@ -165,10 +262,27 @@ impl RuntimeProvider for UnityBridgeRuntime {
         dependencies
             .iter()
             .map(|dep| {
+                let low = dep.dependency_id.to_ascii_lowercase();
                 let outcome = match game_install_dir {
                     Some(dir)
-                        if dep.dependency_id.contains("bepinex")
-                            && dir.join("BepInEx").join("core").is_dir() =>
+                        if (low.contains("unity-explorer-mcp") || low.contains("mcpbridge")) =>
+                    {
+                        if let Some(dll) = find_mcp_bridge_dll(&dir.join("BepInEx").join("plugins"))
+                        {
+                            DependencyStatus::Satisfied {
+                                resolved_location: dll.display().to_string(),
+                            }
+                        } else {
+                            DependencyStatus::Missing {
+                                suggested_action: format!(
+                                    "Stage '{}' ({}) from Plugin Bucket via RuntimeDependencyManager",
+                                    dep.dependency_id, dep.version_req
+                                ),
+                            }
+                        }
+                    }
+                    Some(dir)
+                        if low.contains("bepinex") && dir.join("BepInEx").join("core").is_dir() =>
                     {
                         DependencyStatus::Satisfied {
                             resolved_location: dir
@@ -179,8 +293,7 @@ impl RuntimeProvider for UnityBridgeRuntime {
                         }
                     }
                     Some(dir)
-                        if dep.dependency_id.contains("melonloader")
-                            && dir.join("MelonLoader").is_dir() =>
+                        if low.contains("melonloader") && dir.join("MelonLoader").is_dir() =>
                     {
                         DependencyStatus::Satisfied {
                             resolved_location: dir.join("MelonLoader").display().to_string(),
@@ -228,26 +341,60 @@ impl RuntimeProvider for UnityBridgeRuntime {
             RuntimeError::InvalidPayload(format!("invalid unity_bridge_v1 JSON: {e}"))
         })?;
         Self::validate_payload(&payload)?;
-        let endpoint = validate_loopback_bridge(&payload.host, payload.port, &payload.auth_token)?;
 
-        // Perform authenticated handshake verifying reported Unity flavor matches manifest declaration.
-        let ping_resp = send_bridge_rpc(
+        let use_http = payload.protocol == UnityBridgeProtocol::UnityExplorerMcpHttpV1;
+        let resolved_port = if use_http && payload.auto_discover_by_pid {
+            resolve_unity_explorer_discovery_port(
+                req.target_process.pid,
+                payload.discovery_dir.as_deref(),
+            )
+            .unwrap_or(payload.port)
+        } else {
+            payload.port
+        };
+
+        let endpoint = if use_http {
+            validate_loopback_host_port(&payload.host, resolved_port)?
+        } else {
+            validate_loopback_bridge(&payload.host, resolved_port, &payload.auth_token)?
+        };
+
+        // Perform handshake verifying reported Unity flavor (and optional PID) matches manifest.
+        let ping_data = send_unity_rpc(
+            use_http,
             endpoint,
-            &BridgeRpcRequest {
-                token: payload.auth_token.clone(),
-                op: "ping".to_owned(),
-                params: json!({ "expected_flavor": payload.flavor.as_str() }),
+            &payload.auth_token,
+            "ping",
+            if use_http {
+                json!({})
+            } else {
+                json!({ "expected_flavor": payload.flavor.as_str() })
             },
         )?;
-        let reported_flavor = ping_resp
-            .data
+
+        let reported_flavor = ping_data
             .get("flavor")
+            .or_else(|| ping_data.get("Backend"))
+            .or_else(|| ping_data.get("backend"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if reported_flavor != payload.flavor.as_str() {
+        if !reported_flavor.eq_ignore_ascii_case(payload.flavor.as_str()) {
             return Err(RuntimeError::ProcessIdentityMismatch(format!(
                 "unity bridge flavor mismatch: expected '{}', bridge reported '{reported_flavor}'",
                 payload.flavor.as_str()
+            )));
+        }
+
+        if let Some(reported_pid) = ping_data
+            .get("Pid")
+            .or_else(|| ping_data.get("pid"))
+            .and_then(Value::as_u64)
+            && reported_pid != 0
+            && reported_pid != u64::from(req.target_process.pid)
+        {
+            return Err(RuntimeError::ProcessIdentityMismatch(format!(
+                "unity bridge PID mismatch: target pid {}, bridge reported {reported_pid}",
+                req.target_process.pid
             )));
         }
 
@@ -256,12 +403,14 @@ impl RuntimeProvider for UnityBridgeRuntime {
             auth_token: payload.auth_token.clone(),
             target_process: req.target_process,
             runtime_kind: RuntimeKind::UnityBridgeV1,
+            use_unity_explorer_http: use_http,
             state: SessionLifecycleState::Attached,
             rollback_stack: Vec::new(),
             rollback_failures: 0,
             recent_events: vec![format!(
-                "Authenticated Unity {} bridge on {endpoint}",
-                payload.flavor.as_str()
+                "Authenticated Unity {} ({:?}) bridge on {endpoint}",
+                payload.flavor.as_str(),
+                payload.protocol
             )],
         };
 
@@ -289,6 +438,7 @@ impl RuntimeProvider for UnityBridgeRuntime {
         };
 
         self.store.with_session_mut(session_id, |session| {
+            let use_http = session.use_unity_explorer_http;
             match (binding, command.value) {
                 (
                     UnityFeatureBinding::ToggleField {
@@ -305,29 +455,27 @@ impl RuntimeProvider for UnityBridgeRuntime {
                     } else {
                         disabled_value.clone()
                     };
-                    send_bridge_rpc(
-                        session.endpoint,
-                        &BridgeRpcRequest {
-                            token: session.auth_token.clone(),
-                            op: "set_field".to_owned(),
-                            params: json!({
-                                "class_name": class_name,
-                                "field_name": field_name,
-                                "value": target_val
-                            }),
-                        },
-                    )?;
+                    let (op, params, undo_params) = if use_http {
+                        (
+                            "set_static",
+                            json!({ "type": class_name, "member": field_name, "value": target_val }),
+                            json!({ "type": class_name, "member": field_name, "value": disabled_value }),
+                        )
+                    } else {
+                        (
+                            "set_field",
+                            json!({ "class_name": class_name, "field_name": field_name, "value": target_val }),
+                            json!({ "class_name": class_name, "field_name": field_name, "value": disabled_value }),
+                        )
+                    };
+                    send_unity_rpc(use_http, session.endpoint, &session.auth_token, op, params)?;
                     if enable {
                         session.rollback_stack.push((
                             command.feature_id.clone(),
                             BridgeRpcRequest {
                                 token: session.auth_token.clone(),
-                                op: "set_field".to_owned(),
-                                params: json!({
-                                    "class_name": class_name,
-                                    "field_name": field_name,
-                                    "value": disabled_value
-                                }),
+                                op: op.to_owned(),
+                                params: undo_params,
                             },
                         ));
                     } else {
@@ -347,18 +495,28 @@ impl RuntimeProvider for UnityBridgeRuntime {
                     },
                     FeatureValue::Integer(val),
                 ) => {
-                    send_bridge_rpc(
-                        session.endpoint,
-                        &BridgeRpcRequest {
-                            token: session.auth_token.clone(),
-                            op: "set_field".to_owned(),
-                            params: json!({
-                                "class_name": class_name,
-                                "field_name": field_name,
-                                "value": val
-                            }),
-                        },
-                    )?;
+                    let (op, params) = if use_http {
+                        (
+                            "set_static",
+                            json!({ "type": class_name, "member": field_name, "value": val }),
+                        )
+                    } else {
+                        (
+                            "set_field",
+                            json!({ "class_name": class_name, "field_name": field_name, "value": val }),
+                        )
+                    };
+                    send_unity_rpc(use_http, session.endpoint, &session.auth_token, op, params)?;
+                    if use_http {
+                        session.rollback_stack.push((
+                            command.feature_id.clone(),
+                            BridgeRpcRequest {
+                                token: String::new(),
+                                op: "undo_write".to_owned(),
+                                params: json!({ "steps": 1 }),
+                            },
+                        ));
+                    }
                     session
                         .recent_events
                         .push(format!("Unity field '{class_name}.{field_name}' = {val}"));
@@ -371,18 +529,28 @@ impl RuntimeProvider for UnityBridgeRuntime {
                     },
                     FeatureValue::Float(val),
                 ) => {
-                    send_bridge_rpc(
-                        session.endpoint,
-                        &BridgeRpcRequest {
-                            token: session.auth_token.clone(),
-                            op: "set_field".to_owned(),
-                            params: json!({
-                                "class_name": class_name,
-                                "field_name": field_name,
-                                "value": val
-                            }),
-                        },
-                    )?;
+                    let (op, params) = if use_http {
+                        (
+                            "set_static",
+                            json!({ "type": class_name, "member": field_name, "value": val }),
+                        )
+                    } else {
+                        (
+                            "set_field",
+                            json!({ "class_name": class_name, "field_name": field_name, "value": val }),
+                        )
+                    };
+                    send_unity_rpc(use_http, session.endpoint, &session.auth_token, op, params)?;
+                    if use_http {
+                        session.rollback_stack.push((
+                            command.feature_id.clone(),
+                            BridgeRpcRequest {
+                                token: String::new(),
+                                op: "undo_write".to_owned(),
+                                params: json!({ "steps": 1 }),
+                            },
+                        ));
+                    }
                     session
                         .recent_events
                         .push(format!("Unity field '{class_name}.{field_name}' = {val}"));
@@ -395,17 +563,18 @@ impl RuntimeProvider for UnityBridgeRuntime {
                     },
                     FeatureValue::Action,
                 ) => {
-                    send_bridge_rpc(
-                        session.endpoint,
-                        &BridgeRpcRequest {
-                            token: session.auth_token.clone(),
-                            op: "invoke_method".to_owned(),
-                            params: json!({
-                                "class_name": class_name,
-                                "method_name": method_name
-                            }),
-                        },
-                    )?;
+                    let (op, params) = if use_http {
+                        (
+                            "invoke_static",
+                            json!({ "type": class_name, "method": method_name, "args": [] }),
+                        )
+                    } else {
+                        (
+                            "invoke_method",
+                            json!({ "class_name": class_name, "method_name": method_name }),
+                        )
+                    };
+                    send_unity_rpc(use_http, session.endpoint, &session.auth_token, op, params)?;
                     session.recent_events.push(format!(
                         "Invoked Unity method '{class_name}.{method_name}()'"
                     ));
@@ -662,5 +831,214 @@ mod tests {
         assert_eq!(log[2].1["value"], json!(0.0));
         assert_eq!(log[3].0, "set_field");
         assert_eq!(log[3].1["value"], json!(1.0));
+    }
+
+    #[test]
+    fn unity_explorer_mcp_http_discovers_pid_port_verifies_il2cpp_and_rolls_back() {
+        use std::io::Read;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let discovery_dir = std::env::temp_dir().join(format!("nekod_ue_mcp_{nanos}"));
+        fs::create_dir_all(&discovery_dir).unwrap();
+        fs::write(
+            discovery_dir.join("bridge-10456.json"),
+            serde_json::json!({
+                "pid": 10456,
+                "port": port,
+                "backend": "IL2CPP",
+                "loader": "BepInEx",
+                "unity_version": "2022.3.51f1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let observed = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let observed_clone = Arc::clone(&observed);
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(6) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut content_len = 0usize;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = trimmed.split_once(':')
+                        && k.trim().eq_ignore_ascii_case("content-length")
+                    {
+                        content_len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_len];
+                reader.read_exact(&mut body).unwrap();
+                let req: Value = serde_json::from_slice(&body).unwrap();
+                let method = req["method"].as_str().unwrap().to_owned();
+                observed_clone
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), req["params"].clone()));
+
+                let resp_json = match method.as_str() {
+                    "ping" => serde_json::json!({
+                        "Success": true,
+                        "Data": {
+                            "Status": "ok",
+                            "Backend": "IL2CPP",
+                            "Loader": "BepInEx",
+                            "Pid": 10456,
+                            "Port": port,
+                            "UnityVersion": "2022.3.51f1"
+                        }
+                    })
+                    .to_string(),
+                    _ => serde_json::json!({ "Success": true, "Data": {} }).to_string(),
+                };
+                let http_resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_json.len(),
+                    resp_json
+                );
+                stream.write_all(http_resp.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let payload = serde_json::json!({
+            "schema_version": "1.0.0",
+            "protocol": "unity_explorer_mcp_http_v1",
+            "flavor": "il2cpp",
+            "loader": "bepinex_il2cpp",
+            "host": "127.0.0.1",
+            "port": 0,
+            "auto_discover_by_pid": true,
+            "discovery_dir": discovery_dir.display().to_string(),
+            "features": [
+                {
+                    "kind": "toggle_field",
+                    "feature_id": "infinite-stamina",
+                    "class_name": "Game.PlayerStats",
+                    "field_name": "s_staminaCostMultiplier",
+                    "enabled_value": 0.0,
+                    "disabled_value": 1.0
+                },
+                {
+                    "kind": "set_field",
+                    "feature_id": "time-scale",
+                    "class_name": "UnityEngine.Time",
+                    "field_name": "timeScale"
+                },
+                {
+                    "kind": "invoke_method",
+                    "feature_id": "heal-player",
+                    "class_name": "Game.PlayerStats",
+                    "method_name": "RestoreAll"
+                }
+            ]
+        })
+        .to_string();
+
+        let mut req = unity_request(UnityFlavor::Il2cpp, UnityLoaderKind::BepinexIl2cpp, 0);
+        req.target_process.pid = 10456;
+        req.trainer.features = vec![
+            TrainerFeature {
+                id: "infinite-stamina".to_owned(),
+                name: "Infinite Stamina".to_owned(),
+                description: "No stamina drain".to_owned(),
+                category: FeatureCategory::Player,
+                control_type: FeatureControlType::Toggle,
+                default_hotkey: None,
+                mutates_memory: true,
+                supports_rollback: true,
+                risk_level: FeatureRiskLevel::Low,
+                value_range: None,
+            },
+            TrainerFeature {
+                id: "time-scale".to_owned(),
+                name: "Time Scale".to_owned(),
+                description: "Adjust game speed".to_owned(),
+                category: FeatureCategory::Time,
+                control_type: FeatureControlType::Float,
+                default_hotkey: None,
+                mutates_memory: true,
+                supports_rollback: true,
+                risk_level: FeatureRiskLevel::Low,
+                value_range: None,
+            },
+            TrainerFeature {
+                id: "heal-player".to_owned(),
+                name: "Heal Player".to_owned(),
+                description: "Trigger static restore".to_owned(),
+                category: FeatureCategory::Player,
+                control_type: FeatureControlType::Action,
+                default_hotkey: None,
+                mutates_memory: true,
+                supports_rollback: false,
+                risk_level: FeatureRiskLevel::Low,
+                value_range: None,
+            },
+        ];
+        req.declarative_payload_json = Some(payload);
+
+        let router = CompositeRuntimeRouter::with_default_providers();
+        let sid = router.start_session(req).unwrap();
+        router
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "infinite-stamina".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        router
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "heal-player".to_owned(),
+                    value: FeatureValue::Action,
+                },
+            )
+            .unwrap();
+        router
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "time-scale".to_owned(),
+                    value: FeatureValue::Float(2.0),
+                },
+            )
+            .unwrap();
+
+        let diag = router.stop_session(&sid).unwrap();
+        assert_eq!(diag.rollback_failures, 0);
+        assert_eq!(diag.active_patches, 0);
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(discovery_dir);
+
+        let ops = observed.lock().unwrap();
+        assert_eq!(ops.len(), 6);
+        assert_eq!(ops[0].0, "ping");
+        assert_eq!(ops[1].0, "set_static");
+        assert_eq!(ops[1].1["value"], json!(0.0));
+        assert_eq!(ops[2].0, "invoke_static");
+        assert_eq!(ops[2].1["method"], "RestoreAll");
+        assert_eq!(ops[3].0, "set_static");
+        assert_eq!(ops[3].1["value"], json!(2.0));
+        // LIFO rollback: UndoStore 1 step for time-scale, then restore infinite-stamina = 1.0
+        assert_eq!(ops[4].0, "undo_write");
+        assert_eq!(ops[5].0, "set_static");
+        assert_eq!(ops[5].1["value"], json!(1.0));
     }
 }
