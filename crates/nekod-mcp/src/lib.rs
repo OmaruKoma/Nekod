@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod server;
+pub mod unity_metadata;
 pub use server::{McpError, NekodMcpServer};
 
 /// Five scoped tool groups exposed by `nekod-mcp` in Phase P4.
@@ -55,6 +56,12 @@ pub const PLANNED_MCP_TOOLS: &[McpToolSpec] = &[
         read_only: true,
         requires_explicit_authorization: false,
     },
+    McpToolSpec {
+        name: "inspect_unity_assemblies",
+        group: McpToolGroup::GameDiscovery,
+        read_only: true,
+        requires_explicit_authorization: false,
+    },
     // Trainer Development
     McpToolSpec {
         name: "create_trainer_manifest",
@@ -85,6 +92,18 @@ pub const PLANNED_MCP_TOOLS: &[McpToolSpec] = &[
         group: McpToolGroup::TrainerDevelopment,
         read_only: false,
         requires_explicit_authorization: true,
+    },
+    McpToolSpec {
+        name: "pack_nmod_archive",
+        group: McpToolGroup::TrainerDevelopment,
+        read_only: false,
+        requires_explicit_authorization: true,
+    },
+    McpToolSpec {
+        name: "analyze_ct_file",
+        group: McpToolGroup::TrainerDevelopment,
+        read_only: true,
+        requires_explicit_authorization: false,
     },
     // Compatibility
     McpToolSpec {
@@ -138,6 +157,12 @@ pub const PLANNED_MCP_TOOLS: &[McpToolSpec] = &[
         requires_explicit_authorization: true,
     },
     McpToolSpec {
+        name: "probe_unity_bridge",
+        group: McpToolGroup::RuntimeInspection,
+        read_only: true,
+        requires_explicit_authorization: true,
+    },
+    McpToolSpec {
         name: "inspect_trainer_state",
         group: McpToolGroup::RuntimeInspection,
         read_only: true,
@@ -162,12 +187,16 @@ mod tests {
 
     use super::*;
 
-    fn test_server(suffix: &str) -> (NekodMcpServer, std::path::PathBuf) {
+    fn test_server_with_data(
+        suffix: &str,
+        use_data_dir: bool,
+    ) -> (NekodMcpServer, std::path::PathBuf) {
         let root =
             std::env::temp_dir().join(format!("nekod_mcp_test_{suffix}_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
 
+        let data_dir = root.join("data");
         let service = NekodAppService::open_in_memory_with_transport(
             Arc::new(DeclarativeRuntime::new()),
             None,
@@ -175,7 +204,16 @@ mod tests {
             root.join("packages"),
         )
         .unwrap();
-        (NekodMcpServer::new(Arc::new(service)), root)
+        let server = if use_data_dir {
+            NekodMcpServer::with_data_dir(Arc::new(service), data_dir)
+        } else {
+            NekodMcpServer::new(Arc::new(service))
+        };
+        (server, root)
+    }
+
+    fn test_server(suffix: &str) -> (NekodMcpServer, std::path::PathBuf) {
+        test_server_with_data(suffix, false)
     }
 
     #[test]
@@ -203,7 +241,7 @@ mod tests {
         let list_val: Value = serde_json::from_str(&list_reply).unwrap();
         let tools = list_val["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), PLANNED_MCP_TOOLS.len());
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 23);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -433,6 +471,409 @@ mod tests {
             "automated_runtime_test"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forge_nmod_with_custom_features_packs_valid_pure_nmod_archive() {
+        let (server, root) = test_server_with_data("forge_pack_nmod", true);
+        let nmod_dir = root.join("forged-mono-mod");
+
+        let mut gm: Value = serde_json::from_str(include_str!(
+            "../../../schemas/examples/game-manifest.example.json"
+        ))
+        .unwrap();
+        gm["id"] = json!("mono-demo-game");
+        gm["name"] = json!("Mono Demo Game");
+        gm["store_ids"]["steam_app_id"] = json!(123456);
+
+        let custom_payload = json!({
+            "schema_version": "1.0.0",
+            "protocol": "nekod_json_line_v1",
+            "flavor": "mono",
+            "loader": "bepinex_mono",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "auto_discover_by_pid": true,
+            "features": [
+                {
+                    "kind": "toggle_field",
+                    "feature_id": "player-invincible",
+                    "class_name": "Demo.PlayerController",
+                    "field_name": "isImmortal",
+                    "enabled_value": true,
+                    "disabled_value": false
+                },
+                {
+                    "kind": "invoke_method",
+                    "feature_id": "reset-health",
+                    "class_name": "Demo.PlayerController",
+                    "method_name": "ResetHealth"
+                }
+            ]
+        });
+
+        let custom_features = json!([
+            {
+                "id": "player-invincible",
+                "name": "Player Invincible",
+                "description": "Toggle Demo.PlayerController.isImmortal.",
+                "category": "player",
+                "control_type": "toggle",
+                "default_hotkey": "F1",
+                "mutates_memory": true,
+                "supports_rollback": true,
+                "risk_level": "low"
+            },
+            {
+                "id": "reset-health",
+                "name": "Reset Health",
+                "description": "Invoke Demo.PlayerController.ResetHealth().",
+                "category": "player",
+                "control_type": "action",
+                "default_hotkey": "F2",
+                "mutates_memory": true,
+                "supports_rollback": false,
+                "risk_level": "low"
+            }
+        ]);
+
+        let forged = server
+            .dispatch_tool(
+                "forge_nmod_package",
+                &json!({
+                    "authorize_write": true,
+                    "output_dir": nmod_dir.to_string_lossy(),
+                    "mod_id": "dev.example.mono-demo",
+                    "name": "Mono Demo Mod",
+                    "version": "1.2.0",
+                    "game_id": "mono-demo-game",
+                    "game_name": "Mono Demo Game",
+                    "steam_app_id": 123456,
+                    "source_repository": "https://github.com/example/mono-demo-nmod",
+                    "runtime_kind": "unity_bridge_v1",
+                    "mod_kind": "trainer",
+                    "flavor": "mono",
+                    "features": custom_features,
+                    "entrypoint_payload": custom_payload,
+                    "game_manifest": gm
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(forged["wrote_legacy_v1_manifest"], false);
+        assert_eq!(forged["wrote_game_manifest"], true);
+        assert_eq!(forged["feature_count"], 2);
+        assert!(nmod_dir.join("mod-manifest.json").is_file());
+        assert!(nmod_dir.join("game-manifest.json").is_file());
+        assert!(!nmod_dir.join("trainer-manifest.json").exists());
+
+        let validated = server
+            .dispatch_tool(
+                "validate_trainer_manifest",
+                &json!({ "package_dir": nmod_dir.to_string_lossy() }),
+            )
+            .unwrap();
+        assert_eq!(validated["valid"], true);
+        assert_eq!(validated["manifest_format"], "mod_manifest_v2");
+
+        // Mutate the entrypoint payload slightly and verify pack_nmod_archive recomputes checksums.
+        let entrypoint_rel = forged["entrypoint_file"].as_str().unwrap();
+        let entry_path = nmod_dir.join(entrypoint_rel);
+        let mut edited_payload: Value =
+            serde_json::from_str(&fs::read_to_string(&entry_path).unwrap()).unwrap();
+        edited_payload["port"] = json!(19549);
+        fs::write(
+            &entry_path,
+            serde_json::to_string_pretty(&edited_payload).unwrap(),
+        )
+        .unwrap();
+
+        let packed = server
+            .dispatch_tool(
+                "pack_nmod_archive",
+                &json!({
+                    "authorize_write": true,
+                    "package_dir": nmod_dir.to_string_lossy(),
+                    "recompute_checksums": true,
+                    "install_to_local_nmods": true
+                }),
+            )
+            .unwrap();
+        assert_eq!(packed["packed"], true);
+        assert_eq!(packed["feature_count"], 2);
+
+        let archive_path = std::path::PathBuf::from(packed["archive_path"].as_str().unwrap());
+        assert!(archive_path.is_file());
+        assert!(archive_path.starts_with(root.join("data").join("nmods")));
+
+        let file = fs::File::open(&archive_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut names = Vec::new();
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).unwrap().name().to_owned());
+        }
+        assert!(names.contains(&"mod-manifest.json".to_owned()));
+        assert!(names.contains(&"game-manifest.json".to_owned()));
+        assert!(names.contains(&entrypoint_rel.to_owned()));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn analyzes_ct_files_and_inspects_synthetic_unity_dll_and_refuses_anticheat() {
+        let (server, root) = test_server("ct_unity_inspect");
+
+        let ct_path = root.join("sample.CT");
+        let sample_ct = r#"<?xml version="1.0" encoding="utf-8"?>
+<CheatTable CheatEngineTableVersion="45">
+  <CheatEntries>
+    <CheatEntry>
+      <ID>1</ID>
+      <Description>"Demo Byte Patch"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+aobscanmodule(MOD_AOB,DemoGame.exe,48 89 5C 24 08)
+MOD_AOB:
+  db 90 90 90 90 90
+[DISABLE]
+MOD_AOB:
+  db 48 89 5C 24 08
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>2</ID>
+      <Description>"Lua Helper"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>{$lua}
+if syntaxcheck then return end
+[ENABLE]
+print("hi")
+[DISABLE]
+</AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+</CheatTable>"#;
+        fs::write(&ct_path, sample_ct).unwrap();
+
+        let ct_res = server
+            .dispatch_tool(
+                "analyze_ct_file",
+                &json!({
+                    "ct_path": ct_path.to_string_lossy(),
+                    "game_id": "demo-game",
+                    "game_name": "Demo Game",
+                    "default_module": "DemoGame.exe"
+                }),
+            )
+            .unwrap();
+        assert!(ct_res["convertible_count"].as_u64().unwrap() >= 1);
+        assert!(ct_res["skipped_count"].as_u64().unwrap() >= 1);
+        assert!(
+            ct_res["recommendation"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+
+        let unity_dir = root.join("DemoUnityGame");
+        let managed = unity_dir.join("Demo_Data").join("Managed");
+        fs::create_dir_all(&managed).unwrap();
+        fs::write(
+            managed.join("Assembly-CSharp.dll"),
+            crate::unity_metadata::build_synthetic_unity_dll_for_test(),
+        )
+        .unwrap();
+
+        let filtered = server
+            .dispatch_tool(
+                "inspect_unity_assemblies",
+                &json!({
+                    "install_dir": unity_dir.to_string_lossy(),
+                    "filter": "Player"
+                }),
+            )
+            .unwrap();
+        let types = filtered["types"].as_array().unwrap();
+        assert!(
+            types
+                .iter()
+                .any(|t| t["full_name"] == "Demo.PlayerController")
+        );
+
+        let detail = server
+            .dispatch_tool(
+                "inspect_unity_assemblies",
+                &json!({
+                    "install_dir": unity_dir.to_string_lossy(),
+                    "type_name": "Demo.PlayerController"
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            detail["inheritance_chain"],
+            json!([
+                "Demo.PlayerController",
+                "Demo.BaseHealth",
+                "UnityEngine.MonoBehaviour"
+            ])
+        );
+        assert!(
+            detail["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["name"] == "isImmortal" && f["bridge_accessible"] == true)
+        );
+        assert!(
+            detail["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["name"] == "AllAmmoInfinity")
+        );
+        assert!(
+            detail["methods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["name"] == "ResetHealth" && m["invoke_method_compatible"] == true)
+        );
+
+        // Refuses inspection when anti-cheat markers exist in install_dir.
+        fs::create_dir_all(unity_dir.join("EasyAntiCheat")).unwrap();
+        let ac_err = server
+            .dispatch_tool(
+                "inspect_unity_assemblies",
+                &json!({
+                    "install_dir": unity_dir.to_string_lossy()
+                }),
+            )
+            .unwrap_err();
+        assert!(matches!(ac_err, McpError::PolicyRefusal(_)));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn probe_unity_bridge_enforces_authz_and_readonly_allowlist() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let (server, root) = test_server("probe_bridge");
+        let discovery_dir = root.join("bridge_discovery");
+        fs::create_dir_all(&discovery_dir).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pid = 42424u32;
+        let token = "0123456789abcdef0123456789abcdef";
+
+        fs::write(
+            discovery_dir.join(format!("unity-{pid}.json")),
+            json!({
+                "pid": pid,
+                "port": port,
+                "flavor": "mono",
+                "loader": "bepinex_mono",
+                "auth_token": token,
+                "unity_version": "2022.3.51f1",
+                "bridge_version": "0.2.0"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let bg = thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(req["token"], token);
+                match req["op"].as_str().unwrap() {
+                    "ping" => {
+                        writeln!(
+                            stream,
+                            "{{\"ok\":true,\"data\":{{\"flavor\":\"mono\",\"pid\":{pid},\"port\":{port}}}}}"
+                        )
+                        .unwrap();
+                    }
+                    "get_field" => {
+                        assert_eq!(req["params"]["class_name"], "Demo.PlayerController");
+                        assert_eq!(req["params"]["field_name"], "isImmortal");
+                        writeln!(stream, "{{\"ok\":true,\"data\":{{\"value\":false}}}}").unwrap();
+                    }
+                    other => panic!("unexpected op sent to read-only mock bridge: {other}"),
+                }
+            }
+        });
+
+        // 1. Missing authorize_process_inspection must fail with AuthorizationRequired.
+        let unauth_err = server
+            .dispatch_tool(
+                "probe_unity_bridge",
+                &json!({
+                    "pid": pid,
+                    "op": "ping",
+                    "discovery_dir": discovery_dir.to_string_lossy()
+                }),
+            )
+            .unwrap_err();
+        assert!(matches!(unauth_err, McpError::AuthorizationRequired(_)));
+
+        // 2. Mutating operations must fail closed with PolicyRefusal before touching network.
+        let mutate_err = server
+            .dispatch_tool(
+                "probe_unity_bridge",
+                &json!({
+                    "authorize_process_inspection": true,
+                    "pid": pid,
+                    "op": "set_field",
+                    "class_name": "Demo.PlayerController",
+                    "field_name": "isImmortal",
+                    "discovery_dir": discovery_dir.to_string_lossy()
+                }),
+            )
+            .unwrap_err();
+        assert!(matches!(mutate_err, McpError::PolicyRefusal(_)));
+
+        // 3. Authorized read-only ping succeeds.
+        let ping_res = server
+            .dispatch_tool(
+                "probe_unity_bridge",
+                &json!({
+                    "authorize_process_inspection": true,
+                    "pid": pid,
+                    "op": "ping",
+                    "discovery_dir": discovery_dir.to_string_lossy()
+                }),
+            )
+            .unwrap();
+        assert_eq!(ping_res["read_only"], true);
+        assert_eq!(ping_res["op"], "ping");
+        assert_eq!(ping_res["data"]["flavor"], "mono");
+
+        // 4. Authorized read-only get_field succeeds.
+        let field_res = server
+            .dispatch_tool(
+                "probe_unity_bridge",
+                &json!({
+                    "authorize_process_inspection": true,
+                    "pid": pid,
+                    "op": "get_field",
+                    "class_name": "Demo.PlayerController",
+                    "field_name": "isImmortal",
+                    "discovery_dir": discovery_dir.to_string_lossy()
+                }),
+            )
+            .unwrap();
+        assert_eq!(field_res["read_only"], true);
+        assert_eq!(field_res["op"], "get_field");
+        assert_eq!(field_res["data"]["value"], false);
+
+        bg.join().unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 }

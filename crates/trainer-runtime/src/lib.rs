@@ -56,8 +56,8 @@ pub use session::{check_running_anti_cheat, validate_session_preflight};
 pub use ue4ss_bridge::{Ue4ssBridgePayload, Ue4ssBridgeRuntime, Ue4ssFeatureBinding};
 pub use unity_bridge::{
     NekodUnityDiscovery, UnityBridgePayload, UnityBridgeProtocol, UnityBridgeRuntime,
-    UnityFeatureBinding, UnityFlavor, UnityLoaderKind, resolve_nekod_unity_discovery,
-    resolve_unity_explorer_discovery_port,
+    UnityFeatureBinding, UnityFlavor, UnityLoaderKind, probe_nekod_unity_bridge_readonly,
+    resolve_nekod_unity_discovery, resolve_unity_explorer_discovery_port,
 };
 
 use session::{

@@ -73,7 +73,7 @@ fn nekod_mcp_binary_communicates_over_real_stdio_json_rpc() {
             "params": {}
         }),
     );
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 23);
 
     // 3. Unauthorized write fails closed with isError=true inside MCP CallToolResult.
     let unauth = send_and_recv(

@@ -230,6 +230,37 @@ pub fn resolve_nekod_unity_discovery(
     })
 }
 
+/// Executes a strictly read-only inspection RPC (`ping`, `list_types`, `get_field`)
+/// against a live `NekodUnityBridge` loopback instance discovered by target PID.
+pub fn probe_nekod_unity_bridge_readonly(
+    target_pid: u32,
+    discovery_dir: Option<&str>,
+    op: &str,
+    params: Value,
+) -> Result<Value, RuntimeError> {
+    if !matches!(op, "ping" | "list_types" | "get_field") {
+        return Err(RuntimeError::InvalidPayload(format!(
+            "readonly bridge probe refuses operation '{op}'; allowed ops: ping, list_types, get_field"
+        )));
+    }
+    let disc = resolve_nekod_unity_discovery(target_pid, discovery_dir).ok_or_else(|| {
+        RuntimeError::InvalidPayload(format!(
+            "no NekodUnityBridge discovery record found for PID {target_pid} (ensure game is running with NekodUnityBridge deployed)"
+        ))
+    })?;
+    let token = disc.auth_token.as_deref().unwrap_or("");
+    let endpoint = validate_loopback_bridge("127.0.0.1", disc.port, token)?;
+    send_bridge_rpc(
+        endpoint,
+        &BridgeRpcRequest {
+            token: token.to_owned(),
+            op: op.to_owned(),
+            params,
+        },
+    )
+    .map(|resp| resp.data)
+}
+
 fn find_plugin_dll_matching(plugins_dir: &Path, needle: &str) -> Option<PathBuf> {
     let entries = fs::read_dir(plugins_dir).ok()?;
     for entry in entries.flatten() {
@@ -1206,6 +1237,84 @@ mod tests {
         let diag = router.stop_session(&sid).unwrap();
         assert_eq!(diag.rollback_failures, 0);
         assert_eq!(diag.active_patches, 0);
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(discovery_dir);
+    }
+
+    #[test]
+    fn readonly_probe_executes_ping_and_get_field_and_refuses_mutations() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = "probe_tok_0123456789abcdef012345";
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let discovery_dir = std::env::temp_dir().join(format!("nekod_probe_unity_{nanos}"));
+        fs::create_dir_all(&discovery_dir).unwrap();
+        fs::write(
+            discovery_dir.join("unity-44100.json"),
+            serde_json::json!({
+                "pid": 44100,
+                "port": port,
+                "flavor": "mono",
+                "loader": "bepinex_mono",
+                "auth_token": token
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let dir_str = discovery_dir.display().to_string();
+        assert!(matches!(
+            probe_nekod_unity_bridge_readonly(44100, Some(&dir_str), "set_field", json!({})),
+            Err(RuntimeError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            probe_nekod_unity_bridge_readonly(44100, Some(&dir_str), "invoke_method", json!({})),
+            Err(RuntimeError::InvalidPayload(_))
+        ));
+
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(req["token"], token);
+                match req["op"].as_str().unwrap() {
+                    "ping" => writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"mono\",\"pid\":44100,\"port\":{port}}}}}"
+                    )
+                    .unwrap(),
+                    "get_field" => writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"type\":\"UnityEngine.Time\",\"member\":\"timeScale\",\"value\":1.0}}}}"
+                    )
+                    .unwrap(),
+                    other => panic!("unexpected op {other}"),
+                }
+            }
+        });
+
+        let ping =
+            probe_nekod_unity_bridge_readonly(44100, Some(&dir_str), "ping", json!({})).unwrap();
+        assert_eq!(ping["flavor"], "mono");
+
+        let field = probe_nekod_unity_bridge_readonly(
+            44100,
+            Some(&dir_str),
+            "get_field",
+            json!({ "class_name": "UnityEngine.Time", "field_name": "timeScale" }),
+        )
+        .unwrap();
+        assert_eq!(field["value"], 1.0);
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(discovery_dir);
