@@ -16,6 +16,7 @@ import type {
   LaunchGameResult,
   LibraryGameView,
   LoaderProgressEvent,
+  LocalNmodCandidate,
   PermissionScope,
   ProcessIdentity,
   QuickSetupResult,
@@ -767,6 +768,7 @@ export function createBrowserPreviewApi() {
         message: "已静态转换并导入 2 项声明式功能（安全跳过 0 项不安全条目）。",
       };
     },
+    discoverLocalNmods: async (): Promise<LocalNmodCandidate[]> => [],
     syncGlobalHotkeys: async (bindings: GlobalHotkeyBinding[]): Promise<number> => {
       pushLog("info", "hotkeys", `Synced ${bindings.length} global hotkey binding(s) (preview)`);
       return bindings.length;

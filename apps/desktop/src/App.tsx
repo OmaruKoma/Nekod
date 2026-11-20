@@ -47,6 +47,7 @@ import {
   GameProfile,
   LibraryGameView,
   LoaderProgressEvent,
+  LocalNmodCandidate,
   PermissionScope,
   ProcessIdentity,
   RegistrySourceState,
@@ -220,6 +221,7 @@ export default function App() {
   const [communityTrainers, setCommunityTrainers] = useState<
     CommunityTrainerView[]
   >([]);
+  const [localNmods, setLocalNmods] = useState<LocalNmodCandidate[]>([]);
   const [updates, setUpdates] = useState<TrainerUpdateInfo[]>([]);
   const [profilesByTrainer, setProfilesByTrainer] = useState<
     Record<string, Record<string, string>>
@@ -245,6 +247,11 @@ export default function App() {
       trainers.find((t) => t.trainer_id === selectedTrainerId) ?? trainers[0]
     );
   }, [trainers, selectedTrainerId]);
+
+  const uninstalledLocalNmods = useMemo(
+    () => localNmods.filter((m) => !m.already_installed),
+    [localNmods],
+  );
 
   const isSelectedGameInjected =
     activeSessionId !== null &&
@@ -493,6 +500,7 @@ export default function App() {
     setSelectedPid(null);
     setGameEnv(null);
     setCompatRecords([]);
+    setLocalNmods([]);
     setProfileJsonTrainerId(null);
 
     await Promise.all([
@@ -502,6 +510,19 @@ export default function App() {
             entry.game.install_dir,
           );
           setGameEnv(env);
+        } catch {
+          // Non-fatal
+        }
+      })(),
+      (async () => {
+        try {
+          const cands = await nekodApi.discoverLocalNmods({
+            gameId: entry.game.matched_game_id,
+            steamAppId: entry.game.store_app_id,
+            installDir: entry.game.install_dir,
+            executablePath: entry.game.executable_path,
+          });
+          setLocalNmods(cands);
         } catch {
           // Non-fatal
         }
@@ -1019,17 +1040,41 @@ export default function App() {
       setSelectedTrainerId(res.trainer_id);
       setAwaitingPermInject(res.trainer_id);
       if (soundEnabled) soundFx.injectSuccess();
-      const isGsg2Pack = res.trainer_id === "org.nekod.gun-soul-girl-2";
-      const msg = isGsg2Pack
-        ? `已导入 GunSoul Girl 2 专属模组 (${res.trainer_id})！请先确认运行权限，然后点击「一键注入 Mod」。`
-        : `已初始化通用 Unity 控制模组 (${res.trainer_id})！请先确认运行权限，然后点击「一键注入 Mod」。`;
+      const msg = `已初始化通用 Unity 控制模组 (${res.trainer_id})！请先确认运行权限，然后点击「一键注入 Mod」。`;
       setStatusMsg(msg);
-      pushHudToast(
-        isGsg2Pack
-          ? "GunSoul Girl 2 专属模组初始化完成"
-          : "通用 Unity 控制模组初始化完成",
-        "ok",
+      pushHudToast("通用 Unity 控制模组初始化完成", "ok");
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleInstallLocalNmod(candidate: LocalNmodCandidate) {
+    if (!selectedGame) return;
+    try {
+      setBusyAction(`nmod:${candidate.mod_id}`);
+      setError(null);
+      await nekodApi.ingestLocalTrainer(
+        candidate.source_path,
+        "community_verified",
       );
+      const lib = await nekodApi.rescanGames();
+      setGames(lib);
+      const refreshed =
+        lib.find((g) => g.library_key === selectedGame.library_key) ??
+        lib.find((g) => g.game.matched_game_id === candidate.target_game_id);
+      if (refreshed) {
+        await openGame(refreshed, false);
+      }
+      setSelectedTrainerId(candidate.mod_id);
+      setAwaitingPermInject(candidate.mod_id);
+      setLogs(await nekodApi.getDiagnosticLogs());
+      if (soundEnabled) soundFx.injectSuccess();
+      const msg = `已导入 .nmod 模组「${candidate.name}」(${candidate.feature_count} 项功能)！请先确认运行权限后注入。`;
+      setStatusMsg(msg);
+      pushHudToast(`已导入 .nmod：${candidate.name}`, "ok");
     } catch (e) {
       if (soundEnabled) soundFx.error();
       setError(String(e));
@@ -2391,6 +2436,68 @@ export default function App() {
                   </div>
                 )}
 
+              {uninstalledLocalNmods.length > 0 && (
+                <div className="surface-panel stack" style={{ marginBottom: 14 }}>
+                  <div
+                    className="row"
+                    style={{ justifyContent: "space-between" }}
+                  >
+                    <div className="row" style={{ gap: 6 }}>
+                      <Package size={15} strokeWidth={1.5} />
+                      <span style={{ fontWeight: 600 }}>
+                        发现匹配的本地 .nmod 模组包
+                      </span>
+                      <span className="muted mono">
+                        ({uninstalledLocalNmods.length})
+                      </span>
+                    </div>
+                    <span className="tag">nmod_v1</span>
+                  </div>
+                  {uninstalledLocalNmods.map((cand) => (
+                    <div key={`${cand.mod_id}:${cand.version}`} className="flat-row">
+                      <div style={{ minWidth: 0 }}>
+                        <div className="row">
+                          <span style={{ fontWeight: 500 }}>{cand.name}</span>
+                          <span className="mono muted">v{cand.version}</span>
+                          <span className="tag">{cand.mod_kind}</span>
+                          <span className="tag official">
+                            {cand.feature_count} 项功能
+                          </span>
+                          <span className="tag">{cand.runtime_kind}</span>
+                        </div>
+                        <div className="muted" style={{ marginTop: 2 }}>
+                          {cand.description}
+                        </div>
+                        <div className="muted mono" style={{ marginTop: 2 }}>
+                          {cand.mod_id} · {cand.source_format} ·{" "}
+                          {cand.source_path}
+                        </div>
+                      </div>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        disabled={busyAction === `nmod:${cand.mod_id}`}
+                        onClick={() => void handleInstallLocalNmod(cand)}
+                      >
+                        {busyAction === `nmod:${cand.mod_id}` ? (
+                          <RefreshCw
+                            size={14}
+                            strokeWidth={1.5}
+                            className="spin"
+                          />
+                        ) : (
+                          <Package size={14} strokeWidth={1.5} />
+                        )}
+                        <span>
+                          {busyAction === `nmod:${cand.mod_id}`
+                            ? "导入中..."
+                            : "导入 .nmod"}
+                        </span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {trainers.length === 0 ? (
                 <div className="section-flat" style={{ paddingTop: 18 }}>
                   <div
@@ -2413,12 +2520,7 @@ export default function App() {
                           <span>
                             {busyAction === "quick-setup"
                               ? "初始化中..."
-                              : selectedGame.game.store_app_id === "1948700" ||
-                                  /gunsoul\s*girl\s*2/i.test(
-                                    selectedGame.game.title,
-                                  )
-                                ? "一键导入 GunSoul Girl 2 专属模组 (21 项功能)"
-                                : "一键初始化通用 Unity 控制模组"}
+                              : "一键初始化通用 Unity 控制模组"}
                           </span>
                         </button>
                       )}
@@ -2427,11 +2529,8 @@ export default function App() {
                     {gameEnv &&
                     (gameEnv.engine === "unity_mono" ||
                       gameEnv.engine === "unity_il2cpp")
-                      ? selectedGame.game.store_app_id === "1948700" ||
-                        /gunsoul\s*girl\s*2/i.test(selectedGame.game.title)
-                        ? "检测到 GunSoul Girl 2 (Unity Mono)。点击右上角「一键导入 GunSoul Girl 2 专属模组 (21 项功能)」，即可获得玩家无敌 (F1)、无限弹药 (F2)、无后坐力 (F3)、耐力/暴击/无冷却、角色攻速/移速/伤害、五类货币资源修改及关卡结算功能。"
-                        : "检测到当前为 Unity 引擎游戏，尚未绑定专用模组。可点击右上角「一键初始化通用 Unity 控制模组」，自动配置暂停时间 (F8)、全局变速 (0.1x-8.0x) 与主线程资源清理（零 UnityExplorer 依赖）。"
-                      : "当前游戏尚未安装本地模组。可展开下方「社区可用模组」一键安装，或切换至「本地导入」导入本地模组包。"}
+                      ? "检测到当前为 Unity 引擎游戏，尚未绑定专用模组。若上方已发现匹配的 .nmod 模组包可直接一键导入；也可点击右上角「一键初始化通用 Unity 控制模组」，自动配置暂停时间 (F8)、全局变速 (0.1x-8.0x) 与主线程资源清理（零 UnityExplorer 依赖）。"
+                      : "当前游戏尚未安装本地模组。可展开下方「社区可用模组」一键安装，或切换至「本地导入」导入本地 .nmod 模组包。"}
                   </div>
                 </div>
               ) : (
@@ -3441,16 +3540,20 @@ export default function App() {
               </div>
 
               <div className="surface-panel stack">
-                <div style={{ fontWeight: 600 }}>2. 导入本地模组目录</div>
+                <div style={{ fontWeight: 600 }}>
+                  2. 导入本地 .nmod 模组包（单文件 .nmod 或目录）
+                </div>
                 <div className="muted">
-                  指定包含 <span className="mono">trainer-manifest.json</span>{" "}
-                  及对应构件的本地目录，导入前强制校验 JSON Schema 与 SHA-256。
+                  支持导入标准 <span className="mono">.nmod</span> 归档包，或包含{" "}
+                  <span className="mono">mod-manifest.json</span> /{" "}
+                  <span className="mono">trainer-manifest.json</span>{" "}
+                  的解包目录，导入前强制校验 JSON Schema 与构件 SHA-256。
                 </div>
                 <div className="row">
                   <input
                     className="text-input mono"
                     style={{ flex: 1 }}
-                    placeholder="C:\Trainers\my-trainer-package"
+                    placeholder="C:\Mods\my-game.nmod 或 C:\Mods\my-nmod-dir"
                     value={trainerDir}
                     onChange={(e) => setTrainerDir(e.target.value)}
                   />

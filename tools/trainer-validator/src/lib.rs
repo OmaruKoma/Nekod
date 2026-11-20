@@ -436,10 +436,9 @@ mod tests {
         assert_eq!(mod_manifest.runtime.kind, RuntimeKind::UnityBridgeV1);
         assert_eq!(mod_manifest.target_game.game_id, "gun-soul-girl-2");
         assert_eq!(mod_manifest.features.len(), 21);
-
-        let (trainer_manifest, _) = validate_trainer_package_dir(&pkg_dir)
-            .expect("gun-soul-girl-2 v1 trainer validates cleanly");
-        assert_eq!(trainer_manifest.id, mod_manifest.id);
-        assert_eq!(trainer_manifest.features.len(), 21);
+        assert!(
+            !pkg_dir.join("trainer-manifest.json").exists(),
+            "examples/gun-soul-girl-2 should be pure .nmod without redundant trainer-manifest.json"
+        );
     }
 }

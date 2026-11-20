@@ -6,9 +6,11 @@ mod hotkeys;
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use artwork::{GameArtwork, resolve_game_artwork};
 use bridges::{
@@ -22,7 +24,10 @@ use nekod_core::{
     TrainerPermissionState, TrainerUpdateInfo,
 };
 use nekod_game_detection::{GameEngineKind, GameEnvironmentProfile};
-use nekod_manifest::{PermissionScope, TrustTier, is_valid_kebab_slug};
+use nekod_manifest::{
+    GameManifest, ModKind, ModManifest, PermissionScope, RuntimeKind, TrustTier,
+    is_valid_kebab_slug, validate_relative_path,
+};
 use nekod_permission_manager::SecurityPolicyConfig;
 use nekod_profile_manager::{CustomGamePathRecord, GameProfile};
 use nekod_registry_client::{RegistrySourceState, RegistrySyncReport};
@@ -32,10 +37,14 @@ use nekod_trainer_runtime::{CompositeRuntimeRouter, DeploymentLedger, Deployment
 use nekod_validator::ct_importer::{
     CtImportOptions, SkippedCtEntry, convert_ct_xml_with_diagnostics,
 };
-use nekod_validator::validate_trainer_package_dir;
+use nekod_validator::{
+    validate_game_manifest_str, validate_mod_manifest_str, validate_nmod_package_dir,
+    validate_trainer_package_dir,
+};
 use serde::Serialize;
 use serde_json::json;
 use tauri::{Emitter, Manager, State};
+use zip::ZipArchive;
 
 pub struct AppState {
     core: Arc<NekodAppService>,
@@ -90,16 +99,181 @@ pub struct CtImportUiReport {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalNmodCandidate {
+    pub mod_id: String,
+    pub version: String,
+    pub name: String,
+    pub description: String,
+    pub mod_kind: ModKind,
+    pub target_game_id: String,
+    pub target_game_name: String,
+    pub target_steam_app_id: Option<u64>,
+    pub runtime_kind: RuntimeKind,
+    pub feature_count: usize,
+    pub source_path: String,
+    pub source_format: String,
+    pub already_installed: bool,
+}
+
 const MAX_CT_FILE_BYTES: u64 = 16 * 1024 * 1024;
-const GSG2_GAME_MANIFEST: &str =
-    include_str!("../../../../examples/gun-soul-girl-2/game-manifest.json");
-const GSG2_TRAINER_MANIFEST: &str =
-    include_str!("../../../../examples/gun-soul-girl-2/trainer-manifest.json");
-const GSG2_BRIDGE_PAYLOAD: &[u8] =
-    include_bytes!("../../../../examples/gun-soul-girl-2/scripts/unity_bridge.json");
+const MAX_NMOD_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_NMOD_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_NMOD_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_NMOD_ENTRIES: usize = 256;
+const DISALLOWED_ARCHIVE_EXTENSIONS: &[&str] = &[".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi"];
 
 fn map_err(err: impl std::fmt::Display) -> String {
     err.to_string()
+}
+
+fn sanitize_package_id_segment(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "nmod-pkg".to_owned()
+    } else {
+        cleaned
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(map_err)?;
+    for entry in fs::read_dir(src).map_err(map_err)? {
+        let entry = entry.map_err(map_err)?;
+        let ty = entry.file_type().map_err(map_err)?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ty.is_file() {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(map_err)?;
+            }
+            fs::copy(&from, &to).map_err(map_err)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_and_validate_nmod_archive(
+    archive_path: &Path,
+    data_dir: &Path,
+) -> Result<PathBuf, String> {
+    let meta = fs::metadata(archive_path)
+        .map_err(|e| format!("无法访问 .nmod 文件 '{}': {e}", archive_path.display()))?;
+    if meta.len() > MAX_NMOD_ARCHIVE_BYTES {
+        return Err(format!(
+            ".nmod 压缩包体积 ({} bytes) 超过 32 MiB 安全上限。",
+            meta.len()
+        ));
+    }
+
+    let file = fs::File::open(archive_path)
+        .map_err(|e| format!("无法打开 .nmod 文件 '{}': {e}", archive_path.display()))?;
+    let mut archive = ZipArchive::new(file).map_err(|e| {
+        format!(
+            "无效的 .nmod / ZIP 压缩包 '{}': {e}",
+            archive_path.display()
+        )
+    })?;
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staging_dir = data_dir
+        .join("staging-nmods")
+        .join(format!("{}_{nanos}", std::process::id()));
+    fs::create_dir_all(&staging_dir).map_err(map_err)?;
+
+    let result = (|| -> Result<PathBuf, String> {
+        let mut entry_count = 0usize;
+        let mut total_uncompressed = 0u64;
+
+        for i in 0..archive.len() {
+            let entry = archive
+                .by_index(i)
+                .map_err(|e| format!("读取 .nmod 归档条目 #{i} 失败: {e}"))?;
+            if entry.is_dir() {
+                continue;
+            }
+            if let Some(mode) = entry.unix_mode()
+                && (mode & 0o170000) == 0o120000
+            {
+                return Err(format!(
+                    "拒绝包含符号链接的 .nmod 归档条目 '{}'",
+                    entry.name()
+                ));
+            }
+            entry_count += 1;
+            if entry_count > MAX_NMOD_ENTRIES {
+                return Err(format!(".nmod 归档文件数超过 {MAX_NMOD_ENTRIES} 安全上限"));
+            }
+
+            let normalized = entry.name().replace('\\', "/");
+            validate_relative_path(&normalized).map_err(map_err)?;
+            let lower = normalized.to_ascii_lowercase();
+            if DISALLOWED_ARCHIVE_EXTENSIONS
+                .iter()
+                .any(|ext| lower.ends_with(ext))
+            {
+                return Err(format!(
+                    "source-first .nmod 归档禁止包含可执行文件 '{normalized}'"
+                ));
+            }
+
+            let remaining = MAX_NMOD_UNCOMPRESSED_BYTES.saturating_sub(total_uncompressed);
+            let mut buf = Vec::new();
+            entry
+                .take(remaining + 1)
+                .read_to_end(&mut buf)
+                .map_err(map_err)?;
+            total_uncompressed = total_uncompressed.saturating_add(buf.len() as u64);
+            if total_uncompressed > MAX_NMOD_UNCOMPRESSED_BYTES {
+                return Err(".nmod 解压总大小超过 64 MiB 安全上限".to_owned());
+            }
+
+            let dest = staging_dir.join(&normalized);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent).map_err(map_err)?;
+            }
+            fs::write(&dest, &buf).map_err(map_err)?;
+        }
+
+        let (pkg_id, pkg_ver) = if staging_dir.join("mod-manifest.json").is_file() {
+            let (m, _) = validate_nmod_package_dir(&staging_dir).map_err(map_err)?;
+            (m.id, m.version.to_string())
+        } else if staging_dir.join("trainer-manifest.json").is_file() {
+            let (m, _) = validate_trainer_package_dir(&staging_dir).map_err(map_err)?;
+            (m.id, m.version.to_string())
+        } else {
+            return Err(
+                ".nmod 归档根目录缺少有效的 mod-manifest.json 或 trainer-manifest.json".to_owned(),
+            );
+        };
+
+        let install_dir = data_dir
+            .join("installed-nmods")
+            .join(sanitize_package_id_segment(&pkg_id))
+            .join(sanitize_package_id_segment(&pkg_ver));
+        if install_dir.exists() {
+            fs::remove_dir_all(&install_dir).map_err(map_err)?;
+        }
+        copy_dir_recursive(&staging_dir, &install_dir)?;
+        Ok(install_dir)
+    })();
+
+    let _ = fs::remove_dir_all(&staging_dir);
+    result
 }
 
 #[tauri::command]
@@ -158,8 +332,33 @@ async fn ingest_local_trainer(
     trust_tier: TrustTier,
 ) -> Result<(), String> {
     let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let pkg_path = PathBuf::from(&package_dir);
+        let trimmed = package_dir.trim().trim_matches('"');
+        let raw_path = PathBuf::from(trimmed);
+        let pkg_path = if raw_path.is_file() {
+            let ext = raw_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            if ext == "nmod" || ext == "zip" {
+                extract_and_validate_nmod_archive(&raw_path, &data_dir)?
+            } else {
+                return Err(format!(
+                    "不支持的文件格式 '{}'；请选择 .nmod 归档包或包含 mod-manifest.json 的目录。",
+                    raw_path.display()
+                ));
+            }
+        } else if raw_path.is_dir() {
+            raw_path
+        } else {
+            return Err(format!(
+                "路径 '{}' 不存在（请填写本地 .nmod 文件或模组目录路径）。",
+                raw_path.display()
+            ));
+        };
+
         let sibling_gm = pkg_path.join("game-manifest.json");
         if sibling_gm.is_file() {
             let raw_gm = fs::read_to_string(&sibling_gm).map_err(map_err)?;
@@ -816,45 +1015,6 @@ fn register_minimal_game_manifest(
         .map_err(map_err)
 }
 
-fn setup_curated_gsg2_pack(
-    core: &NekodAppService,
-    data_dir: &Path,
-) -> Result<QuickSetupResult, String> {
-    core.register_game_manifest(GSG2_GAME_MANIFEST)
-        .map_err(map_err)?;
-
-    let pkg_dir = data_dir.join("generated-starters").join("gun-soul-girl-2");
-    let scripts_dir = pkg_dir.join("scripts");
-    fs::create_dir_all(&scripts_dir).map_err(map_err)?;
-    fs::write(scripts_dir.join("unity_bridge.json"), GSG2_BRIDGE_PAYLOAD).map_err(map_err)?;
-
-    let mut tm_val: serde_json::Value =
-        serde_json::from_str(GSG2_TRAINER_MANIFEST).map_err(map_err)?;
-    if let Some(artifact) = tm_val
-        .get_mut("artifacts")
-        .and_then(|a| a.get_mut(0))
-        .and_then(|v| v.as_object_mut())
-    {
-        artifact.insert("sha256".to_owned(), json!(sha256_hex(GSG2_BRIDGE_PAYLOAD)));
-        artifact.insert(
-            "size_bytes".to_owned(),
-            json!(GSG2_BRIDGE_PAYLOAD.len() as u64),
-        );
-    }
-    let raw_tm = serde_json::to_string_pretty(&tm_val).map_err(map_err)?;
-    fs::write(pkg_dir.join("trainer-manifest.json"), raw_tm).map_err(map_err)?;
-
-    core.ingest_local_trainer(&pkg_dir, TrustTier::Official)
-        .map_err(map_err)?;
-    core.rescan_games().map_err(map_err)?;
-
-    Ok(QuickSetupResult {
-        game_id: "gun-soul-girl-2".to_owned(),
-        trainer_id: "org.nekod.gun-soul-girl-2".to_owned(),
-        engine: GameEngineKind::UnityMono,
-    })
-}
-
 fn quick_setup_unity_starter_sync(
     core: &NekodAppService,
     data_dir: &Path,
@@ -892,13 +1052,6 @@ fn quick_setup_unity_starter_sync(
         .ok_or_else(|| format!("no primary game executable (.exe) found in '{install_dir}'"))?;
 
     let steam_app_u64 = parse_steam_app_u64(Some(&store_source), store_app_id.as_deref());
-    if env.engine == GameEngineKind::UnityMono
-        && (steam_app_u64 == Some(1_948_700)
-            || primary_exe.eq_ignore_ascii_case("GunSoulGirl 2.exe"))
-    {
-        return setup_curated_gsg2_pack(core, data_dir);
-    }
-
     let existing_manifests = core.list_registered_game_manifests().map_err(map_err)?;
     let (candidate_id, already_exists) = resolve_game_id_candidate(
         &existing_manifests,
@@ -1517,6 +1670,243 @@ async fn import_ct_file(
     .map_err(map_err)?
 }
 
+fn nmod_search_roots(data_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![data_dir.join("nmods")];
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        roots.push(parent.join("nmods"));
+    }
+    let workspace_examples = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("examples");
+    roots.push(workspace_examples);
+    roots
+}
+
+fn read_zip_json_member<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    member_name: &str,
+) -> Option<String> {
+    let entry = archive.by_name(member_name).ok()?;
+    let mut bytes = Vec::new();
+    entry
+        .take(MAX_NMOD_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_NMOD_MANIFEST_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn inspect_nmod_dir(dir: &Path) -> Option<(ModManifest, Option<GameManifest>)> {
+    let raw_mod = fs::read_to_string(dir.join("mod-manifest.json")).ok()?;
+    let mod_manifest = validate_mod_manifest_str(&raw_mod).ok()?;
+    let companion_gm = fs::read_to_string(dir.join("game-manifest.json"))
+        .ok()
+        .and_then(|raw| validate_game_manifest_str(&raw).ok());
+    Some((mod_manifest, companion_gm))
+}
+
+fn inspect_nmod_archive(file: &Path) -> Option<(ModManifest, Option<GameManifest>)> {
+    let meta = fs::metadata(file).ok()?;
+    if !meta.is_file() || meta.len() > MAX_NMOD_ARCHIVE_BYTES {
+        return None;
+    }
+    let f = fs::File::open(file).ok()?;
+    let mut archive = ZipArchive::new(f).ok()?;
+    let raw_mod = read_zip_json_member(&mut archive, "mod-manifest.json")?;
+    let mod_manifest = validate_mod_manifest_str(&raw_mod).ok()?;
+    let companion_gm = read_zip_json_member(&mut archive, "game-manifest.json")
+        .and_then(|raw| validate_game_manifest_str(&raw).ok());
+    Some((mod_manifest, companion_gm))
+}
+
+fn nmod_matches_game(
+    mod_manifest: &ModManifest,
+    companion_gm: Option<&GameManifest>,
+    req_game_id: Option<&str>,
+    req_steam_id: Option<u64>,
+    req_exes: &[String],
+) -> bool {
+    if let Some(gid) = req_game_id
+        && mod_manifest.target_game.game_id == gid
+    {
+        return true;
+    }
+    if let Some(aid) = req_steam_id
+        && mod_manifest
+            .target_game
+            .store_ids
+            .as_ref()
+            .and_then(|s| s.steam_app_id)
+            == Some(aid)
+    {
+        return true;
+    }
+    if let Some(gm) = companion_gm {
+        if let Some(aid) = req_steam_id
+            && gm.store_ids.steam_app_id == Some(aid)
+        {
+            return true;
+        }
+        if gm.executables.iter().any(|ex| {
+            req_exes
+                .iter()
+                .any(|rx| rx.eq_ignore_ascii_case(&ex.process_name))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn scan_nmod_root(
+    root: &Path,
+    core: &NekodAppService,
+    req_game_id: Option<&str>,
+    req_steam_id: Option<u64>,
+    req_exes: &[String],
+    seen: &mut BTreeSet<(String, String)>,
+    out: &mut Vec<LocalNmodCandidate>,
+) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let (parsed, source_format) = if path.is_dir() && path.join("mod-manifest.json").is_file() {
+            (inspect_nmod_dir(&path), "nmod_dir")
+        } else if path.is_file()
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("nmod"))
+        {
+            (inspect_nmod_archive(&path), "nmod_archive")
+        } else {
+            continue;
+        };
+
+        let Some((mod_manifest, companion_gm)) = parsed else {
+            continue;
+        };
+        if !nmod_matches_game(
+            &mod_manifest,
+            companion_gm.as_ref(),
+            req_game_id,
+            req_steam_id,
+            req_exes,
+        ) {
+            continue;
+        }
+
+        let ver_str = mod_manifest.version.to_string();
+        if !seen.insert((mod_manifest.id.clone(), ver_str.clone())) {
+            continue;
+        }
+
+        let already_installed = core
+            .list_trainers_for_game(&mod_manifest.target_game.game_id, None)
+            .map(|list| {
+                list.iter()
+                    .any(|t| !t.revoked && t.trainer_id == mod_manifest.id)
+            })
+            .unwrap_or(false);
+
+        out.push(LocalNmodCandidate {
+            mod_id: mod_manifest.id,
+            version: ver_str,
+            name: mod_manifest.name,
+            description: mod_manifest.description,
+            mod_kind: mod_manifest.mod_kind,
+            target_game_id: mod_manifest.target_game.game_id,
+            target_game_name: mod_manifest.target_game.game_name,
+            target_steam_app_id: mod_manifest
+                .target_game
+                .store_ids
+                .and_then(|s| s.steam_app_id)
+                .or_else(|| companion_gm.and_then(|gm| gm.store_ids.steam_app_id)),
+            runtime_kind: mod_manifest.runtime.kind,
+            feature_count: mod_manifest.features.len(),
+            source_path: path.display().to_string(),
+            source_format: source_format.to_owned(),
+            already_installed,
+        });
+    }
+}
+
+#[tauri::command]
+async fn discover_local_nmods(
+    state: State<'_, AppState>,
+    game_id: Option<String>,
+    steam_app_id: Option<String>,
+    install_dir: Option<String>,
+    executable_path: Option<String>,
+) -> Result<Vec<LocalNmodCandidate>, String> {
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let req_game_id = game_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let req_steam_id = steam_app_id
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+
+        let mut req_exes = Vec::new();
+        if let Some(exe_path) = executable_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            && let Some(name) = Path::new(exe_path).file_name().and_then(|n| n.to_str())
+        {
+            req_exes.push(name.to_owned());
+        }
+        if let Some(dir) = install_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            for exe in NekodAppService::collect_candidate_exes_in_dir(dir) {
+                if !req_exes.iter().any(|x| x.eq_ignore_ascii_case(&exe)) {
+                    req_exes.push(exe);
+                }
+            }
+        }
+
+        if req_game_id.is_none() && req_steam_id.is_none() && req_exes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut results = Vec::new();
+        for root in nmod_search_roots(&data_dir) {
+            if root.is_dir() {
+                scan_nmod_root(
+                    &root,
+                    &core,
+                    req_game_id.as_deref(),
+                    req_steam_id,
+                    &req_exes,
+                    &mut seen,
+                    &mut results,
+                );
+            }
+        }
+        results.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(results)
+    })
+    .await
+    .map_err(map_err)?
+}
+
 impl AppState {
     pub fn new(core: NekodAppService) -> Self {
         Self {
@@ -1578,6 +1968,7 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         undeploy_bepinex_loader,
         quick_setup_unity_starter,
         import_ct_file,
+        discover_local_nmods,
         sync_global_hotkeys,
         get_game_artwork,
         launch_game,

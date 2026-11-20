@@ -318,6 +318,22 @@ export interface CtImportUiReport {
   message: string;
 }
 
+export interface LocalNmodCandidate {
+  mod_id: string;
+  version: string;
+  name: string;
+  description: string;
+  mod_kind: string;
+  target_game_id: string;
+  target_game_name: string;
+  target_steam_app_id: number | null;
+  runtime_kind: string;
+  feature_count: number;
+  source_path: string;
+  source_format: "nmod_archive" | "nmod_dir" | string;
+  already_installed: boolean;
+}
+
 const tauriApi = {
   rescanGames: () => invoke<LibraryGameView[]>("rescan_games"),
   listLibraryGames: () => invoke<LibraryGameView[]>("list_library_games"),
@@ -472,6 +488,12 @@ const tauriApi = {
     storeBuildId: string | null;
     trustTier: TrustTier;
   }) => invoke<CtImportUiReport>("import_ct_file", params),
+  discoverLocalNmods: (params: {
+    gameId: string | null;
+    steamAppId: string | null;
+    installDir: string | null;
+    executablePath: string | null;
+  }) => invoke<LocalNmodCandidate[]>("discover_local_nmods", params),
   syncGlobalHotkeys: (bindings: GlobalHotkeyBinding[]) =>
     invoke<number>("sync_global_hotkeys", { bindings }),
   getGameArtwork: (

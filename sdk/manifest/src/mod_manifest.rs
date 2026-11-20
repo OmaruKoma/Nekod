@@ -14,7 +14,7 @@ use crate::common::{
 use crate::permissions::{PermissionDeclaration, PermissionScope};
 use crate::trainer::{
     AuthorInfo, RuntimeKind, RuntimeRequirement, SupportedGameVersion, TargetGameRef,
-    TrainerArtifact, TrainerFeature, TrainerManifest,
+    TrainerArtifact, TrainerCompatibility, TrainerFeature, TrainerManifest,
 };
 
 const DISALLOWED_EXECUTABLE_EXTENSIONS: &[&str] = &[".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi"];
@@ -153,6 +153,34 @@ impl ModManifest {
     /// Checks whether the mod declares a given capability scope.
     pub fn has_permission(&self, scope: PermissionScope) -> bool {
         self.permissions.iter().any(|p| p.scope == scope)
+    }
+
+    /// Maps this `ModManifest` v2 down to a runtime-compatible [`TrainerManifest`] v1 view.
+    pub fn to_trainer_manifest(&self) -> TrainerManifest {
+        TrainerManifest {
+            schema_version: Version::new(1, 0, 0),
+            id: self.id.clone(),
+            version: self.version.clone(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            authors: self.authors.clone(),
+            license: self.license.clone(),
+            source_repository: self.source_repository.clone(),
+            homepage: self.homepage.clone(),
+            target_game: self.target_game.clone(),
+            supported_versions: self.supported_versions.clone(),
+            runtime: self.runtime.clone(),
+            permissions: self.permissions.clone(),
+            features: self.features.clone(),
+            compatibility: TrainerCompatibility {
+                singleplayer_only: self.compatibility.singleplayer_only,
+                requires_offline_mode: self.compatibility.requires_offline_mode,
+                anti_cheat_incompatible: self.compatibility.anti_cheat_incompatible.clone(),
+                last_verified_at: self.compatibility.last_verified_at.clone(),
+            },
+            artifacts: self.artifacts.clone(),
+            extensions: self.extensions.clone(),
+        }
     }
 
     /// Losslessly upgrades a legacy v1 [`TrainerManifest`] into a `ModManifest` v2 (`mod_kind = trainer`).
@@ -417,6 +445,17 @@ mod tests {
             .expect("upgraded v1 -> v2 valid");
         assert_eq!(upgraded.mod_kind, ModKind::Trainer);
         assert_eq!(upgraded.id, trainer_v1.id);
+
+        let downgraded = mod_v2.to_trainer_manifest();
+        downgraded
+            .validate_semantic()
+            .expect("v2 -> v1 trainer view passes semantic validation");
+        assert_eq!(downgraded.id, mod_v2.id);
+        assert_eq!(downgraded.target_game, mod_v2.target_game);
+        assert_eq!(
+            downgraded.compatibility.singleplayer_only,
+            mod_v2.compatibility.singleplayer_only
+        );
     }
 
     #[test]

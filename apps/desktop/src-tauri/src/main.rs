@@ -10,12 +10,14 @@ mod tests {
     use nekod_desktop_lib::{AppState, desktop_invoke_handler};
     use nekod_trainer_runtime::CompositeRuntimeRouter;
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tauri::http::HeaderMap;
     use tauri::test::{MockRuntime, get_ipc_response, mock_builder};
     use tauri::webview::InvokeRequest;
+    use zip::write::SimpleFileOptions;
 
     fn build_ipc_request(
         origin: tauri::Url,
@@ -453,13 +455,13 @@ mod tests {
     }
 
     #[test]
-    fn tauri_ct_import_and_gun_soul_girl_2_preset_ipc_flow() {
+    fn tauri_ct_import_and_generic_nmod_discovery_ipc_flow() {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "nekod_tauri_ct_gsg2_{}_{}",
+            "nekod_tauri_ct_nmod_{}_{}",
             std::process::id(),
             nanos
         ));
@@ -475,7 +477,7 @@ mod tests {
         .unwrap();
 
         let app = mock_builder()
-            .manage(AppState::with_data_dir(core, data_dir))
+            .manage(AppState::with_data_dir(core, data_dir.clone()))
             .invoke_handler(desktop_invoke_handler())
             .build(tauri::generate_context!())
             .expect("build mock Tauri app");
@@ -571,7 +573,7 @@ shellExecute("https://modengine.net")
         );
 
         // 2. Lua-only fake ModEngine .CT reports zero converted features with clear reasons
-        let lua_ct_path = root.join("G.S.G.2 v1.01a (E.A).CT");
+        let lua_ct_path = root.join("LuaOnlySample.CT");
         let lua_ct_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <CheatTable CheatEngineTableVersion="45">
   <CheatEntries>
@@ -605,12 +607,12 @@ shellExecute("https://modengine.net")
             serde_json::json!({
                 "ctPath": lua_ct_path.to_string_lossy(),
                 "gameId": null,
-                "gameName": "GunSoul Girl 2",
-                "defaultModule": "GunSoulGirl 2.exe",
+                "gameName": "Sample Unity Game",
+                "defaultModule": "SampleUnity.exe",
                 "installDir": null,
-                "storeSource": "steam",
-                "storeAppId": "1948700",
-                "storeBuildId": "13294226",
+                "storeSource": "custom_path",
+                "storeAppId": null,
+                "storeBuildId": null,
                 "trustTier": "unverified"
             }),
         )
@@ -633,28 +635,35 @@ shellExecute("https://modengine.net")
                 .contains("{$lua}")
         );
 
-        // 3. Curated GunSoul Girl 2 (Steam 1948700, Unity Mono) 1-click setup returns 21-feature pack
-        let gsg2_dir = root.join("GunSoulGirl 2");
-        fs::create_dir_all(gsg2_dir.join("GunSoulGirl 2_Data").join("Managed")).unwrap();
-        fs::create_dir_all(gsg2_dir.join("MonoBleedingEdge")).unwrap();
-        fs::write(gsg2_dir.join("UnityPlayer.dll"), b"MZ").unwrap();
-        fs::write(gsg2_dir.join("GunSoulGirl 2.exe"), b"MZ").unwrap();
-
-        let gsg2_setup = invoke_json(
+        // 3. Generic .nmod discovery locates matching unpacked .nmod via metadata (Steam AppID), then ingests it
+        let discovered = invoke_json(
             &webview,
-            "quick_setup_unity_starter",
+            "discover_local_nmods",
             serde_json::json!({
-                "title": "GunSoul Girl 2",
-                "storeSource": "steam",
-                "storeAppId": "1948700",
-                "storeBuildId": "13294226",
-                "installDir": gsg2_dir.to_string_lossy()
+                "gameId": null,
+                "steamAppId": "1948700",
+                "installDir": null,
+                "executablePath": null
             }),
         )
-        .expect("quick_setup_unity_starter gsg2 preset");
-        assert_eq!(gsg2_setup["game_id"], "gun-soul-girl-2");
-        assert_eq!(gsg2_setup["trainer_id"], "org.nekod.gun-soul-girl-2");
-        assert_eq!(gsg2_setup["engine"], "unity_mono");
+        .expect("discover_local_nmods");
+        let cand_list = discovered.as_array().unwrap();
+        assert_eq!(cand_list.len(), 1);
+        let cand = &cand_list[0];
+        assert_eq!(cand["mod_id"], "org.nekod.gun-soul-girl-2");
+        assert_eq!(cand["feature_count"], 21);
+        assert_eq!(cand["source_format"], "nmod_dir");
+        assert_eq!(cand["already_installed"], false);
+
+        invoke_json(
+            &webview,
+            "ingest_local_trainer",
+            serde_json::json!({
+                "packageDir": cand["source_path"],
+                "trustTier": "community_verified"
+            }),
+        )
+        .expect("ingest discovered .nmod directory");
 
         let gsg2_trainers = invoke_json(
             &webview,
@@ -671,6 +680,136 @@ shellExecute("https://modengine.net")
         assert_eq!(
             gsg2_trainer["permission_state"]["status"],
             "requires_confirmation"
+        );
+
+        // Re-discover shows already_installed == true
+        let rediscovered = invoke_json(
+            &webview,
+            "discover_local_nmods",
+            serde_json::json!({
+                "gameId": "gun-soul-girl-2",
+                "steamAppId": "1948700",
+                "installDir": null,
+                "executablePath": null
+            }),
+        )
+        .expect("rediscover local nmods");
+        assert_eq!(rediscovered[0]["already_installed"], true);
+
+        // 4. Single-file .nmod archive discovery + safe ingestion + unsafe .exe/.nmod rejection
+        let nmod_dir = data_dir.join("nmods");
+        fs::create_dir_all(&nmod_dir).unwrap();
+        let archive_path = nmod_dir.join("archive-demo.nmod");
+        let archive_mod_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("unity-standalone-starter");
+        let bridge_bytes = fs::read(archive_mod_dir.join("scripts/unity_bridge.json")).unwrap();
+        let mut mod_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(archive_mod_dir.join("mod-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        mod_val["id"] = serde_json::json!("dev.example.archive-nmod");
+        mod_val["target_game"]["game_id"] = serde_json::json!("archive-demo-game");
+        mod_val["target_game"]["game_name"] = serde_json::json!("Archive Demo Game");
+        mod_val["artifacts"][0]["sha256"] =
+            serde_json::json!(nekod_trainer_manager::sha256_hex(&bridge_bytes));
+        mod_val["artifacts"][0]["size_bytes"] = serde_json::json!(bridge_bytes.len() as u64);
+
+        {
+            let f = fs::File::create(&archive_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default();
+            zw.start_file("mod-manifest.json", opts).unwrap();
+            zw.write_all(serde_json::to_string_pretty(&mod_val).unwrap().as_bytes())
+                .unwrap();
+            zw.start_file("scripts/unity_bridge.json", opts).unwrap();
+            zw.write_all(&bridge_bytes).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let archive_candidates = invoke_json(
+            &webview,
+            "discover_local_nmods",
+            serde_json::json!({
+                "gameId": "archive-demo-game",
+                "steamAppId": null,
+                "installDir": null,
+                "executablePath": null
+            }),
+        )
+        .expect("discover .nmod archive");
+        assert_eq!(archive_candidates.as_array().unwrap().len(), 1);
+        assert_eq!(archive_candidates[0]["source_format"], "nmod_archive");
+
+        invoke_json(
+            &webview,
+            "ingest_local_trainer",
+            serde_json::json!({
+                "packageDir": archive_path.to_string_lossy(),
+                "trustTier": "community_verified"
+            }),
+        )
+        .expect("ingest single-file .nmod archive");
+
+        let archive_trainers = invoke_json(
+            &webview,
+            "list_trainers_for_game",
+            serde_json::json!({
+                "gameId": "archive-demo-game",
+                "detectedBuildId": null
+            }),
+        )
+        .expect("list archive-demo-game trainers");
+        assert_eq!(
+            archive_trainers[0]["trainer_id"],
+            "dev.example.archive-nmod"
+        );
+
+        // Reject unsafe .nmod containing raw .exe payload
+        let unsafe_archive_path = root.join("unsafe.nmod");
+        {
+            let f = fs::File::create(&unsafe_archive_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            zw.start_file("payload.exe", SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(b"MZ").unwrap();
+            zw.finish().unwrap();
+        }
+        let bad_nmod = invoke_json(
+            &webview,
+            "ingest_local_trainer",
+            serde_json::json!({
+                "packageDir": unsafe_archive_path.to_string_lossy(),
+                "trustTier": "unverified"
+            }),
+        );
+        assert!(bad_nmod.is_err());
+
+        // 5. Generic quick_setup_unity_starter remains 100% generic (3 features even if dir looks like any Mono game)
+        let gsg2_dir = root.join("MonoSampleGame");
+        fs::create_dir_all(gsg2_dir.join("MonoSampleGame_Data").join("Managed")).unwrap();
+        fs::create_dir_all(gsg2_dir.join("MonoBleedingEdge")).unwrap();
+        fs::write(gsg2_dir.join("UnityPlayer.dll"), b"MZ").unwrap();
+        fs::write(gsg2_dir.join("GunSoulGirl 2.exe"), b"MZ").unwrap();
+
+        let generic_setup = invoke_json(
+            &webview,
+            "quick_setup_unity_starter",
+            serde_json::json!({
+                "title": "GunSoul Girl 2",
+                "storeSource": "steam",
+                "storeAppId": "1948700",
+                "storeBuildId": "13294226",
+                "installDir": gsg2_dir.to_string_lossy()
+            }),
+        )
+        .expect("quick_setup_unity_starter stays generic");
+        assert_ne!(
+            generic_setup["trainer_id"], "org.nekod.gun-soul-girl-2",
+            "quick_setup_unity_starter must stay generic and never hardcode game-specific packs"
         );
 
         let _ = fs::remove_dir_all(&root);

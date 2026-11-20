@@ -19,7 +19,9 @@ use nekod_manifest::{
     CompatibilityStatus, GameManifest, TargetPlatform, TrainerManifest, TrustTier,
     validate_relative_path,
 };
-use nekod_validator::{validate_game_manifest_str, validate_trainer_manifest_str};
+use nekod_validator::{
+    validate_game_manifest_str, validate_mod_manifest_str, validate_trainer_manifest_str,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -85,6 +87,52 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// SQLite-backed local catalog for `GameManifest`s and validated `InstalledTrainer` packages.
 pub struct SqliteTrainerCatalog {
     conn: Mutex<Connection>,
+}
+
+struct LoadedPackageManifest {
+    filename: &'static str,
+    manifest: TrainerManifest,
+    sha256: String,
+}
+
+fn load_package_manifest(
+    canonical_root: &Path,
+) -> Result<LoadedPackageManifest, TrainerManagerError> {
+    let mod_path = canonical_root.join("mod-manifest.json");
+    if mod_path.is_file() {
+        let raw_bytes = fs::read(&mod_path).map_err(|e| {
+            TrainerManagerError::Io(format!("failed to read '{}': {e}", mod_path.display()))
+        })?;
+        let raw_str = std::str::from_utf8(&raw_bytes).map_err(|e| {
+            TrainerManagerError::InvalidManifest(format!(
+                "mod-manifest.json is not valid UTF-8: {e}"
+            ))
+        })?;
+        let mod_manifest = validate_mod_manifest_str(raw_str)
+            .map_err(|e| TrainerManagerError::InvalidManifest(e.to_string()))?;
+        let sha256 = sha256_hex(&raw_bytes);
+        return Ok(LoadedPackageManifest {
+            filename: "mod-manifest.json",
+            manifest: mod_manifest.to_trainer_manifest(),
+            sha256,
+        });
+    }
+
+    let trainer_path = canonical_root.join("trainer-manifest.json");
+    let raw_bytes = fs::read(&trainer_path).map_err(|e| {
+        TrainerManagerError::Io(format!("failed to read '{}': {e}", trainer_path.display()))
+    })?;
+    let raw_str = std::str::from_utf8(&raw_bytes).map_err(|e| {
+        TrainerManagerError::InvalidManifest(format!("manifest is not valid UTF-8: {e}"))
+    })?;
+    let manifest = validate_trainer_manifest_str(raw_str)
+        .map_err(|e| TrainerManagerError::InvalidManifest(e.to_string()))?;
+    let sha256 = sha256_hex(&raw_bytes);
+    Ok(LoadedPackageManifest {
+        filename: "trainer-manifest.json",
+        manifest,
+        sha256,
+    })
 }
 
 impl SqliteTrainerCatalog {
@@ -186,8 +234,9 @@ impl SqliteTrainerCatalog {
         Ok(manifests)
     }
 
-    /// Validates a local trainer directory (`trainer-manifest.json` + artifact checksums + path containment)
-    /// and registers it in the local SQLite catalog.
+    /// Validates a local `.nmod` (`mod-manifest.json`) or legacy trainer (`trainer-manifest.json`)
+    /// package directory (schema + semantic rules + artifact checksums + path containment) and
+    /// registers it in the local SQLite catalog.
     pub fn ingest_local_package(
         &self,
         package_dir: impl AsRef<Path>,
@@ -196,17 +245,9 @@ impl SqliteTrainerCatalog {
         let package_root = fs::canonicalize(package_dir.as_ref())
             .map_err(|e| TrainerManagerError::Io(e.to_string()))?;
 
-        let manifest_path = package_root.join("trainer-manifest.json");
-        let raw_bytes = fs::read(&manifest_path).map_err(|e| {
-            TrainerManagerError::Io(format!("failed to read '{}': {e}", manifest_path.display()))
-        })?;
-        let raw_str = std::str::from_utf8(&raw_bytes).map_err(|e| {
-            TrainerManagerError::InvalidManifest(format!("manifest is not valid UTF-8: {e}"))
-        })?;
-
-        let manifest = validate_trainer_manifest_str(raw_str)
-            .map_err(|e| TrainerManagerError::InvalidManifest(e.to_string()))?;
-        let manifest_sha256 = sha256_hex(&raw_bytes);
+        let loaded = load_package_manifest(&package_root)?;
+        let manifest = loaded.manifest;
+        let manifest_sha256 = loaded.sha256;
 
         verify_package_artifacts(&package_root, &manifest)?;
 
@@ -327,14 +368,8 @@ impl SqliteTrainerCatalog {
     ) -> Result<InstalledTrainer, TrainerManagerError> {
         let canonical_stage =
             fs::canonicalize(staged_dir).map_err(|e| TrainerManagerError::Io(e.to_string()))?;
-        let raw_bytes = fs::read(canonical_stage.join("trainer-manifest.json")).map_err(|e| {
-            TrainerManagerError::Io(format!("missing staged trainer-manifest.json: {e}"))
-        })?;
-        let raw_str = std::str::from_utf8(&raw_bytes).map_err(|e| {
-            TrainerManagerError::InvalidManifest(format!("manifest is not valid UTF-8: {e}"))
-        })?;
-        let manifest = validate_trainer_manifest_str(raw_str)
-            .map_err(|e| TrainerManagerError::InvalidManifest(e.to_string()))?;
+        let loaded = load_package_manifest(&canonical_stage)?;
+        let manifest = loaded.manifest;
         verify_package_artifacts(&canonical_stage, &manifest)?;
 
         let safe_id: String = manifest
@@ -359,8 +394,8 @@ impl SqliteTrainerCatalog {
             .map_err(|e| TrainerManagerError::Io(format!("create package install dir: {e}")))?;
 
         fs::copy(
-            canonical_stage.join("trainer-manifest.json"),
-            target_dir.join("trainer-manifest.json"),
+            canonical_stage.join(loaded.filename),
+            target_dir.join(loaded.filename),
         )
         .map_err(|e| TrainerManagerError::Io(e.to_string()))?;
 
@@ -517,16 +552,21 @@ pub fn load_verified_entrypoint_str(
         ))
     })?;
 
-    let manifest_bytes = fs::read(canonical_root.join("trainer-manifest.json")).map_err(|e| {
+    let manifest_filename = if canonical_root.join("mod-manifest.json").is_file() {
+        "mod-manifest.json"
+    } else {
+        "trainer-manifest.json"
+    };
+    let manifest_bytes = fs::read(canonical_root.join(manifest_filename)).map_err(|e| {
         TrainerManagerError::IntegrityMismatch(
-            "trainer-manifest.json".to_owned(),
+            manifest_filename.to_owned(),
             format!("unreadable manifest file: {e}"),
         )
     })?;
     let actual_manifest_sha = sha256_hex(&manifest_bytes);
     if actual_manifest_sha != trainer.manifest_sha256 {
         return Err(TrainerManagerError::IntegrityMismatch(
-            "trainer-manifest.json".to_owned(),
+            manifest_filename.to_owned(),
             format!(
                 "manifest SHA-256 changed after install (expected {}, got {actual_manifest_sha})",
                 trainer.manifest_sha256
@@ -693,6 +733,46 @@ mod tests {
             .ingest_local_package(&dir, TrustTier::Unverified)
             .unwrap_err();
         assert!(matches!(err, TrainerManagerError::IntegrityMismatch(_, _)));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ingests_pure_nmod_v2_package_without_v1_trainer_manifest() {
+        let dir = temp_pkg_dir("pure_nmod");
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        let payload = br#"{"schema_version":"1.0.0","protocol":"nekod_json_line_v1","flavor":"mono","loader":"bepinex_mono","host":"127.0.0.1","port":19540,"auto_discover_by_pid":true,"features":[{"kind":"toggle_field","feature_id":"god-mode","class_name":"Player","field_name":"immortal","enabled_value":true,"disabled_value":false}]}"#;
+        fs::write(dir.join("scripts/unity_bridge.json"), payload).unwrap();
+
+        let mut mod_v2: nekod_manifest::ModManifest = serde_json::from_str(include_str!(
+            "../../../examples/gun-soul-girl-2/mod-manifest.json"
+        ))
+        .unwrap();
+        mod_v2.artifacts[0].sha256 = sha256_hex(payload);
+        mod_v2.artifacts[0].size_bytes = payload.len() as u64;
+        fs::write(
+            dir.join("mod-manifest.json"),
+            serde_json::to_string_pretty(&mod_v2).unwrap(),
+        )
+        .unwrap();
+        assert!(!dir.join("trainer-manifest.json").exists());
+
+        let catalog = SqliteTrainerCatalog::open_in_memory().unwrap();
+        let installed = catalog
+            .ingest_local_package(&dir, TrustTier::CommunityVerified)
+            .expect("pure .nmod ingestion succeeds without trainer-manifest.json");
+        assert_eq!(installed.manifest.id, "org.nekod.gun-soul-girl-2");
+        assert_eq!(installed.manifest.features.len(), 21);
+
+        let entry = load_verified_entrypoint_str(&installed)
+            .expect("verified entrypoint loads cleanly for pure .nmod");
+        assert!(entry.contains("god-mode"));
+
+        fs::write(dir.join("scripts/unity_bridge.json"), b"{}").unwrap();
+        assert!(matches!(
+            load_verified_entrypoint_str(&installed),
+            Err(TrainerManagerError::IntegrityMismatch(_, _))
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }
