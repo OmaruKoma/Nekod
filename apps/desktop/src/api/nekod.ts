@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { createBrowserPreviewApi } from "./browserPreview";
 
 export const isBrowserPreview =
@@ -233,12 +234,27 @@ export interface CompatibilityRecord {
   recorded_at: number;
 }
 
+export interface CompanionBridgeCatalogEntry {
+  id: string;
+  display_name: string;
+  engine: GameEnvironmentProfile["engine"];
+  version: string;
+  target_relative_path: string;
+  description: string;
+  ready_locally: boolean;
+  source_kind: string;
+  resolved_path: string | null;
+  sha256: string | null;
+  download_url: string | null;
+}
+
 export interface BridgeDeploymentStatus {
   deployed: boolean;
   engine: GameEnvironmentProfile["engine"];
   active_files: string[];
   suggested_source_file: string | null;
   suggested_target_relative_path: string | null;
+  matched_bridge: CompanionBridgeCatalogEntry | null;
 }
 
 export interface BridgeUndeploySummary {
@@ -246,6 +262,26 @@ export interface BridgeUndeploySummary {
   restored_originals: number;
   conflicts: number;
   conflict_paths: string[];
+}
+
+export interface GlobalHotkeyBinding {
+  feature_id: string;
+  hotkey: string;
+}
+
+export interface GlobalHotkeyEvent {
+  feature_id: string;
+  hotkey: string;
+}
+
+export interface GameArtwork {
+  thumbnail_data_uri: string | null;
+  header_data_uri: string | null;
+}
+
+export interface LaunchGameResult {
+  method: string;
+  target: string;
 }
 
 const tauriApi = {
@@ -335,6 +371,18 @@ const tauriApi = {
       gameKey,
       installDir,
     }),
+  listCompanionBridgeCatalog: () =>
+    invoke<CompanionBridgeCatalogEntry[]>("list_companion_bridge_catalog"),
+  autoDeployCompanionBridge: (
+    gameKey: string,
+    installDir: string,
+    customSourceOverride: string | null = null,
+  ) =>
+    invoke<BridgeDeploymentStatus>("auto_deploy_companion_bridge", {
+      gameKey,
+      installDir,
+      customSourceOverride,
+    }),
   deployCompanionBridge: (
     gameKey: string,
     installDir: string,
@@ -352,6 +400,39 @@ const tauriApi = {
       gameKey,
       installDir,
     }),
+  syncGlobalHotkeys: (bindings: GlobalHotkeyBinding[]) =>
+    invoke<number>("sync_global_hotkeys", { bindings }),
+  getGameArtwork: (
+    storeSource: string,
+    storeAppId: string | null,
+    installDir: string,
+  ) =>
+    invoke<GameArtwork>("get_game_artwork", {
+      storeSource,
+      storeAppId,
+      installDir,
+    }),
+  launchGame: (
+    storeSource: string,
+    storeAppId: string | null,
+    installDir: string,
+    executablePath: string | null,
+  ) =>
+    invoke<LaunchGameResult>("launch_game", {
+      storeSource,
+      storeAppId,
+      installDir,
+      executablePath,
+    }),
+  onGlobalHotkey: async (
+    handler: (event: GlobalHotkeyEvent) => void,
+  ): Promise<() => void> => {
+    const unlisten = await listen<GlobalHotkeyEvent>(
+      "nekod://global-hotkey",
+      (ev) => handler(ev.payload),
+    );
+    return unlisten;
+  },
 };
 
 export const nekodApi = isBrowserPreview ? createBrowserPreviewApi() : tauriApi;

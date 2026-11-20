@@ -296,6 +296,99 @@ mod tests {
                 .exists()
         );
 
+        // 7c. Verify Direction 1/2/3/4 IPC commands: global hotkeys, artwork, bridge catalog, auto-deploy, and launch security.
+        let bound_count = invoke_json(
+            &webview,
+            "sync_global_hotkeys",
+            serde_json::json!({
+                "bindings": [
+                    { "feature_id": "infinite-health", "hotkey": "Ctrl+F5" },
+                    { "feature_id": "invalid-entry", "hotkey": "F99" }
+                ]
+            }),
+        )
+        .expect("sync_global_hotkeys");
+        assert_eq!(bound_count, 1);
+
+        let catalog = invoke_json(
+            &webview,
+            "list_companion_bridge_catalog",
+            serde_json::json!({}),
+        )
+        .expect("list_companion_bridge_catalog");
+        assert!(catalog.as_array().unwrap().len() >= 5);
+
+        // Local cover.jpg resolution inside custom game dir
+        fs::write(
+            custom_game_dir.join("cover.jpg"),
+            [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10],
+        )
+        .unwrap();
+        let art = invoke_json(
+            &webview,
+            "get_game_artwork",
+            serde_json::json!({
+                "storeSource": "custom_path",
+                "storeAppId": null,
+                "installDir": custom_game_dir.to_string_lossy()
+            }),
+        )
+        .expect("get_game_artwork");
+        assert!(
+            art["header_data_uri"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("data:image/jpeg;base64,")
+        );
+
+        // Auto-deploy companion bridge for a Unity Mono directory without typing any DLL path manually
+        let unity_game_dir = root.join("UnityMonoDemo");
+        fs::create_dir_all(unity_game_dir.join("UnityMonoDemo_Data").join("Managed")).unwrap();
+        fs::write(unity_game_dir.join("UnityPlayer.dll"), b"MZ").unwrap();
+        let auto_deployed = invoke_json(
+            &webview,
+            "auto_deploy_companion_bridge",
+            serde_json::json!({
+                "gameKey": "custom:unity-mono-demo",
+                "installDir": unity_game_dir.to_string_lossy(),
+                "customSourceOverride": bridge_src.to_string_lossy()
+            }),
+        )
+        .expect("auto_deploy_companion_bridge");
+        assert_eq!(auto_deployed["deployed"], true);
+        assert!(
+            unity_game_dir
+                .join("BepInEx")
+                .join("plugins")
+                .join("NekodUnityBridge.Mono.dll")
+                .exists()
+        );
+        let auto_undeploy = invoke_json(
+            &webview,
+            "undeploy_companion_bridge",
+            serde_json::json!({
+                "gameKey": "custom:unity-mono-demo",
+                "installDir": unity_game_dir.to_string_lossy()
+            }),
+        )
+        .expect("undeploy auto-deployed bridge");
+        assert_eq!(auto_undeploy["removed_count"], 1);
+
+        // Security check: launch_game must reject executables outside install_dir
+        let outside_exe = root.join("outside.exe");
+        fs::write(&outside_exe, b"MZ").unwrap();
+        let bad_launch = invoke_json(
+            &webview,
+            "launch_game",
+            serde_json::json!({
+                "storeSource": "custom_path",
+                "storeAppId": null,
+                "installDir": custom_game_dir.to_string_lossy(),
+                "executablePath": outside_exe.to_string_lossy()
+            }),
+        );
+        assert!(bad_launch.is_err());
+
         // 8. Remove custom path & verify diagnostic audit logs captured workflow.
         let after_remove = invoke_json(
             &webview,

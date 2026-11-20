@@ -1,10 +1,21 @@
 //! L1 Tauri 2 desktop shell delegating all business & security operations to `nekod-core`.
 
+mod artwork;
+mod bridges;
+mod hotkeys;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
+use artwork::{GameArtwork, resolve_game_artwork};
+use bridges::{
+    CompanionBridgeCatalogEntry, list_catalog as list_bridge_catalog,
+    resolve_bridge_bytes_for_engine,
+};
+use hotkeys::{GlobalHotkeyBinding, GlobalHotkeyService};
 use nekod_core::{
     CommunityTrainerView, DiagnosticEvent, LibraryGameView, NekodAppService, TrainerDetailView,
     TrainerPermissionState, TrainerUpdateInfo,
@@ -18,11 +29,12 @@ use nekod_runtime_api::{FeatureCommand, ProcessIdentity, RuntimeDiagnostics, Run
 use nekod_trainer_manager::{CompatibilityRecord, sha256_hex};
 use nekod_trainer_runtime::{CompositeRuntimeRouter, DeploymentLedger, DeploymentState};
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 pub struct AppState {
     core: NekodAppService,
     data_dir: PathBuf,
+    hotkeys: GlobalHotkeyService,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -32,6 +44,7 @@ pub struct BridgeDeploymentStatus {
     pub active_files: Vec<String>,
     pub suggested_source_file: Option<String>,
     pub suggested_target_relative_path: Option<String>,
+    pub matched_bridge: Option<CompanionBridgeCatalogEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +53,12 @@ pub struct BridgeUndeploySummary {
     pub restored_originals: usize,
     pub conflicts: usize,
     pub conflict_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LaunchGameResult {
+    pub method: String,
+    pub target: String,
 }
 
 fn map_err(err: impl std::fmt::Display) -> String {
@@ -420,6 +439,9 @@ fn get_bridge_deployment_status(
     let env = state.core.inspect_installed_game_environment(&install_dir);
     let (suggested_source_file, suggested_target_relative_path) =
         suggest_companion_bridge(env.engine);
+    let matched_bridge = list_bridge_catalog(&state.data_dir)
+        .into_iter()
+        .find(|b| b.engine == env.engine);
     let mut active_files = Vec::new();
     if env.dir_exists {
         let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
@@ -439,7 +461,54 @@ fn get_bridge_deployment_status(
         active_files,
         suggested_source_file,
         suggested_target_relative_path,
+        matched_bridge,
     })
+}
+
+#[tauri::command]
+fn list_companion_bridge_catalog(state: State<'_, AppState>) -> Vec<CompanionBridgeCatalogEntry> {
+    list_bridge_catalog(&state.data_dir)
+}
+
+#[tauri::command]
+fn auto_deploy_companion_bridge(
+    state: State<'_, AppState>,
+    game_key: String,
+    install_dir: String,
+    custom_source_override: Option<String>,
+) -> Result<BridgeDeploymentStatus, String> {
+    let env = state.core.inspect_installed_game_environment(&install_dir);
+    if !env.dir_exists {
+        return Err(format!("game install directory '{install_dir}' not found"));
+    }
+    if !env.anti_cheat_files_present.is_empty() {
+        return Err(format!(
+            "refusing companion bridge deployment: anti-cheat markers present ({:?})",
+            env.anti_cheat_files_present
+        ));
+    }
+
+    let (bytes, expected_sha, target_relative_path) = resolve_bridge_bytes_for_engine(
+        &state.data_dir,
+        env.engine,
+        custom_source_override.as_deref(),
+    )?;
+    validate_bridge_target_path(&target_relative_path)?;
+
+    let (backup_dir, ledger_path) = bridge_ledger_paths(&state.data_dir, &game_key);
+    let mut ledger =
+        DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
+    ledger
+        .stage_file(
+            &game_key,
+            "nekod.companion.bridge",
+            &target_relative_path,
+            &bytes,
+            &expected_sha,
+        )
+        .map_err(map_err)?;
+
+    get_bridge_deployment_status(state, game_key, install_dir)
 }
 
 #[tauri::command]
@@ -501,16 +570,130 @@ fn undeploy_companion_bridge(
     })
 }
 
+#[tauri::command]
+fn sync_global_hotkeys(state: State<'_, AppState>, bindings: Vec<GlobalHotkeyBinding>) -> usize {
+    state.hotkeys.set_bindings(bindings)
+}
+
+#[tauri::command]
+fn get_game_artwork(
+    store_source: String,
+    store_app_id: Option<String>,
+    install_dir: String,
+) -> GameArtwork {
+    resolve_game_artwork(&store_source, store_app_id.as_deref(), &install_dir)
+}
+
+fn validate_direct_launch_executable(
+    install_dir: &str,
+    executable_path: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let dir_canon = fs::canonicalize(install_dir)
+        .map_err(|e| format!("cannot access game install directory '{install_dir}': {e}"))?;
+    let exe_candidate = PathBuf::from(executable_path);
+    let full_exe = if exe_candidate.is_absolute() {
+        exe_candidate
+    } else {
+        dir_canon.join(exe_candidate)
+    };
+    let exe_canon = fs::canonicalize(&full_exe)
+        .map_err(|e| format!("cannot locate executable '{}': {e}", full_exe.display()))?;
+    if !exe_canon.starts_with(&dir_canon) {
+        return Err(format!(
+            "refusing to launch executable outside game install directory: '{}'",
+            exe_canon.display()
+        ));
+    }
+    if !exe_canon.is_file() {
+        return Err(format!(
+            "launch target is not a regular file: '{}'",
+            exe_canon.display()
+        ));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let is_exe = exe_canon
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false);
+        if !is_exe {
+            return Err(format!(
+                "refusing direct launch of non-.exe target: '{}'",
+                exe_canon.display()
+            ));
+        }
+    }
+    Ok((dir_canon, exe_canon))
+}
+
+#[tauri::command]
+fn launch_game(
+    store_source: String,
+    store_app_id: Option<String>,
+    install_dir: String,
+    executable_path: Option<String>,
+) -> Result<LaunchGameResult, String> {
+    if store_source.eq_ignore_ascii_case("steam")
+        && let Some(app_id) = store_app_id.as_deref()
+        && !app_id.is_empty()
+        && app_id.chars().all(|c| c.is_ascii_digit())
+    {
+        let uri = format!("steam://rungameid/{app_id}");
+        #[cfg(target_os = "windows")]
+        {
+            Command::new("explorer.exe")
+                .arg(&uri)
+                .spawn()
+                .map_err(|e| format!("failed to launch Steam URI '{uri}': {e}"))?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new("xdg-open")
+                .arg(&uri)
+                .spawn()
+                .map_err(|e| format!("failed to launch Steam URI '{uri}': {e}"))?;
+        }
+        return Ok(LaunchGameResult {
+            method: "steam_uri".to_owned(),
+            target: uri,
+        });
+    }
+
+    let exe_str = executable_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "cannot launch game: no Steam AppID and no executable path recorded for this game"
+                .to_owned()
+        })?;
+    let (dir_canon, exe_canon) = validate_direct_launch_executable(&install_dir, exe_str)?;
+    Command::new(&exe_canon)
+        .current_dir(&dir_canon)
+        .spawn()
+        .map_err(|e| format!("failed to launch '{}': {e}", exe_canon.display()))?;
+    Ok(LaunchGameResult {
+        method: "direct_executable".to_owned(),
+        target: exe_canon.display().to_string(),
+    })
+}
+
 impl AppState {
     pub fn new(core: NekodAppService) -> Self {
         Self {
             core,
             data_dir: std::env::temp_dir().join("nekod_desktop_state"),
+            hotkeys: GlobalHotkeyService::new(),
         }
     }
 
     pub fn with_data_dir(core: NekodAppService, data_dir: PathBuf) -> Self {
-        Self { core, data_dir }
+        Self {
+            core,
+            data_dir,
+            hotkeys: GlobalHotkeyService::new(),
+        }
     }
 }
 
@@ -549,8 +732,13 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         inspect_game_environment,
         query_compatibility_matrix,
         get_bridge_deployment_status,
+        list_companion_bridge_catalog,
+        auto_deploy_companion_bridge,
         deploy_companion_bridge,
         undeploy_companion_bridge,
+        sync_global_hotkeys,
+        get_game_artwork,
+        launch_game,
     ]
 }
 
@@ -566,7 +754,12 @@ pub fn run() {
                 Arc::new(CompositeRuntimeRouter::with_default_providers()),
             )
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-            app.manage(AppState::with_data_dir(core, data_dir));
+            let state = AppState::with_data_dir(core, data_dir);
+            let app_handle = app.handle().clone();
+            state.hotkeys.start_watcher(move |event| {
+                let _ = app_handle.emit("nekod://global-hotkey", event);
+            });
+            app.manage(state);
             Ok(())
         })
         .invoke_handler(desktop_invoke_handler())

@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BridgeDeploymentStatus,
   CommunityTrainerView,
+  CompanionBridgeCatalogEntry,
   CompatibilityRecord,
   CustomGamePathRecord,
   DiagnosticEvent,
   FeatureCommand,
+  GameArtwork,
   GameEnvironmentProfile,
   GameProfile,
   LibraryGameView,
@@ -21,8 +23,16 @@ import {
   isBrowserPreview,
   nekodApi,
 } from "./api/nekod";
+import { soundFx } from "./utils/sound";
 
 type NavTab = "workbench" | "community" | "import" | "settings" | "logs";
+type SidebarFilter = "all" | "favorites" | "running";
+
+interface HudToast {
+  id: number;
+  text: string;
+  tone: "info" | "ok" | "warn";
+}
 
 const PERMISSION_LABELS: Record<PermissionScope, string> = {
   "process.discover": "发现运行中的游戏进程",
@@ -44,6 +54,51 @@ const ENGINE_LABELS: Record<GameEnvironmentProfile["engine"], string> = {
   native_unknown: "Native / Unknown",
 };
 
+const FAV_STORAGE_KEY = "nekod.favoriteGames.v1";
+const SOUND_STORAGE_KEY = "nekod.soundFxEnabled.v1";
+const AUTO_ATTACH_STORAGE_KEY = "nekod.autoAttachEnabled.v1";
+
+function loadStoredFavorites(): Set<string> {
+  try {
+    const raw = localStorage.getItem(FAV_STORAGE_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw) as unknown;
+    return Array.isArray(arr)
+      ? new Set(arr.filter((v): v is string => typeof v === "string"))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function loadStoredBool(key: string, fallback: boolean): boolean {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return raw === "true";
+  } catch {
+    return fallback;
+  }
+}
+
+function gameMonogram(title: string): string {
+  const words = title.trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  return title.slice(0, 2).toUpperCase() || "GM";
+}
+
+function monogramGradient(seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  const hue1 = hash % 360;
+  const hue2 = (hue1 + 42) % 360;
+  return `linear-gradient(135deg, hsl(${hue1}, 52%, 28%) 0%, hsl(${hue2}, 58%, 22%) 100%)`;
+}
+
 function trustBadge(tier: TrustTier) {
   if (tier === "official") return <span className="badge official">Official</span>;
   if (tier === "community_verified") {
@@ -56,6 +111,15 @@ export default function App() {
   const [tab, setTab] = useState<NavTab>("workbench");
   const [games, setGames] = useState<LibraryGameView[]>([]);
   const [search, setSearch] = useState("");
+  const [sidebarFilter, setSidebarFilter] = useState<SidebarFilter>("all");
+  const [favoriteKeys, setFavoriteKeys] = useState<Set<string>>(() =>
+    loadStoredFavorites(),
+  );
+  const [artworkByGame, setArtworkByGame] = useState<Record<string, GameArtwork>>(
+    {},
+  );
+  const [runningGameKeys, setRunningGameKeys] = useState<Set<string>>(new Set());
+
   const [selectedGame, setSelectedGame] = useState<LibraryGameView | null>(null);
   const [trainers, setTrainers] = useState<TrainerDetailView[]>([]);
   const [selectedTrainerId, setSelectedTrainerId] = useState<string | null>(null);
@@ -68,11 +132,25 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
+  // Direction 1: Sound FX, Auto-Attach, Global Hotkey count & HUD Toasts
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() =>
+    loadStoredBool(SOUND_STORAGE_KEY, true),
+  );
+  const [autoAttachEnabled, setAutoAttachEnabled] = useState<boolean>(() =>
+    loadStoredBool(AUTO_ATTACH_STORAGE_KEY, false),
+  );
+  const [waitingLaunchGameKey, setWaitingLaunchGameKey] = useState<string | null>(
+    null,
+  );
+  const [globalHotkeyCount, setGlobalHotkeyCount] = useState<number>(0);
+  const [hudToasts, setHudToasts] = useState<HudToast[]>([]);
+
   // Import & custom folder form states
   const [customDir, setCustomDir] = useState("");
   const [customLabel, setCustomLabel] = useState("");
   const [trainerDir, setTrainerDir] = useState("");
-  const [trainerTrust, setTrainerTrust] = useState<TrustTier>("community_verified");
+  const [trainerTrust, setTrainerTrust] =
+    useState<TrustTier>("community_verified");
   const [gameManifestJson, setGameManifestJson] = useState("");
 
   // Runtime session state (One-Click Inject / Uninject)
@@ -86,8 +164,13 @@ export default function App() {
   const [featureInputs, setFeatureInputs] = useState<Record<string, string>>({});
   const [awaitingPermInject, setAwaitingPermInject] = useState<string | null>(null);
 
-  // Companion bridge deployment state (DeploymentLedger)
-  const [bridgeStatus, setBridgeStatus] = useState<BridgeDeploymentStatus | null>(null);
+  // Direction 4: Built-in Companion Bridge Bucket & DeploymentLedger state
+  const [bridgeCatalog, setBridgeCatalog] = useState<CompanionBridgeCatalogEntry[]>(
+    [],
+  );
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeDeploymentStatus | null>(
+    null,
+  );
   const [bridgeStatusByGame, setBridgeStatusByGame] = useState<
     Record<string, BridgeDeploymentStatus>
   >({});
@@ -95,8 +178,12 @@ export default function App() {
   const [bridgeTargetInput, setBridgeTargetInput] = useState("");
 
   // Community ecosystem & profiles state
-  const [registrySources, setRegistrySources] = useState<RegistrySourceState[]>([]);
-  const [communityTrainers, setCommunityTrainers] = useState<CommunityTrainerView[]>([]);
+  const [registrySources, setRegistrySources] = useState<RegistrySourceState[]>(
+    [],
+  );
+  const [communityTrainers, setCommunityTrainers] = useState<
+    CommunityTrainerView[]
+  >([]);
   const [updates, setUpdates] = useState<TrainerUpdateInfo[]>([]);
   const [profilesByTrainer, setProfilesByTrainer] = useState<
     Record<string, Record<string, string>>
@@ -108,14 +195,18 @@ export default function App() {
   const [profilePresets, setProfilePresets] = useState<
     Record<string, Record<string, Record<string, unknown>>>
   >({});
-  const [profileJsonTrainerId, setProfileJsonTrainerId] = useState<string | null>(null);
+  const [profileJsonTrainerId, setProfileJsonTrainerId] = useState<string | null>(
+    null,
+  );
   const [profileJsonBox, setProfileJsonBox] = useState("");
   const [diagnosticBundle, setDiagnosticBundle] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
   const selectedTrainer = useMemo(() => {
     if (trainers.length === 0) return null;
-    return trainers.find((t) => t.trainer_id === selectedTrainerId) ?? trainers[0];
+    return (
+      trainers.find((t) => t.trainer_id === selectedTrainerId) ?? trainers[0]
+    );
   }, [trainers, selectedTrainerId]);
 
   const isSelectedGameInjected =
@@ -128,25 +219,113 @@ export default function App() {
     selectedTrainer !== null &&
     activeTrainerId === selectedTrainer.trainer_id;
 
-  const hasAntiCheatMarkers = (gameEnv?.anti_cheat_files_present.length ?? 0) > 0;
+  const hasAntiCheatMarkers =
+    (gameEnv?.anti_cheat_files_present.length ?? 0) > 0;
+
+  function pushHudToast(text: string, tone: HudToast["tone"] = "info") {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setHudToasts((prev) => [...prev.slice(-3), { id, text, tone }]);
+    window.setTimeout(() => {
+      setHudToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3200);
+  }
+
+  function toggleFavorite(gameKey: string) {
+    setFavoriteKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(gameKey)) {
+        next.delete(gameKey);
+      } else {
+        next.add(gameKey);
+      }
+      try {
+        localStorage.setItem(FAV_STORAGE_KEY, JSON.stringify([...next]));
+      } catch {
+        // Ignore storage quota errors
+      }
+      return next;
+    });
+  }
+
+  function toggleSoundEnabled() {
+    setSoundEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SOUND_STORAGE_KEY, String(next));
+      } catch {
+        // Ignore
+      }
+      if (next) soundFx.toggleOn();
+      return next;
+    });
+  }
+
+  function toggleAutoAttach() {
+    setAutoAttachEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(AUTO_ATTACH_STORAGE_KEY, String(next));
+      } catch {
+        // Ignore
+      }
+      pushHudToast(
+        next
+          ? "🔄 已开启自动附着：检测到已授权游戏启动将自动注入"
+          : "已关闭自动附着模式",
+        "info",
+      );
+      return next;
+    });
+  }
+
+  async function loadArtworksForLibrary(lib: LibraryGameView[]) {
+    const results = await Promise.all(
+      lib.map(async (entry) => {
+        try {
+          const art = await nekodApi.getGameArtwork(
+            entry.game.store_source,
+            entry.game.store_app_id,
+            entry.game.install_dir,
+          );
+          return [entry.library_key, art] as const;
+        } catch {
+          return [
+            entry.library_key,
+            { thumbnail_data_uri: null, header_data_uri: null },
+          ] as const;
+        }
+      }),
+    );
+    setArtworkByGame((prev) => {
+      const merged = { ...prev };
+      for (const [k, v] of results) {
+        merged[k] = v;
+      }
+      return merged;
+    });
+  }
 
   async function refreshAll(autoSelectFirst = false) {
     try {
       setError(null);
-      const [lib, paths, sec, diag, sources, availUpdates] = await Promise.all([
-        nekodApi.listLibraryGames(),
-        nekodApi.listCustomGamePaths(),
-        nekodApi.getSecurityPolicy(),
-        nekodApi.getDiagnosticLogs(),
-        nekodApi.listRegistrySources(),
-        nekodApi.checkTrainerUpdates(),
-      ]);
+      const [lib, paths, sec, diag, sources, availUpdates, catalog] =
+        await Promise.all([
+          nekodApi.listLibraryGames(),
+          nekodApi.listCustomGamePaths(),
+          nekodApi.getSecurityPolicy(),
+          nekodApi.getDiagnosticLogs(),
+          nekodApi.listRegistrySources(),
+          nekodApi.checkTrainerUpdates(),
+          nekodApi.listCompanionBridgeCatalog(),
+        ]);
       setGames(lib);
       setCustomPaths(paths);
       setPolicy(sec);
       setLogs(diag);
       setRegistrySources(sources);
       setUpdates(availUpdates);
+      setBridgeCatalog(catalog);
+      void loadArtworksForLibrary(lib);
       if (autoSelectFirst && lib.length > 0) {
         await openGame(lib[0], false);
       }
@@ -159,6 +338,41 @@ export default function App() {
     void refreshAll(true);
   }, []);
 
+  // Direction 3: Background lightweight check of which library games are currently running
+  useEffect(() => {
+    let cancelled = false;
+    async function pollRunningLibraryGames() {
+      if (games.length === 0) return;
+      const running = new Set<string>();
+      await Promise.all(
+        games.map(async (g) => {
+          const gid = g.game.matched_game_id;
+          if (!gid) return;
+          try {
+            const procs = await nekodApi.discoverRunningProcesses(gid);
+            if (procs.length > 0) {
+              running.add(g.library_key);
+            }
+          } catch {
+            // Ignore transient poll errors
+          }
+        }),
+      );
+      if (!cancelled) {
+        setRunningGameKeys(running);
+      }
+    }
+
+    void pollRunningLibraryGames();
+    const timer = window.setInterval(() => {
+      void pollRunningLibraryGames();
+    }, 6000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [games]);
+
   async function handleRescan() {
     try {
       setBusyAction("rescan");
@@ -166,11 +380,14 @@ export default function App() {
       const lib = await nekodApi.rescanGames();
       setGames(lib);
       setLogs(await nekodApi.getDiagnosticLogs());
+      void loadArtworksForLibrary(lib);
       setStatusMsg(`已重新扫描游戏库：发现 ${lib.length} 款已安装游戏。`);
       if (lib.length > 0 && !selectedGame) {
         await openGame(lib[0], false);
       } else if (selectedGame) {
-        const refreshed = lib.find((g) => g.library_key === selectedGame.library_key);
+        const refreshed = lib.find(
+          (g) => g.library_key === selectedGame.library_key,
+        );
         if (refreshed) {
           await openGame(refreshed, false);
         }
@@ -204,8 +421,14 @@ export default function App() {
       );
       setBridgeStatus(status);
       setBridgeStatusByGame((prev) => ({ ...prev, [entry.library_key]: status }));
-      setBridgeSourceInput(status.suggested_source_file ?? "");
-      setBridgeTargetInput(status.suggested_target_relative_path ?? "");
+      setBridgeSourceInput(
+        status.matched_bridge?.resolved_path ?? status.suggested_source_file ?? "",
+      );
+      setBridgeTargetInput(
+        status.matched_bridge?.target_relative_path ??
+          status.suggested_target_relative_path ??
+          "",
+      );
     } catch {
       setBridgeStatus(null);
     }
@@ -228,10 +451,12 @@ export default function App() {
     await Promise.all([
       (async () => {
         try {
-          const env = await nekodApi.inspectGameEnvironment(entry.game.install_dir);
+          const env = await nekodApi.inspectGameEnvironment(
+            entry.game.install_dir,
+          );
           setGameEnv(env);
         } catch {
-          // Non-fatal if install directory is temporarily inaccessible
+          // Non-fatal
         }
       })(),
       refreshBridgeStatus(entry),
@@ -261,7 +486,10 @@ export default function App() {
         setCompatRecords(matrix);
 
         const loadedProfiles: Record<string, Record<string, string>> = {};
-        const loadedPresets: Record<string, Record<string, Record<string, unknown>>> = {};
+        const loadedPresets: Record<
+          string,
+          Record<string, Record<string, unknown>>
+        > = {};
         await Promise.all(
           list.map(async (trainer) => {
             const prof = await nekodApi.loadProfile(gameId, trainer.trainer_id);
@@ -290,10 +518,12 @@ export default function App() {
   async function startSessionInternal(
     trainer: TrainerDetailView,
     overrideProcs?: ProcessIdentity[],
+    fromAutoAttach = false,
   ) {
     const gameId = selectedGame?.game.matched_game_id;
     if (!gameId || !selectedGame) return;
     if (hasAntiCheatMarkers) {
+      if (soundEnabled) soundFx.error();
       setError(
         "检测到反作弊保护标记，根据安全策略拒绝注入该游戏进程（Nekod 仅支持单机/无反作弊环境）。",
       );
@@ -303,7 +533,12 @@ export default function App() {
     const procs = overrideProcs ?? runningProcs;
     const proc = procs.find((p) => p.pid === selectedPid) ?? procs[0];
     if (!proc) {
-      setError("未检测到运行中的游戏进程。请先启动游戏，再点击「一键注入 Mod」。");
+      if (!fromAutoAttach) {
+        if (soundEnabled) soundFx.error();
+        setError(
+          "未检测到运行中的游戏进程。请先启动游戏（或直接点「▶ 启动游戏并注入」）。",
+        );
+      }
       return;
     }
 
@@ -320,12 +555,17 @@ export default function App() {
       setActiveTrainerId(trainer.trainer_id);
       setActiveToggles({});
       setAwaitingPermInject(null);
+      setWaitingLaunchGameKey(null);
       setSessionDiag(await nekodApi.getSessionDiagnostics(sessionId));
       setLogs(await nekodApi.getDiagnosticLogs());
-      setStatusMsg(
-        `已成功注入「${trainer.name}」到 ${proc.process_name} (PID ${proc.pid})，现在可以直接开关下方模组功能。`,
-      );
+      if (soundEnabled) soundFx.injectSuccess();
+      const msg = fromAutoAttach
+        ? `⚡ 已自动注入「${trainer.name}」→ ${proc.process_name} (PID ${proc.pid})`
+        : `⚡ 已注入「${trainer.name}」→ ${proc.process_name} (PID ${proc.pid})`;
+      setStatusMsg(msg);
+      pushHudToast(msg, "ok");
     } catch (e) {
+      if (soundEnabled) soundFx.error();
       setError(String(e));
     } finally {
       setBusyAction(null);
@@ -339,19 +579,21 @@ export default function App() {
       return;
     }
     if (hasAntiCheatMarkers) {
+      if (soundEnabled) soundFx.error();
       setError(
         "检测到反作弊保护标记，根据安全策略拒绝注入该游戏进程（Nekod 仅支持单机/无反作弊环境）。",
       );
       return;
     }
     if (trainer.permission_state.status === "blocked") {
+      if (soundEnabled) soundFx.error();
       setError(`当前模组被安全策略阻止：${trainer.permission_state.reason}`);
       return;
     }
     if (trainer.permission_state.status === "requires_confirmation") {
       setAwaitingPermInject(trainer.trainer_id);
       setStatusMsg(
-        `「${trainer.name}」需要您确认声明的运行权限，请在下方权限卡片点击「确认权限并立即注入」。`,
+        `「${trainer.name}」需要您确认声明的运行权限，请在下方权限卡片点击「✓ 确认权限并立即注入」。`,
       );
       return;
     }
@@ -360,8 +602,101 @@ export default function App() {
     if (procs.length === 0) {
       procs = await scanRunningProcesses(selectedGame.game.matched_game_id);
     }
-    await startSessionInternal(trainer, procs);
+    await startSessionInternal(trainer, procs, false);
   }
+
+  // Direction 2: Play & Inject (Launch game via Steam URI or validated executable, then auto-attach)
+  async function handlePlayAndInject() {
+    if (!selectedGame) return;
+    if (hasAntiCheatMarkers) {
+      if (soundEnabled) soundFx.error();
+      setError("检测到反作弊保护标记，无法对该游戏启用「启动并注入」。");
+      return;
+    }
+    try {
+      setBusyAction("launch");
+      setError(null);
+      const launched = await nekodApi.launchGame(
+        selectedGame.game.store_source,
+        selectedGame.game.store_app_id,
+        selectedGame.game.install_dir,
+        selectedGame.game.executable_path,
+      );
+      setWaitingLaunchGameKey(selectedGame.library_key);
+      if (
+        selectedTrainer &&
+        selectedTrainer.permission_state.status === "requires_confirmation"
+      ) {
+        setAwaitingPermInject(selectedTrainer.trainer_id);
+      }
+      if (soundEnabled) soundFx.toggleOn();
+      const note = `🚀 已启动游戏 (${launched.target})，正在等待进程出现后自动注入...`;
+      setStatusMsg(note);
+      pushHudToast(note, "info");
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  // Direction 1 & 2: Auto-Attach polling loop when Auto-Attach is ON or Play & Inject is waiting
+  const autoAttachRef = useRef({
+    selectedGame,
+    selectedTrainer,
+    activeSessionId,
+    hasAntiCheatMarkers,
+    busyAction,
+  });
+  autoAttachRef.current = {
+    selectedGame,
+    selectedTrainer,
+    activeSessionId,
+    hasAntiCheatMarkers,
+    busyAction,
+  };
+
+  useEffect(() => {
+    const shouldWatch =
+      (autoAttachEnabled ||
+        (waitingLaunchGameKey !== null &&
+          waitingLaunchGameKey === selectedGame?.library_key)) &&
+      !activeSessionId &&
+      Boolean(selectedGame?.game.matched_game_id);
+    if (!shouldWatch) return;
+
+    const timer = window.setInterval(async () => {
+      const snap = autoAttachRef.current;
+      if (
+        !snap.selectedGame?.game.matched_game_id ||
+        snap.activeSessionId ||
+        snap.hasAntiCheatMarkers ||
+        snap.busyAction
+      ) {
+        return;
+      }
+      const trainer = snap.selectedTrainer;
+      if (!trainer || trainer.permission_state.status !== "approved") {
+        // Strictly preserve Default-Deny: never auto-attach unapproved trainers!
+        return;
+      }
+      const procs = await scanRunningProcesses(
+        snap.selectedGame.game.matched_game_id,
+      );
+      if (procs.length > 0) {
+        await startSessionInternal(trainer, procs, true);
+      }
+    }, 2500);
+
+    return () => window.clearInterval(timer);
+  }, [
+    autoAttachEnabled,
+    waitingLaunchGameKey,
+    selectedGame?.library_key,
+    selectedGame?.game.matched_game_id,
+    activeSessionId,
+  ]);
 
   async function handleApprovePermissions(
     trainer: TrainerDetailView,
@@ -389,11 +724,12 @@ export default function App() {
         if (procs.length === 0) {
           procs = await scanRunningProcesses(selectedGame.game.matched_game_id);
         }
-        await startSessionInternal(updatedTrainer, procs);
+        await startSessionInternal(updatedTrainer, procs, false);
       } else {
         setStatusMsg(`已授权 ${trainer.name} v${trainer.version} 的声明权限。`);
       }
     } catch (e) {
+      if (soundEnabled) soundFx.error();
       setError(String(e));
     } finally {
       setBusyAction(null);
@@ -412,22 +748,60 @@ export default function App() {
       setActiveTrainerId(null);
       setActiveToggles({});
       setLogs(await nekodApi.getDiagnosticLogs());
-      setStatusMsg(
-        `已解除注入并按 LIFO 顺序完成内存回滚（冲突: ${diag.rollback_conflicts}，失败: ${diag.rollback_failures}）。`,
-      );
+      if (soundEnabled) soundFx.uninject();
+      const msg = `⏏ 已解除注入并按 LIFO 顺序完成回滚（冲突: ${diag.rollback_conflicts}，失败: ${diag.rollback_failures}）`;
+      setStatusMsg(msg);
+      pushHudToast(msg, "info");
     } catch (e) {
+      if (soundEnabled) soundFx.error();
       setError(String(e));
     } finally {
       setBusyAction(null);
     }
   }
 
-  async function handleDeployBridge() {
+  // Direction 4: Zero-path-typing auto deploy from Built-in Companion Bridge Bucket!
+  async function handleAutoDeployBridge(customOverride: string | null = null) {
+    if (!selectedGame) return;
+    try {
+      setBusyAction("deploy-bridge");
+      setError(null);
+      const next = await nekodApi.autoDeployCompanionBridge(
+        selectedGame.library_key,
+        selectedGame.game.install_dir,
+        customOverride,
+      );
+      setBridgeStatus(next);
+      setBridgeStatusByGame((prev) => ({
+        ...prev,
+        [selectedGame.library_key]: next,
+      }));
+      try {
+        setGameEnv(
+          await nekodApi.inspectGameEnvironment(selectedGame.game.install_dir),
+        );
+      } catch {
+        // Non-fatal
+      }
+      setLogs(await nekodApi.getDiagnosticLogs());
+      if (soundEnabled) soundFx.injectSuccess();
+      const msg = `📦 已自动识别 ${ENGINE_LABELS[next.engine]} 并部署伴生桥接 (${next.active_files.join(", ")})`;
+      setStatusMsg(msg);
+      pushHudToast(msg, "ok");
+    } catch (e) {
+      if (soundEnabled) soundFx.error();
+      setError(String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleManualDeployBridge() {
     if (!selectedGame) return;
     const src = bridgeSourceInput.trim();
     const target = bridgeTargetInput.trim();
     if (!src || !target) {
-      setError("请先在下方「伴生桥接部署配置」中填写源 DLL/脚本路径和目标相对路径。");
+      setError("请填写本地源插件路径与目标相对路径，或直接点「一键自动部署」。");
       return;
     }
     try {
@@ -444,18 +818,11 @@ export default function App() {
         ...prev,
         [selectedGame.library_key]: next,
       }));
-      try {
-        setGameEnv(
-          await nekodApi.inspectGameEnvironment(selectedGame.game.install_dir),
-        );
-      } catch {
-        // Ignore env refresh error
-      }
       setLogs(await nekodApi.getDiagnosticLogs());
-      setStatusMsg(
-        `已通过 DeploymentLedger 安全部署伴生桥接文件到 ${target}（可随时一键解除）。`,
-      );
+      if (soundEnabled) soundFx.injectSuccess();
+      setStatusMsg(`已通过 DeploymentLedger 部署伴生桥接文件到 ${target}。`);
     } catch (e) {
+      if (soundEnabled) soundFx.error();
       setError(String(e));
     } finally {
       setBusyAction(null);
@@ -477,13 +844,15 @@ export default function App() {
           await nekodApi.inspectGameEnvironment(selectedGame.game.install_dir),
         );
       } catch {
-        // Ignore env refresh error
+        // Non-fatal
       }
       setLogs(await nekodApi.getDiagnosticLogs());
-      setStatusMsg(
-        `已解除伴生桥接部署：移除 ${summary.removed_count} 个文件，还原 ${summary.restored_originals} 个原文件（冲突: ${summary.conflicts}）。`,
-      );
+      if (soundEnabled) soundFx.uninject();
+      const msg = `🧹 已解除伴生桥接：移除 ${summary.removed_count} 个文件，还原 ${summary.restored_originals} 个原文件（冲突: ${summary.conflicts}）`;
+      setStatusMsg(msg);
+      pushHudToast(msg, "info");
     } catch (e) {
+      if (soundEnabled) soundFx.error();
       setError(String(e));
     } finally {
       setBusyAction(null);
@@ -499,24 +868,35 @@ export default function App() {
     }
   }
 
-  async function handleApplyFeature(feature: TrainerFeature) {
+  async function handleApplyFeature(
+    feature: TrainerFeature,
+    triggeredHotkey?: string,
+  ) {
     if (!activeSessionId) return;
     let command: FeatureCommand;
+    let nextToggleVal = false;
     if (feature.control_type === "toggle") {
-      const next = !activeToggles[feature.id];
-      command = { feature_id: feature.id, value: { type: "toggle", value: next } };
+      nextToggleVal = !activeToggles[feature.id];
+      command = {
+        feature_id: feature.id,
+        value: { type: "toggle", value: nextToggleVal },
+      };
     } else if (feature.control_type === "action") {
       command = { feature_id: feature.id, value: { type: "action" } };
     } else {
       const raw = (featureInputs[feature.id] ?? "").trim();
       const num = Number(raw);
       if (!raw || !Number.isFinite(num)) {
+        if (soundEnabled) soundFx.error();
         setError(`请为「${feature.name}」输入有效数字。`);
         return;
       }
       command =
         feature.control_type === "integer"
-          ? { feature_id: feature.id, value: { type: "integer", value: Math.trunc(num) } }
+          ? {
+              feature_id: feature.id,
+              value: { type: "integer", value: Math.trunc(num) },
+            }
           : { feature_id: feature.id, value: { type: "float", value: num } };
     }
 
@@ -524,7 +904,20 @@ export default function App() {
       setError(null);
       await nekodApi.applyTrainerFeature(activeSessionId, command);
       if (feature.control_type === "toggle") {
-        setActiveToggles((prev) => ({ ...prev, [feature.id]: !prev[feature.id] }));
+        setActiveToggles((prev) => ({ ...prev, [feature.id]: nextToggleVal }));
+        if (soundEnabled) {
+          if (nextToggleVal) soundFx.toggleOn();
+          else soundFx.toggleOff();
+        }
+        const suffix = triggeredHotkey ? ` (${triggeredHotkey})` : "";
+        pushHudToast(
+          `${nextToggleVal ? "●" : "○"} ${feature.name} ${nextToggleVal ? "已开启" : "已关闭"}${suffix}`,
+          nextToggleVal ? "ok" : "info",
+        );
+      } else {
+        if (soundEnabled) soundFx.toggleOn();
+        const suffix = triggeredHotkey ? ` (${triggeredHotkey})` : "";
+        pushHudToast(`✓ 已执行：${feature.name}${suffix}`, "ok");
       }
       const [diag, logList] = await Promise.all([
         nekodApi.getSessionDiagnostics(activeSessionId),
@@ -533,16 +926,68 @@ export default function App() {
       setSessionDiag(diag);
       setLogs(logList);
     } catch (e) {
+      if (soundEnabled) soundFx.error();
       setError(String(e));
       if (activeSessionId) {
         try {
           setSessionDiag(await nekodApi.getSessionDiagnostics(activeSessionId));
         } catch {
-          // Keep UI responsive if session faulted
+          // Keep UI responsive
         }
       }
     }
   }
+
+  // Direction 1: Sync active trainer hotkeys to OS-level GlobalHotkeyService & listen for events
+  useEffect(() => {
+    if (!activeSessionId || !activeTrainerId) {
+      void nekodApi.syncGlobalHotkeys([]).then(setGlobalHotkeyCount);
+      return;
+    }
+    const trainer = trainers.find((t) => t.trainer_id === activeTrainerId);
+    if (!trainer) {
+      void nekodApi.syncGlobalHotkeys([]).then(setGlobalHotkeyCount);
+      return;
+    }
+    const bindings = trainer.features
+      .filter((f) => f.control_type === "toggle" || f.control_type === "action")
+      .map((f) => ({
+        feature_id: f.id,
+        hotkey: (
+          profilesByTrainer[trainer.trainer_id]?.[f.id] ??
+          f.default_hotkey ??
+          ""
+        ).trim(),
+      }))
+      .filter((b) => b.hotkey.length > 0);
+    void nekodApi.syncGlobalHotkeys(bindings).then(setGlobalHotkeyCount);
+  }, [activeSessionId, activeTrainerId, trainers, profilesByTrainer]);
+
+  const globalHotkeyHandlerRef = useRef<
+    (featureId: string, hotkey: string) => void
+  >(() => {});
+  globalHotkeyHandlerRef.current = (featureId: string, hotkey: string) => {
+    if (!activeSessionId || !activeTrainerId) return;
+    const trainer = trainers.find((t) => t.trainer_id === activeTrainerId);
+    const feat = trainer?.features.find((f) => f.id === featureId);
+    if (feat) {
+      void handleApplyFeature(feat, hotkey);
+    }
+  };
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void nekodApi
+      .onGlobalHotkey((ev) => {
+        globalHotkeyHandlerRef.current(ev.feature_id, ev.hotkey);
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   async function handleRevokePermissions(trainer: TrainerDetailView) {
     try {
@@ -697,7 +1142,10 @@ export default function App() {
     try {
       setBusyAction(`install:${trainerId}`);
       setError(null);
-      await nekodApi.installOrUpdateTrainerFromRegistry(repositoryId, trainerId);
+      await nekodApi.installOrUpdateTrainerFromRegistry(
+        repositoryId,
+        trainerId,
+      );
       await refreshAll(false);
       if (selectedGame?.game.matched_game_id) {
         const gameId = selectedGame.game.matched_game_id;
@@ -762,7 +1210,10 @@ export default function App() {
         for (const f of trainer.features) {
           defaults[f.id] = f.default_hotkey ?? "";
         }
-        setProfilesByTrainer((prev) => ({ ...prev, [trainer.trainer_id]: defaults }));
+        setProfilesByTrainer((prev) => ({
+          ...prev,
+          [trainer.trainer_id]: defaults,
+        }));
         if (activeSessionId && activeTrainerId === trainer.trainer_id) {
           for (const f of trainer.features) {
             if (f.control_type === "toggle" && activeToggles[f.id]) {
@@ -781,7 +1232,8 @@ export default function App() {
       const presetState: Record<string, unknown> = {};
       for (const f of trainer.features) {
         if (f.control_type === "toggle") {
-          const enable = presetName === "Story Mode" ? f.risk_level === "low" : true;
+          const enable =
+            presetName === "Story Mode" ? f.risk_level === "low" : true;
           presetState[f.id] = { type: "toggle", value: enable };
           if (activeSessionId && activeTrainerId === trainer.trainer_id) {
             await nekodApi.applyTrainerFeature(activeSessionId, {
@@ -804,7 +1256,8 @@ export default function App() {
         game_id: gameId,
         trainer_id: trainer.trainer_id,
         hotkeys: profilesByTrainer[trainer.trainer_id] ?? {},
-        saved_feature_states: activeTrainerId === trainer.trainer_id ? activeToggles : {},
+        saved_feature_states:
+          activeTrainerId === trainer.trainer_id ? activeToggles : {},
         presets: nextTrainerPresets,
       });
       setStatusMsg(`已应用并保存预设「${presetName}」。`);
@@ -846,8 +1299,9 @@ export default function App() {
     }
   }
 
+  // Fallback in-window hotkey handler (works in Browser Preview and when focused)
   useEffect(() => {
-    if (!activeSessionId || !activeTrainerId) return;
+    if (!activeSessionId || !activeTrainerId || !isBrowserPreview) return;
     const trainer = trainers.find((t) => t.trainer_id === activeTrainerId);
     if (!trainer) return;
 
@@ -871,14 +1325,17 @@ export default function App() {
       const combo = parts.join("+").toLowerCase();
 
       const match = trainer?.features.find((f) => {
-        if (f.control_type !== "toggle" && f.control_type !== "action") return false;
+        if (f.control_type !== "toggle" && f.control_type !== "action")
+          return false;
         const bound =
-          profilesByTrainer[trainer.trainer_id]?.[f.id] ?? f.default_hotkey ?? "";
+          profilesByTrainer[trainer.trainer_id]?.[f.id] ??
+          f.default_hotkey ??
+          "";
         return bound.trim().toLowerCase() === combo;
       });
       if (match) {
         e.preventDefault();
-        void handleApplyFeature(match);
+        void handleApplyFeature(match, parts.join("+"));
       }
     }
 
@@ -886,26 +1343,71 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeSessionId, activeTrainerId, trainers, profilesByTrainer, activeToggles]);
 
+  // Direction 3: Smart sorted & filtered Game List (Injected -> Running -> Favorites -> Alpha)
   const filteredGames = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return games;
-    return games.filter(
-      (g) =>
+    const list = games.filter((g) => {
+      if (sidebarFilter === "favorites" && !favoriteKeys.has(g.library_key)) {
+        return false;
+      }
+      if (
+        sidebarFilter === "running" &&
+        !runningGameKeys.has(g.library_key) &&
+        activeGameKey !== g.library_key
+      ) {
+        return false;
+      }
+      if (!q) return true;
+      return (
         g.game.title.toLowerCase().includes(q) ||
-        (g.game.matched_game_id ?? "").toLowerCase().includes(q),
-    );
-  }, [games, search]);
+        (g.game.matched_game_id ?? "").toLowerCase().includes(q)
+      );
+    });
+
+    return [...list].sort((a, b) => {
+      const rank = (item: LibraryGameView) => {
+        if (activeSessionId && activeGameKey === item.library_key) return 0;
+        if (runningGameKeys.has(item.library_key)) return 1;
+        if (favoriteKeys.has(item.library_key)) return 2;
+        return 3;
+      };
+      const diff = rank(a) - rank(b);
+      if (diff !== 0) return diff;
+      return a.game.title.localeCompare(b.game.title);
+    });
+  }, [
+    games,
+    search,
+    sidebarFilter,
+    favoriteKeys,
+    runningGameKeys,
+    activeSessionId,
+    activeGameKey,
+  ]);
 
   const activeProcessLabel = useMemo(() => {
-    const proc = runningProcs.find((p) => p.pid === selectedPid) ?? runningProcs[0];
+    const proc =
+      runningProcs.find((p) => p.pid === selectedPid) ?? runningProcs[0];
     return proc ? `${proc.process_name} (PID ${proc.pid})` : null;
   }, [runningProcs, selectedPid]);
 
   const bridgeAvailable = Boolean(
     bridgeStatus &&
       (bridgeStatus.deployed ||
+        bridgeStatus.matched_bridge ||
         bridgeStatus.suggested_target_relative_path ||
         bridgeStatus.engine !== "native_unknown"),
+  );
+
+  const selectedArtwork = selectedGame
+    ? artworkByGame[selectedGame.library_key]
+    : null;
+
+  const canLaunchSelectedGame = Boolean(
+    selectedGame &&
+      ((selectedGame.game.store_source === "steam" &&
+        selectedGame.game.store_app_id) ||
+        selectedGame.game.executable_path),
   );
 
   return (
@@ -937,15 +1439,40 @@ export default function App() {
 
         <div className="sidebar-section-header">
           <span>游戏列表 ({filteredGames.length})</span>
-          {activeSessionId && (
+          {activeSessionId ? (
             <span style={{ color: "var(--ok)", fontWeight: 700 }}>● 注入中</span>
-          )}
+          ) : runningGameKeys.size > 0 ? (
+            <span style={{ color: "#38bdf8", fontWeight: 700 }}>
+              ● {runningGameKeys.size} 运行中
+            </span>
+          ) : null}
+        </div>
+
+        <div className="filter-chips">
+          <button
+            className={`filter-chip ${sidebarFilter === "all" ? "active" : ""}`}
+            onClick={() => setSidebarFilter("all")}
+          >
+            全部
+          </button>
+          <button
+            className={`filter-chip ${sidebarFilter === "favorites" ? "active" : ""}`}
+            onClick={() => setSidebarFilter("favorites")}
+          >
+            ★ 收藏 ({favoriteKeys.size})
+          </button>
+          <button
+            className={`filter-chip ${sidebarFilter === "running" ? "active" : ""}`}
+            onClick={() => setSidebarFilter("running")}
+          >
+            ● 运行 ({runningGameKeys.size})
+          </button>
         </div>
 
         <div className="game-list">
           {filteredGames.length === 0 ? (
             <div className="muted" style={{ padding: "12px 6px", lineHeight: 1.5 }}>
-              未匹配到游戏。可在下方「设置」添加自定义游戏目录，或在「导入包」注册游戏清单。
+              当前筛选下没有匹配游戏。可切换「全部」，或在下方「设置安全」添加自定义游戏目录。
             </div>
           ) : (
             filteredGames.map((item) => {
@@ -954,32 +1481,65 @@ export default function App() {
                 selectedGame?.library_key === item.library_key;
               const isInjected =
                 activeSessionId !== null && activeGameKey === item.library_key;
+              const isRunning = runningGameKeys.has(item.library_key);
               const isBridgeDeployed = Boolean(
                 bridgeStatusByGame[item.library_key]?.deployed,
               );
+              const isFav = favoriteKeys.has(item.library_key);
+              const thumb = artworkByGame[item.library_key]?.thumbnail_data_uri;
 
               return (
-                <button
+                <div
                   key={item.library_key}
                   className={`game-list-item ${isSelected ? "active" : ""}`}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => void openGame(item, true)}
-                >
-                  <span
-                    className={`game-status-dot ${
-                      isInjected
-                        ? "injected"
-                        : isBridgeDeployed
-                          ? "bridge-ready"
-                          : ""
-                    }`}
-                    title={
-                      isInjected
-                        ? "已注入运行中"
-                        : isBridgeDeployed
-                          ? "已部署伴生桥接"
-                          : "未注入"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      void openGame(item, true);
                     }
-                  />
+                  }}
+                >
+                  <div className="game-thumb-wrap">
+                    {thumb ? (
+                      <img
+                        className="game-thumb-img"
+                        src={thumb}
+                        alt={item.game.title}
+                      />
+                    ) : (
+                      <div
+                        className="game-thumb-monogram"
+                        style={{
+                          background: monogramGradient(item.game.title),
+                        }}
+                      >
+                        {gameMonogram(item.game.title)}
+                      </div>
+                    )}
+                    <span
+                      className={`game-thumb-dot ${
+                        isInjected
+                          ? "injected"
+                          : isRunning
+                            ? "running"
+                            : isBridgeDeployed
+                              ? "bridge-ready"
+                              : ""
+                      }`}
+                      title={
+                        isInjected
+                          ? "已注入运行中"
+                          : isRunning
+                            ? "游戏进程运行中"
+                            : isBridgeDeployed
+                              ? "已部署伴生桥接"
+                              : "未运行"
+                      }
+                    />
+                  </div>
                   <div className="game-list-meta">
                     <div className="game-list-title">{item.game.title}</div>
                     <div className="game-list-sub">
@@ -994,9 +1554,27 @@ export default function App() {
                           </span>
                         </>
                       )}
+                      {!isInjected && isRunning && (
+                        <>
+                          <span>&middot;</span>
+                          <span style={{ color: "#7dd3fc", fontWeight: 600 }}>
+                            运行中
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
-                </button>
+                  <button
+                    className={`fav-btn ${isFav ? "starred" : ""}`}
+                    title={isFav ? "取消收藏置顶" : "收藏置顶"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleFavorite(item.library_key);
+                    }}
+                  >
+                    {isFav ? "★" : "☆"}
+                  </button>
+                </div>
               );
             })
           )}
@@ -1049,7 +1627,7 @@ export default function App() {
           <div className="top-banners">
             {isBrowserPreview && (
               <div className="banner">
-                浏览器预览模式：当前展示模拟 IPC 数据；运行 Tauri 桌面端可连接真实 Windows x64 进程与 SQLite 账本。
+                浏览器预览模式：展示模拟数据；运行 Tauri 桌面端可连接真实 Steam 封面缓存、Windows 全局热键与游戏进程。
               </div>
             )}
             {error && <div className="error-banner">{error}</div>}
@@ -1057,12 +1635,12 @@ export default function App() {
           </div>
         )}
 
-        {/* ==================== WORKBENCH (Top-Right 游戏信息 + Bottom-Right 模组的功能) ==================== */}
+        {/* ==================== WORKBENCH ==================== */}
         {tab === "workbench" && !selectedGame && (
           <div className="empty-state">
             <h2 style={{ margin: 0, color: "var(--text)" }}>选择一款游戏开始</h2>
             <p style={{ margin: 0, maxWidth: 420 }}>
-              点击左侧「游戏列表」中的任意游戏，即可在上方查看游戏信息并一键注入 / 解除注入 Mod，在下方直接控制模组功能。
+              点击左侧「游戏列表」中的任意游戏，即可在上方查看游戏信息并一键启动/注入/解除注入 Mod，在下方直接控制模组功能。
             </p>
             <button className="btn" onClick={() => void handleRescan()}>
               立即扫描游戏库
@@ -1072,12 +1650,29 @@ export default function App() {
 
         {tab === "workbench" && selectedGame && (
           <>
-            {/* ---------- TOP-RIGHT: 游戏信息 & 一键注入 / 解除注入 ---------- */}
+            {/* ---------- TOP-RIGHT: 游戏信息 Hero Banner ---------- */}
             <header className="game-hero">
+              {selectedArtwork?.header_data_uri && (
+                <div
+                  className="game-hero-bg"
+                  style={{
+                    backgroundImage: `url("${selectedArtwork.header_data_uri}")`,
+                  }}
+                />
+              )}
+              <div className="game-hero-scrim" />
+
               <div className="game-hero-main">
                 <div className="game-hero-info">
                   <div className="row">
                     <h2 className="game-hero-title">{selectedGame.game.title}</h2>
+                    <button
+                      className={`fav-btn ${favoriteKeys.has(selectedGame.library_key) ? "starred" : ""}`}
+                      onClick={() => toggleFavorite(selectedGame.library_key)}
+                      title="收藏置顶"
+                    >
+                      {favoriteKeys.has(selectedGame.library_key) ? "★" : "☆"}
+                    </button>
                     <span className="badge">
                       {selectedGame.game.store_source.toUpperCase()}
                     </span>
@@ -1110,20 +1705,37 @@ export default function App() {
                     ))}
                     {bridgeStatus?.deployed && (
                       <span className="status-pill bridge">
-                        ● 伴生桥接已部署 ({bridgeStatus.active_files.length} 文件)
+                        ● 伴生桥接已部署 ({bridgeStatus.active_files.length})
                       </span>
                     )}
                     {gameEnv?.anti_cheat_files_present.map((ac) => (
                       <span key={ac} className="badge unverified">
-                        ⚠ 检测到反作弊: {ac}
+                        ⚠ 反作弊保护: {ac}
                       </span>
                     ))}
                   </div>
                 </div>
 
-                {/* Primary Hero Controls: 一键注入 Mod / 解除注入 */}
+                {/* Primary Hero Controls: Play & Inject + 一键注入 / 解除注入 + 一键伴生桥接 */}
                 <div className="game-hero-actions">
                   <div className="hero-btn-row">
+                    {!isSelectedGameInjected && canLaunchSelectedGame && (
+                      <button
+                        className="btn-play"
+                        disabled={
+                          busyAction === "launch" ||
+                          hasAntiCheatMarkers ||
+                          (activeSessionId !== null && !isSelectedGameInjected)
+                        }
+                        onClick={() => void handlePlayAndInject()}
+                        title="启动游戏并在检测到进程后自动注入已授权 Mod"
+                      >
+                        {busyAction === "launch"
+                          ? "启动中..."
+                          : "▶ 启动游戏并注入"}
+                      </button>
+                    )}
+
                     {!isSelectedGameInjected ? (
                       <button
                         className="btn-inject"
@@ -1160,7 +1772,7 @@ export default function App() {
                           className="btn btn-danger"
                           disabled={busyAction === "undeploy-bridge"}
                           onClick={() => void handleUndeployBridge()}
-                          title="按 DeploymentLedger 安全卸载游戏目录中的伴生桥接文件"
+                          title="按 DeploymentLedger 安全卸载伴生桥接文件"
                         >
                           {busyAction === "undeploy-bridge"
                             ? "卸载中..."
@@ -1170,13 +1782,10 @@ export default function App() {
                         <button
                           className="btn btn-secondary"
                           disabled={
-                            busyAction === "deploy-bridge" ||
-                            hasAntiCheatMarkers ||
-                            !bridgeSourceInput.trim() ||
-                            !bridgeTargetInput.trim()
+                            busyAction === "deploy-bridge" || hasAntiCheatMarkers
                           }
-                          onClick={() => void handleDeployBridge()}
-                          title="通过 DeploymentLedger 写入零 UnityExplorer 伴生桥接插件"
+                          onClick={() => void handleAutoDeployBridge(null)}
+                          title="自动匹配当前引擎（Mono/IL2CPP/UE4SS/REFramework）并一键部署，免手填路径"
                         >
                           {busyAction === "deploy-bridge"
                             ? "部署中..."
@@ -1185,87 +1794,120 @@ export default function App() {
                       ))}
                   </div>
 
+                  {/* Quick Companion Toggles: Auto-Attach + Sound FX + Global Hotkey Status */}
                   <div className="row">
-                    {isSelectedGameInjected && sessionDiag ? (
-                      <>
-                        <span className="status-pill live">
-                          ● 已注入 {activeProcessLabel ?? sessionDiag.session_id} ·
-                          补丁 {sessionDiag.active_patches} · 锁定{" "}
-                          {sessionDiag.active_freeze_features}
-                        </span>
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          onClick={() => void handleRefreshDiagnostics()}
-                        >
-                          刷新状态
-                        </button>
-                      </>
-                    ) : activeSessionId && !isSelectedGameInjected ? (
-                      <span className="status-pill">
-                        另一款游戏正在注入中，请先解除当前会话
-                        <button
-                          className="btn btn-danger btn-sm"
-                          style={{ marginLeft: 8 }}
-                          onClick={() => void handleUninject()}
-                        >
-                          解除另一会话
-                        </button>
-                      </span>
-                    ) : (
-                      <span className="status-pill">
-                        {selectedTrainer
-                          ? `就绪 · 目标模组：${selectedTrainer.name} v${selectedTrainer.version}`
-                          : "当前游戏暂无已安装模组"}
+                    <button
+                      className={`toggle-chip ${autoAttachEnabled ? "on" : ""}`}
+                      onClick={toggleAutoAttach}
+                      title="检测到已授权游戏进程启动时自动注入"
+                    >
+                      🔄 自动注入：{autoAttachEnabled ? "开" : "关"}
+                    </button>
+                    <button
+                      className={`toggle-chip ${soundEnabled ? "on" : ""}`}
+                      onClick={toggleSoundEnabled}
+                      title="开关/注入提示音效"
+                    >
+                      {soundEnabled ? "🔊 提示音：开" : "🔇 提示音：关"}
+                    </button>
+                    {isSelectedGameInjected && globalHotkeyCount > 0 && (
+                      <span className="status-pill live">
+                        ⌨ 全局热键已激活 ({globalHotkeyCount})
                       </span>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Compact Process Selector Row inside Game Info Header */}
-              {selectedGame.game.matched_game_id && (
-                <div className="game-hero-bar">
-                  <div className="row">
-                    <span className="muted" style={{ fontWeight: 600 }}>
-                      目标进程：
-                    </span>
-                    {runningProcs.length > 0 ? (
-                      <select
-                        className="select-input"
-                        value={selectedPid ?? ""}
-                        onChange={(e) => setSelectedPid(Number(e.target.value))}
+              {/* Compact Process & Status Bar inside Game Info Header */}
+              <div className="game-hero-bar">
+                <div className="row">
+                  {selectedGame.game.matched_game_id && (
+                    <>
+                      <span className="muted" style={{ fontWeight: 600 }}>
+                        目标进程：
+                      </span>
+                      {runningProcs.length > 0 ? (
+                        <select
+                          className="select-input"
+                          value={selectedPid ?? ""}
+                          onChange={(e) => setSelectedPid(Number(e.target.value))}
+                          disabled={activeSessionId !== null}
+                        >
+                          {runningProcs.map((p) => (
+                            <option key={p.pid} value={p.pid}>
+                              {p.process_name} (PID {p.pid}, {p.architecture})
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="muted">
+                          未运行（点击「▶ 启动游戏并注入」或手动启动游戏）
+                        </span>
+                      )}
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() =>
+                          void scanRunningProcesses(
+                            selectedGame.game.matched_game_id!,
+                          )
+                        }
                         disabled={activeSessionId !== null}
                       >
-                        {runningProcs.map((p) => (
-                          <option key={p.pid} value={p.pid}>
-                            {p.process_name} (PID {p.pid}, {p.architecture})
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className="muted">
-                        未发现运行中的游戏进程（启动游戏后点击扫描，或直接点一键注入自动扫描）
+                        扫描进程
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                <div className="row">
+                  {waitingLaunchGameKey === selectedGame.library_key &&
+                    !isSelectedGameInjected && (
+                      <span className="status-pill bridge">
+                        🚀 等待游戏进程出现后自动注入...
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          style={{ marginLeft: 6, padding: "2px 7px" }}
+                          onClick={() => setWaitingLaunchGameKey(null)}
+                        >
+                          取消
+                        </button>
                       </span>
                     )}
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() =>
-                        void scanRunningProcesses(
-                          selectedGame.game.matched_game_id!,
-                        )
-                      }
-                      disabled={activeSessionId !== null}
-                    >
-                      扫描进程
-                    </button>
-                  </div>
-                  <div className="row">
-                    <span className="muted">
-                      ID: <code>{selectedGame.game.matched_game_id}</code>
+                  {isSelectedGameInjected && sessionDiag ? (
+                    <>
+                      <span className="status-pill live">
+                        ● 已注入 {activeProcessLabel ?? sessionDiag.session_id} ·
+                        补丁 {sessionDiag.active_patches} · 锁定{" "}
+                        {sessionDiag.active_freeze_features}
+                      </span>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => void handleRefreshDiagnostics()}
+                      >
+                        刷新状态
+                      </button>
+                    </>
+                  ) : activeSessionId && !isSelectedGameInjected ? (
+                    <span className="status-pill">
+                      另一款游戏正在注入中
+                      <button
+                        className="btn btn-danger btn-sm"
+                        style={{ marginLeft: 8 }}
+                        onClick={() => void handleUninject()}
+                      >
+                        解除另一会话
+                      </button>
                     </span>
-                  </div>
+                  ) : (
+                    selectedGame.game.matched_game_id && (
+                      <span className="muted">
+                        ID: <code>{selectedGame.game.matched_game_id}</code>
+                      </span>
+                    )
+                  )}
                 </div>
-              )}
+              </div>
             </header>
 
             {/* ---------- BOTTOM-RIGHT: 模组的功能 ---------- */}
@@ -1382,7 +2024,7 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Feature Toolbar: Presets + Profile Save/Import */}
+                    {/* Feature Toolbar + 2-Column Feature Control Grid */}
                     <div className="card stack">
                       <div
                         className="row"
@@ -1460,7 +2102,7 @@ export default function App() {
 
                       {!isSelectedTrainerInjected && (
                         <div className="banner" style={{ marginBottom: 0 }}>
-                          当前尚未注入此模组。点击右上角「⚡ 一键注入 Mod」后即可实时开关或修改以下功能；注入后可随时点击「⏏ 解除注入」无痕回滚。
+                          点击右上角「▶ 启动游戏并注入」或「⚡ 一键注入 Mod」后，即可实时开关功能并启用游戏内全局快捷键（带提示音）；退出前点击「⏏ 解除注入」即可无痕回滚。
                         </div>
                       )}
 
@@ -1497,7 +2139,6 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* 2-Column Feature Control Grid */}
                       <div className="feature-grid">
                         {selectedTrainer.features.map((f) => {
                           const isOn =
@@ -1528,8 +2169,8 @@ export default function App() {
                               <div className="feature-card-controls">
                                 <input
                                   className="search-input"
-                                  style={{ width: 92, padding: "6px 8px" }}
-                                  placeholder="热键"
+                                  style={{ width: 96, padding: "6px 8px" }}
+                                  placeholder="热键 (F1)"
                                   aria-label={`Hotkey for ${f.name}`}
                                   value={
                                     profilesByTrainer[selectedTrainer.trainer_id]?.[
@@ -1620,37 +2261,80 @@ export default function App() {
                 )
               )}
 
-              {/* Collapsible Drawers: Keep main feature canvas clean */}
+              {/* Direction 4 Drawer: Built-in Companion Bridge Bucket + Manual Override */}
               <details className="drawer">
                 <summary>
                   <span>
-                    🧩 伴生桥接部署配置 (DeploymentLedger ·{" "}
-                    {bridgeStatus?.deployed ? "已部署" : "未部署"})
+                    🧩 内置伴生桥接资源桶 (DeploymentLedger ·{" "}
+                    {bridgeStatus?.deployed
+                      ? "已部署"
+                      : bridgeStatus?.matched_bridge
+                        ? `自动匹配：${bridgeStatus.matched_bridge.display_name}`
+                        : "按引擎自动匹配"}
+                    )
                   </span>
                   <span className="muted">展开 / 收起</span>
                 </summary>
                 <div className="drawer-body">
-                  <div className="muted">
-                    用于将无 UnityExplorer 依赖的 <code>NekodUnityBridge</code> /{" "}
-                    <code>UE4SS</code> / <code>REFramework</code>{" "}
-                    伴生插件安全部署到游戏子目录，并通过 SHA-256 账本记录，支持一键完整卸载还原。
-                  </div>
-                  <div className="row">
-                    <input
-                      className="text-input"
-                      style={{ flex: 1 }}
-                      placeholder="本地源插件文件路径（例如 plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll）"
-                      value={bridgeSourceInput}
-                      onChange={(e) => setBridgeSourceInput(e.target.value)}
-                    />
-                    <input
-                      className="text-input"
-                      style={{ flex: 1 }}
-                      placeholder="游戏内目标相对路径（例如 BepInEx/plugins/NekodUnityBridge.Mono.dll）"
-                      value={bridgeTargetInput}
-                      onChange={(e) => setBridgeTargetInput(e.target.value)}
-                    />
-                  </div>
+                  {bridgeStatus?.matched_bridge ? (
+                    <div className="feature-row">
+                      <div>
+                        <div className="row">
+                          <strong>{bridgeStatus.matched_bridge.display_name}</strong>
+                          <span className="badge">
+                            v{bridgeStatus.matched_bridge.version}
+                          </span>
+                          <span
+                            className={`badge ${bridgeStatus.matched_bridge.ready_locally ? "official" : "unverified"}`}
+                          >
+                            {bridgeStatus.matched_bridge.ready_locally
+                              ? `本地就绪 (${bridgeStatus.matched_bridge.source_kind})`
+                              : "需本地构建"}
+                          </span>
+                        </div>
+                        <div className="muted" style={{ marginTop: 4 }}>
+                          目标路径：
+                          <code>
+                            {bridgeStatus.matched_bridge.target_relative_path}
+                          </code>
+                          {bridgeStatus.matched_bridge.sha256
+                            ? ` · SHA-256: ${bridgeStatus.matched_bridge.sha256.slice(0, 16)}…`
+                            : ""}
+                        </div>
+                      </div>
+                      <div className="row">
+                        {!bridgeStatus.deployed ? (
+                          <button
+                            className="btn btn-sm"
+                            disabled={
+                              busyAction === "deploy-bridge" ||
+                              hasAntiCheatMarkers
+                            }
+                            onClick={() => void handleAutoDeployBridge(null)}
+                          >
+                            一键自动部署
+                          </button>
+                        ) : (
+                          <button
+                            className="btn btn-danger btn-sm"
+                            disabled={busyAction === "undeploy-bridge"}
+                            onClick={() => void handleUndeployBridge()}
+                          >
+                            一键解除并还原
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="muted">
+                      当前游戏引擎（
+                      {bridgeStatus
+                        ? ENGINE_LABELS[bridgeStatus.engine]
+                        : "未知"}
+                      ）不需要伴生桥接，或可在下方手动指定自定义插件路径。
+                    </div>
+                  )}
+
                   {bridgeStatus && bridgeStatus.active_files.length > 0 && (
                     <div className="muted">
                       当前账本跟踪的已部署文件：{" "}
@@ -1661,25 +2345,64 @@ export default function App() {
                       ))}
                     </div>
                   )}
+
+                  <details className="drawer">
+                    <summary>
+                      <span>查看全部内置伴生桥接清单 ({bridgeCatalog.length})</span>
+                      <span className="muted">Unity Mono / IL2CPP / UE4SS / RE / Godot</span>
+                    </summary>
+                    <div className="drawer-body">
+                      {bridgeCatalog.map((b) => (
+                        <div key={b.id} className="feature-row">
+                          <div>
+                            <div className="row">
+                              <strong>{b.display_name}</strong>
+                              <span className="badge">
+                                {ENGINE_LABELS[b.engine]}
+                              </span>
+                              <span
+                                className={`badge ${b.ready_locally ? "official" : "unverified"}`}
+                              >
+                                {b.ready_locally ? "已就绪" : "待构建"}
+                              </span>
+                            </div>
+                            <div className="muted">
+                              {b.description} &middot; 目标：
+                              <code>{b.target_relative_path}</code>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+
+                  <div className="muted" style={{ marginTop: 4 }}>
+                    高级手动覆盖（仅自定义调试插件时需要）：
+                  </div>
                   <div className="row">
+                    <input
+                      className="text-input"
+                      style={{ flex: 1 }}
+                      placeholder="本地源插件路径"
+                      value={bridgeSourceInput}
+                      onChange={(e) => setBridgeSourceInput(e.target.value)}
+                    />
+                    <input
+                      className="text-input"
+                      style={{ flex: 1 }}
+                      placeholder="游戏内目标相对路径"
+                      value={bridgeTargetInput}
+                      onChange={(e) => setBridgeTargetInput(e.target.value)}
+                    />
                     <button
-                      className="btn btn-sm"
+                      className="btn btn-secondary btn-sm"
                       disabled={
                         busyAction === "deploy-bridge" || hasAntiCheatMarkers
                       }
-                      onClick={() => void handleDeployBridge()}
+                      onClick={() => void handleManualDeployBridge()}
                     >
-                      部署到游戏目录
+                      手动部署
                     </button>
-                    {bridgeStatus?.deployed && (
-                      <button
-                        className="btn btn-danger btn-sm"
-                        disabled={busyAction === "undeploy-bridge"}
-                        onClick={() => void handleUndeployBridge()}
-                      >
-                        一键解除并清理账本文件
-                      </button>
-                    )}
                   </div>
                 </div>
               </details>
@@ -1779,9 +2502,7 @@ export default function App() {
               {selectedGame.game.matched_game_id && (
                 <details className="drawer">
                   <summary>
-                    <span>
-                      🌐 社区可用模组 ({communityTrainers.length})
-                    </span>
+                    <span>🌐 社区可用模组 ({communityTrainers.length})</span>
                     <span className="muted">展开 / 收起</span>
                   </summary>
                   <div className="drawer-body">
@@ -2086,7 +2807,9 @@ export default function App() {
                       })
                     }
                   />
-                  <span>允许未认证（Unverified）来源的声明式模组（附带风险提示）</span>
+                  <span>
+                    允许未认证（Unverified）来源的声明式模组（附带风险提示）
+                  </span>
                 </label>
                 <label className="row">
                   <input
@@ -2235,6 +2958,17 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Floating HUD Toast Overlay */}
+      {hudToasts.length > 0 && (
+        <div className="hud-toast-stack" aria-live="polite">
+          {hudToasts.map((t) => (
+            <div key={t.id} className={`hud-toast ${t.tone}`}>
+              {t.text}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

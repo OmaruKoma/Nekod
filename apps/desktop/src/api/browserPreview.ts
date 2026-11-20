@@ -2,12 +2,17 @@ import type {
   BridgeDeploymentStatus,
   BridgeUndeploySummary,
   CommunityTrainerView,
+  CompanionBridgeCatalogEntry,
   CompatibilityRecord,
   CustomGamePathRecord,
   DiagnosticEvent,
   FeatureCommand,
+  GameArtwork,
   GameEnvironmentProfile,
   GameProfile,
+  GlobalHotkeyBinding,
+  GlobalHotkeyEvent,
+  LaunchGameResult,
   LibraryGameView,
   PermissionScope,
   ProcessIdentity,
@@ -488,16 +493,130 @@ export function createBrowserPreviewApi() {
     ): Promise<BridgeDeploymentStatus> => {
       const isHollow = installDir.toLowerCase().includes("hollow");
       const files = deployedBridges.get(gameKey) ?? [];
+      const matched: CompanionBridgeCatalogEntry | null = isHollow
+        ? {
+            id: "nekod-unity-bridge-mono",
+            display_name: "NekodUnityBridge (Mono · 零 UnityExplorer)",
+            engine: "unity_mono",
+            version: "0.2.0",
+            target_relative_path: "BepInEx/plugins/NekodUnityBridge.Mono.dll",
+            description: "独立 BepInEx 5 Mono 伴生桥接插件，无需 UnityExplorer。",
+            ready_locally: true,
+            source_kind: "workspace_dist",
+            resolved_path: "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll",
+            sha256: "e3b0c44298fc1c149afbf4c8996fb924",
+            download_url: null,
+          }
+        : null;
       return {
         deployed: files.length > 0,
         engine: isHollow ? "unity_mono" : "native_unknown",
         active_files: files,
-        suggested_source_file: isHollow
-          ? "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll"
-          : null,
-        suggested_target_relative_path: isHollow
-          ? "BepInEx/plugins/NekodUnityBridge.Mono.dll"
-          : null,
+        suggested_source_file: matched?.resolved_path ?? null,
+        suggested_target_relative_path: matched?.target_relative_path ?? null,
+        matched_bridge: matched,
+      };
+    },
+    listCompanionBridgeCatalog: async (): Promise<CompanionBridgeCatalogEntry[]> => [
+      {
+        id: "nekod-unity-bridge-mono",
+        display_name: "NekodUnityBridge (Mono · 零 UnityExplorer)",
+        engine: "unity_mono",
+        version: "0.2.0",
+        target_relative_path: "BepInEx/plugins/NekodUnityBridge.Mono.dll",
+        description: "独立 BepInEx 5 Mono 伴生桥接插件，无需 UnityExplorer。",
+        ready_locally: true,
+        source_kind: "workspace_dist",
+        resolved_path: "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll",
+        sha256: "preview-mono-sha256",
+        download_url: null,
+      },
+      {
+        id: "nekod-unity-bridge-il2cpp",
+        display_name: "NekodUnityBridge (IL2CPP · 零 UnityExplorer)",
+        engine: "unity_il2cpp",
+        version: "0.2.0",
+        target_relative_path: "BepInEx/plugins/NekodUnityBridge.IL2CPP.dll",
+        description: "独立 BepInEx 6 IL2CPP 伴生桥接插件，无需 UnityExplorer。",
+        ready_locally: true,
+        source_kind: "workspace_dist",
+        resolved_path: "plugins/unity-nekod-bridge/dist/il2cpp/NekodUnityBridge.IL2CPP.dll",
+        sha256: "preview-il2cpp-sha256",
+        download_url: null,
+      },
+      {
+        id: "nekod-reframework-bridge",
+        display_name: "Nekod REFramework Lua Bridge",
+        engine: "re_engine",
+        version: "0.1.0",
+        target_relative_path: "reframework/autorun/nekod_bridge.lua",
+        description: "面向 RE Engine 的 REFramework Lua 伴生脚本。",
+        ready_locally: true,
+        source_kind: "workspace_dist",
+        resolved_path: "plugins/reframework-nekod-bridge/reframework/autorun/nekod_bridge.lua",
+        sha256: "preview-ref-sha256",
+        download_url: null,
+      },
+      {
+        id: "nekod-ue4ss-bridge",
+        display_name: "Nekod UE4SS Lua Bridge",
+        engine: "unreal_engine",
+        version: "0.1.0",
+        target_relative_path: "ue4ss/Mods/NekodBridge/Scripts/main.lua",
+        description: "面向 Unreal Engine 4/5 的 UE4SS Lua 伴生脚本。",
+        ready_locally: true,
+        source_kind: "workspace_dist",
+        resolved_path: "plugins/ue4ss-nekod-bridge/Scripts/main.lua",
+        sha256: "preview-ue4ss-sha256",
+        download_url: null,
+      },
+      {
+        id: "nekod-godot-bridge",
+        display_name: "Nekod Godot GDScript Bridge",
+        engine: "godot",
+        version: "0.1.0",
+        target_relative_path: "scripts/nekod_bridge.gd",
+        description: "面向 Godot 单机游戏的本地 GDScript 桥接脚本。",
+        ready_locally: true,
+        source_kind: "workspace_dist",
+        resolved_path: "plugins/godot-nekod-bridge/nekod_bridge.gd",
+        sha256: "preview-godot-sha256",
+        download_url: null,
+      },
+    ],
+    autoDeployCompanionBridge: async (
+      gameKey: string,
+      installDir: string,
+      _customSourceOverride: string | null = null,
+    ): Promise<BridgeDeploymentStatus> => {
+      const target = "BepInEx/plugins/NekodUnityBridge.Mono.dll";
+      deployedBridges.set(gameKey, [target]);
+      pushLog(
+        "info",
+        "deployment",
+        `Auto-deployed companion bridge '${target}' for ${gameKey} (${installDir})`,
+      );
+      return {
+        deployed: true,
+        engine: "unity_mono",
+        active_files: [target],
+        suggested_source_file:
+          "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll",
+        suggested_target_relative_path: target,
+        matched_bridge: {
+          id: "nekod-unity-bridge-mono",
+          display_name: "NekodUnityBridge (Mono · 零 UnityExplorer)",
+          engine: "unity_mono",
+          version: "0.2.0",
+          target_relative_path: target,
+          description: "独立 BepInEx 5 Mono 伴生桥接插件，无需 UnityExplorer。",
+          ready_locally: true,
+          source_kind: "workspace_dist",
+          resolved_path:
+            "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll",
+          sha256: "preview-mono-sha256",
+          download_url: null,
+        },
       };
     },
     deployCompanionBridge: async (
@@ -518,6 +637,7 @@ export function createBrowserPreviewApi() {
           ? "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll"
           : null,
         suggested_target_relative_path: targetRelativePath,
+        matched_bridge: null,
       };
     },
     undeployCompanionBridge: async (
@@ -533,6 +653,45 @@ export function createBrowserPreviewApi() {
         conflicts: 0,
         conflict_paths: [],
       };
+    },
+    syncGlobalHotkeys: async (bindings: GlobalHotkeyBinding[]): Promise<number> => {
+      pushLog("info", "hotkeys", `Synced ${bindings.length} global hotkey binding(s) (preview)`);
+      return bindings.length;
+    },
+    getGameArtwork: async (
+      _storeSource: string,
+      storeAppId: string | null,
+      installDir: string,
+    ): Promise<GameArtwork> => {
+      const isHollow =
+        storeAppId === "367520" || installDir.toLowerCase().includes("hollow");
+      const [c1, c2, label] = isHollow
+        ? ["#1e1b4b", "#312e81", "HK"]
+        : ["#0f172a", "#1e3a5f", "RPG"];
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='460' height='215'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='${c1}'/><stop offset='100%' stop-color='${c2}'/></linearGradient></defs><rect width='460' height='215' fill='url(#g)'/><circle cx='380' cy='50' r='90' fill='rgba(79,140,255,0.22)'/><text x='28' y='132' fill='rgba(255,255,255,0.18)' font-family='Segoe UI,sans-serif' font-size='88' font-weight='800'>${label}</text></svg>`;
+      const uri = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+      return { thumbnail_data_uri: uri, header_data_uri: uri };
+    },
+    launchGame: async (
+      storeSource: string,
+      storeAppId: string | null,
+      installDir: string,
+      executablePath: string | null,
+    ): Promise<LaunchGameResult> => {
+      const target =
+        storeSource === "steam" && storeAppId
+          ? `steam://rungameid/${storeAppId}`
+          : (executablePath ?? installDir);
+      pushLog("info", "launcher", `Simulated game launch via ${target}`);
+      return {
+        method: storeSource === "steam" && storeAppId ? "steam_uri" : "direct_executable",
+        target,
+      };
+    },
+    onGlobalHotkey: async (
+      _handler: (event: GlobalHotkeyEvent) => void,
+    ): Promise<() => void> => {
+      return () => {};
     },
   };
 }

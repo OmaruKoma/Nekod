@@ -22,6 +22,11 @@ impl SteamDetector {
         }
     }
 
+    /// Returns the discovered Steam root directories.
+    pub fn steam_roots(&self) -> &[PathBuf] {
+        &self.steam_roots
+    }
+
     /// Creates a Steam detector probing standard OS installation locations.
     pub fn from_system() -> Self {
         let mut roots = Vec::new();

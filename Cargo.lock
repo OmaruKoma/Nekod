@@ -2217,6 +2217,7 @@ dependencies = [
  "nekod-runtime-api",
  "nekod-trainer-manager",
  "nekod-trainer-runtime",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",

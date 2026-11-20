@@ -103,11 +103,11 @@ body,
   background: transparent;
   border: 1px solid transparent;
   border-radius: 10px;
-  padding: 10px 11px;
+  padding: 8px 10px;
   color: var(--text);
   cursor: pointer;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   transition: background 0.14s ease, border-color 0.14s ease;
 }
@@ -121,6 +121,116 @@ body,
   background: var(--surface-alt);
   border-color: var(--accent);
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.game-thumb-wrap {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--surface-alt);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.game-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.game-thumb-monogram {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  color: #e2e8f0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.game-thumb-dot {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid #0f172a;
+  background: #64748b;
+}
+
+.game-thumb-dot.injected {
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.95);
+}
+
+.game-thumb-dot.running {
+  background: #38bdf8;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.9);
+}
+
+.game-thumb-dot.bridge-ready {
+  background: var(--accent);
+}
+
+.fav-btn {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.14s ease, transform 0.12s ease;
+}
+
+.fav-btn:hover {
+  color: #fbbf24;
+  transform: scale(1.12);
+}
+
+.fav-btn.starred {
+  color: #fbbf24;
+}
+
+.filter-chips {
+  display: flex;
+  gap: 6px;
+  padding: 0 14px 6px;
+}
+
+.filter-chip {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 5px 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.filter-chip:hover {
+  color: var(--text);
+  background: var(--surface-alt);
+}
+
+.filter-chip.active {
+  color: #ffffff;
+  background: rgba(79, 140, 255, 0.2);
+  border-color: var(--accent);
 }
 
 .game-status-dot {
@@ -219,15 +329,130 @@ body,
   flex-shrink: 0;
 }
 
-/* Top-Right: 游戏信息 Hero Bar */
+/* Top-Right: 游戏信息 Hero Bar with Optional Artwork Backdrop */
 .game-hero {
-  background: linear-gradient(180deg, #171e2b 0%, #131822 100%);
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #172033 0%, #121722 60%, #101520 100%);
   border-bottom: 1px solid var(--border);
   padding: 18px 24px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.game-hero-bg {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center 25%;
+  opacity: 0.24;
+  filter: blur(2px) saturate(1.15);
+  transform: scale(1.03);
+  pointer-events: none;
+}
+
+.game-hero-scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(12, 15, 20, 0.92) 0%,
+    rgba(14, 19, 28, 0.78) 55%,
+    rgba(12, 15, 20, 0.9) 100%
+  );
+  pointer-events: none;
+}
+
+.game-hero-main,
+.game-hero-bar {
+  position: relative;
+  z-index: 1;
+}
+
+.btn-play {
+  background: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+  color: #ffffff;
+  border: none;
+  padding: 11px 18px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 700;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.32);
+  transition: transform 0.12s ease, filter 0.14s ease;
+}
+
+.btn-play:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.btn-play:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.toggle-chip {
+  background: rgba(20, 25, 34, 0.8);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+
+.toggle-chip:hover {
+  color: var(--text);
+  border-color: #475569;
+}
+
+.toggle-chip.on {
+  border-color: rgba(34, 197, 94, 0.6);
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+}
+
+/* Floating HUD Toast for Hotkey / Auto-Attach Feedback */
+.hud-toast-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.hud-toast {
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid rgba(79, 140, 255, 0.55);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
+  color: #f8fafc;
+  padding: 10px 15px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  backdrop-filter: blur(8px);
+}
+
+.hud-toast.ok {
+  border-color: rgba(34, 197, 94, 0.65);
+}
+
+.hud-toast.warn {
+  border-color: rgba(245, 158, 11, 0.65);
 }
 
 .game-hero-main {
