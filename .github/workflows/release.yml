@@ -9,7 +9,7 @@ on:
       tag:
         description: "Release tag to package (for manual dry-runs)"
         required: false
-        default: "v0.1.0-alpha.0"
+        default: "v1.0.0"
 
 permissions:
   contents: write
@@ -46,7 +46,7 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
 
-      - name: Validate repository schemas and sample trainer package
+      - name: Validate repository schemas and starter packages
         run: |
           cargo run -p nekod-validator -- game schemas/examples/game-manifest.example.json
           cargo run -p nekod-validator -- trainer schemas/examples/trainer-manifest.example.json
@@ -54,6 +54,8 @@ jobs:
           cargo run -p nekod-validator -- registry schemas/examples/registry-manifest.example.json
           cargo run -p nekod-validator -- patch schemas/examples/declarative-patch.example.json
           cargo run -p nekod-validator -- package examples/sample-singleplayer-rpg
+          cargo run -p nekod-validator -- nmod examples/unity-standalone-starter
+          cargo run -p nekod-validator -- nmod examples/unity-explorer-mcp-starter
 
   package-windows:
     needs: quality-gate
@@ -71,16 +73,16 @@ jobs:
           npm install
           npm run build
 
-      - name: Build Windows x64 release binaries
+      - name: Build Windows x64 CLI, MCP, and NSIS installer
         run: |
-          cargo build --release -p nekod-desktop -p nekod-mcp -p nekod-validator
+          cargo build --release -p nekod-mcp -p nekod-validator
 
-      - name: Package Windows x64 Tauri bundle (no-sign installer when available)
+      - name: Build Windows x64 Tauri NSIS installer bundle
         working-directory: apps/desktop
         run: |
-          npx tauri build --no-bundle
+          npx tauri build --bundles nsis
 
-      - name: Stage Windows x64 release archive
+      - name: Stage Windows x64 portable archive and NSIS installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-release
@@ -90,16 +92,29 @@ jobs:
           Copy-Item LICENSE dist-release/
           Copy-Item README.md dist-release/
           Copy-Item SECURITY.md dist-release/
-          Compress-Archive -Path dist-release/* -DestinationPath nekod-windows-x64.zip -Force
-          $hash = (Get-FileHash nekod-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  nekod-windows-x64.zip" | Out-File -Encoding utf8 nekod-windows-x64.zip.sha256
+          Compress-Archive -Path dist-release/* -DestinationPath nekod-windows-x64-portable.zip -Force
+          $zipHash = (Get-FileHash nekod-windows-x64-portable.zip -Algorithm SHA256).Hash.ToLower()
+          "$zipHash  nekod-windows-x64-portable.zip" | Out-File -Encoding utf8 nekod-windows-x64-portable.zip.sha256
+
+          $setupExe = Get-ChildItem -Path target/release/bundle/nsis -Filter "*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $setupExe) {
+            $setupExe = Get-ChildItem -Path apps/desktop/src-tauri/target/release/bundle/nsis -Filter "*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if (-not $setupExe) {
+            throw "NSIS setup installer .exe not found under bundle/nsis"
+          }
+          Copy-Item $setupExe.FullName -Destination "nekod-windows-x64-setup.exe" -Force
+          $exeHash = (Get-FileHash nekod-windows-x64-setup.exe -Algorithm SHA256).Hash.ToLower()
+          "$exeHash  nekod-windows-x64-setup.exe" | Out-File -Encoding utf8 nekod-windows-x64-setup.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: nekod-windows-x64
           path: |
-            nekod-windows-x64.zip
-            nekod-windows-x64.zip.sha256
+            nekod-windows-x64-portable.zip
+            nekod-windows-x64-portable.zip.sha256
+            nekod-windows-x64-setup.exe
+            nekod-windows-x64-setup.exe.sha256
 
   package-linux:
     needs: quality-gate
@@ -148,6 +163,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            release-artifacts/nekod-windows-x64.zip
+            release-artifacts/nekod-windows-x64-setup.exe
+            release-artifacts/nekod-windows-x64-portable.zip
             release-artifacts/nekod-linux-x64.tar.gz
             release-artifacts/SHA256SUMS.txt
