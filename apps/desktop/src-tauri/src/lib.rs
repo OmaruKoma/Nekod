@@ -3,20 +3,23 @@
 mod artwork;
 mod bridges;
 mod hotkeys;
+mod overlay;
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use artwork::{GameArtwork, resolve_game_artwork};
 use bridges::{
     CompanionBridgeCatalogEntry, download_or_load_cached_bepinex_zip_with_progress,
-    extract_bepinex_zip_to_ledger_with_progress, inspect_bepinex_loader_readiness,
-    list_catalog as list_bridge_catalog, resolve_bridge_bytes_for_engine,
+    extract_bepinex_zip_to_ledger_with_progress, extract_ue4ss_zip_to_ledger_with_progress,
+    inspect_bepinex_loader_readiness, list_catalog as list_bridge_catalog,
+    resolve_bridge_bytes_for_engine, resolve_ue4ss_target_paths,
 };
 use hotkeys::{GlobalHotkeyBinding, GlobalHotkeyService};
 use nekod_core::{
@@ -30,7 +33,7 @@ use nekod_manifest::{
 };
 use nekod_permission_manager::SecurityPolicyConfig;
 use nekod_profile_manager::{CustomGamePathRecord, GameProfile};
-use nekod_registry_client::{RegistrySourceState, RegistrySyncReport};
+use nekod_registry_client::{RegistrySource, RegistrySourceState, RegistrySyncReport};
 use nekod_runtime_api::{FeatureCommand, ProcessIdentity, RuntimeDiagnostics, RuntimeSessionId};
 use nekod_trainer_manager::{CompatibilityRecord, sha256_hex};
 use nekod_trainer_runtime::{CompositeRuntimeRouter, DeploymentLedger, DeploymentState};
@@ -41,6 +44,7 @@ use nekod_validator::{
     validate_game_manifest_str, validate_mod_manifest_str, validate_nmod_package_dir,
     validate_trainer_package_dir,
 };
+use overlay::{HudOverlayService, HudOverlayState};
 use serde::Serialize;
 use serde_json::json;
 use tauri::{Emitter, Manager, State};
@@ -50,6 +54,8 @@ pub struct AppState {
     core: Arc<NekodAppService>,
     data_dir: PathBuf,
     hotkeys: GlobalHotkeyService,
+    overlay: HudOverlayService,
+    minimize_to_tray: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -774,6 +780,16 @@ async fn list_community_trainers_for_game(
 }
 
 #[tauri::command]
+async fn list_all_community_trainers(
+    state: State<'_, AppState>,
+) -> Result<Vec<CommunityTrainerView>, String> {
+    spawn_core(Arc::clone(&state.core), |core| {
+        core.list_all_community_trainers().map_err(map_err)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn check_trainer_updates(
     state: State<'_, AppState>,
 ) -> Result<Vec<TrainerUpdateInfo>, String> {
@@ -839,42 +855,78 @@ fn bridge_ledger_paths(data_dir: &Path, game_key: &str) -> (PathBuf, PathBuf) {
     (root.join("backups"), root.join("ledger.json"))
 }
 
-fn suggest_companion_bridge(engine: GameEngineKind) -> (Option<String>, Option<String>) {
+fn resolve_bridge_ledger_paths(
+    data_dir: &Path,
+    game_key: &str,
+    install_dir: &str,
+) -> (PathBuf, PathBuf) {
+    let primary = bridge_ledger_paths(data_dir, game_key);
+    if primary.1.is_file() {
+        return primary;
+    }
+    if install_dir != game_key {
+        let by_install = bridge_ledger_paths(data_dir, install_dir);
+        if by_install.1.is_file() {
+            return by_install;
+        }
+    }
+    let clean_install = display_clean_path(Path::new(install_dir));
+    if clean_install != install_dir && clean_install != game_key {
+        let by_clean = bridge_ledger_paths(data_dir, &clean_install);
+        if by_clean.1.is_file() {
+            return by_clean;
+        }
+    }
+    primary
+}
+
+fn suggest_companion_bridge(
+    engine: GameEngineKind,
+    install_dir: &Path,
+) -> (Option<String>, Option<String>) {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("..");
     let (rel_src, target_rel) = match engine {
         GameEngineKind::UnityIl2cpp => (
-            "plugins/unity-nekod-bridge/dist/il2cpp/NekodUnityBridge.IL2CPP.dll",
-            "BepInEx/plugins/NekodUnityBridge.IL2CPP.dll",
+            "plugins/unity-nekod-bridge/dist/il2cpp/NekodUnityBridge.IL2CPP.dll".to_owned(),
+            "BepInEx/plugins/NekodUnityBridge.IL2CPP.dll".to_owned(),
         ),
         GameEngineKind::UnityMono => (
-            "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll",
-            "BepInEx/plugins/NekodUnityBridge.Mono.dll",
+            "plugins/unity-nekod-bridge/dist/mono/NekodUnityBridge.Mono.dll".to_owned(),
+            "BepInEx/plugins/NekodUnityBridge.Mono.dll".to_owned(),
         ),
         GameEngineKind::ReEngine => (
-            "plugins/reframework-nekod-bridge/reframework/autorun/nekod_bridge.lua",
-            "reframework/autorun/nekod_bridge.lua",
+            "plugins/reframework-nekod-bridge/reframework/autorun/nekod_bridge.lua".to_owned(),
+            "reframework/autorun/nekod_bridge.lua".to_owned(),
         ),
-        GameEngineKind::UnrealEngine => (
-            "plugins/ue4ss-nekod-bridge/Scripts/main.lua",
-            "ue4ss/Mods/NekodBridge/Scripts/main.lua",
-        ),
+        GameEngineKind::UnrealEngine => {
+            let (main_rel, _) = resolve_ue4ss_target_paths(install_dir);
+            (
+                "plugins/ue4ss-nekod-bridge/Scripts/main.lua".to_owned(),
+                main_rel,
+            )
+        }
         _ => return (None, None),
     };
-    let candidate = workspace_root.join(rel_src);
+    let candidate = workspace_root.join(&rel_src);
     let source = if candidate.is_file() {
         Some(candidate.display().to_string())
     } else {
-        Some(rel_src.to_owned())
+        Some(rel_src)
     };
-    (source, Some(target_rel.to_owned()))
+    (source, Some(target_rel))
 }
 
 fn validate_bridge_target_path(rel_path: &str) -> Result<(), String> {
     let normalized = rel_path.replace('\\', "/");
-    if normalized.contains("..") || normalized.starts_with('/') || normalized.contains(':') {
+    if normalized.is_empty()
+        || normalized.contains("..")
+        || normalized.starts_with('/')
+        || normalized.ends_with('/')
+        || normalized.contains(':')
+    {
         return Err(format!("unsafe bridge target path '{rel_path}'"));
     }
     let lower = normalized.to_ascii_lowercase();
@@ -883,12 +935,16 @@ fn validate_bridge_target_path(rel_path: &str) -> Result<(), String> {
         "reframework/autorun/",
         "ue4ss/mods/",
         "scripts/",
+        "binaries/win64/ue4ss/mods/",
+        "binaries/win64/mods/",
     ]
     .iter()
-    .any(|p| lower.starts_with(p));
+    .any(|p| lower.starts_with(p))
+        || lower.contains("/binaries/win64/ue4ss/mods/")
+        || lower.contains("/binaries/win64/mods/");
     if !allowed_prefix {
         return Err(format!(
-            "target path '{rel_path}' must reside inside BepInEx/plugins/, reframework/autorun/, ue4ss/Mods/, or scripts/"
+            "target path '{rel_path}' must reside inside BepInEx/plugins/, reframework/autorun/, ue4ss/Mods/, <Project>/Binaries/Win64/[ue4ss/]Mods/, or scripts/"
         ));
     }
     if [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi"]
@@ -910,10 +966,16 @@ fn compute_bridge_deployment_status(
 ) -> Result<BridgeDeploymentStatus, String> {
     let env = core.inspect_installed_game_environment(install_dir);
     let (suggested_source_file, suggested_target_relative_path) =
-        suggest_companion_bridge(env.engine);
-    let matched_bridge = list_bridge_catalog(data_dir)
+        suggest_companion_bridge(env.engine, Path::new(install_dir));
+    let mut matched_bridge = list_bridge_catalog(data_dir)
         .into_iter()
         .find(|b| b.engine == env.engine);
+    if let (Some(bridge), Some(suggested_rel)) = (
+        matched_bridge.as_mut(),
+        suggested_target_relative_path.as_deref(),
+    ) {
+        bridge.target_relative_path = suggested_rel.to_owned();
+    }
     let (loader_installed, loader_display_name, loader_warning) = if env.dir_exists {
         inspect_bepinex_loader_readiness(Path::new(install_dir), env.engine)
     } else {
@@ -922,7 +984,8 @@ fn compute_bridge_deployment_status(
     let mut active_files = Vec::new();
     let mut loader_managed_by_nekod = false;
     if env.dir_exists {
-        let (backup_dir, ledger_path) = bridge_ledger_paths(data_dir, game_key);
+        let (backup_dir, ledger_path) =
+            resolve_bridge_ledger_paths(data_dir, game_key, install_dir);
         if ledger_path.is_file()
             && let Ok(ledger) = DeploymentLedger::open(install_dir, &backup_dir, &ledger_path)
         {
@@ -930,7 +993,9 @@ fn compute_bridge_deployment_status(
                 if rec.state == DeploymentState::Deployed {
                     if rec.package_id == "nekod.companion.bridge" {
                         active_files.push(rec.relative_path.clone());
-                    } else if rec.package_id == "nekod.loader.bepinex" {
+                    } else if rec.package_id == "nekod.loader.bepinex"
+                        || rec.package_id == "nekod.loader.ue4ss"
+                    {
                         loader_managed_by_nekod = true;
                     }
                 }
@@ -940,10 +1005,22 @@ fn compute_bridge_deployment_status(
     let deployed = !active_files.is_empty();
     let bridge_update_available = if deployed
         && let Some(catalog_sha) = matched_bridge.as_ref().and_then(|b| b.sha256.as_deref())
-        && let Some(first_rel) = active_files.first()
-        && let Ok(bytes) = fs::read(Path::new(install_dir).join(first_rel))
     {
-        sha256_hex(&bytes) != catalog_sha
+        let expected_rel = suggested_target_relative_path
+            .as_deref()
+            .or_else(|| active_files.first().map(String::as_str));
+        if let Some(rel) = expected_rel {
+            let matches_rel = active_files.iter().any(|f| f.eq_ignore_ascii_case(rel));
+            if !matches_rel {
+                true
+            } else if let Ok(bytes) = fs::read(Path::new(install_dir).join(rel)) {
+                sha256_hex(&bytes) != catalog_sha
+            } else {
+                true
+            }
+        } else {
+            false
+        }
     } else {
         false
     };
@@ -993,7 +1070,7 @@ async fn install_bepinex_loader<R: tauri::Runtime>(
         }
         if !env.anti_cheat_files_present.is_empty() {
             return Err(format!(
-                "refusing BepInEx loader installation: anti-cheat markers present ({:?})",
+                "refusing mod loader installation: anti-cheat markers present ({:?})",
                 env.anti_cheat_files_present
             ));
         }
@@ -1002,12 +1079,43 @@ async fn install_bepinex_loader<R: tauri::Runtime>(
             download_or_load_cached_bepinex_zip_with_progress(&data_dir, env.engine, |ev| {
                 let _ = app.emit("nekod://loader-progress", ev);
             })?;
-        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let (backup_dir, ledger_path) =
+            resolve_bridge_ledger_paths(&data_dir, &game_key, &install_dir);
         let mut ledger =
             DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
-        extract_bepinex_zip_to_ledger_with_progress(&zip_bytes, &game_key, &mut ledger, |ev| {
-            let _ = app.emit("nekod://loader-progress", ev);
-        })?;
+        let loader_pkg_id = if env.engine == GameEngineKind::UnrealEngine {
+            "nekod.loader.ue4ss"
+        } else {
+            "nekod.loader.bepinex"
+        };
+        if ledger
+            .records()
+            .iter()
+            .any(|r| r.state == DeploymentState::Deployed && r.package_id == loader_pkg_id)
+        {
+            ledger.undeploy_package(loader_pkg_id).map_err(map_err)?;
+        }
+
+        if env.engine == GameEngineKind::UnrealEngine {
+            extract_ue4ss_zip_to_ledger_with_progress(
+                &zip_bytes,
+                &game_key,
+                Path::new(&install_dir),
+                &mut ledger,
+                |ev| {
+                    let _ = app.emit("nekod://loader-progress", ev);
+                },
+            )?;
+        } else {
+            extract_bepinex_zip_to_ledger_with_progress(
+                &zip_bytes,
+                &game_key,
+                &mut ledger,
+                |ev| {
+                    let _ = app.emit("nekod://loader-progress", ev);
+                },
+            )?;
+        }
 
         compute_bridge_deployment_status(&core, &data_dir, &game_key, &install_dir)
     })
@@ -1023,18 +1131,39 @@ async fn undeploy_bepinex_loader(
 ) -> Result<BridgeUndeploySummary, String> {
     let data_dir = state.data_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let (backup_dir, ledger_path) =
+            resolve_bridge_ledger_paths(&data_dir, &game_key, &install_dir);
         let mut ledger =
             DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
-        let report = ledger
-            .undeploy_package("nekod.loader.bepinex")
-            .map_err(map_err)?;
-        Ok(BridgeUndeploySummary {
-            removed_count: report.removed_count,
-            restored_originals: report.restored_originals,
-            conflicts: report.conflicts,
-            conflict_paths: report.conflict_paths,
-        })
+        let active_loader_pkgs: Vec<&'static str> = ["nekod.loader.ue4ss", "nekod.loader.bepinex"]
+            .into_iter()
+            .filter(|pkg| {
+                ledger
+                    .records()
+                    .iter()
+                    .any(|r| r.state == DeploymentState::Deployed && r.package_id == *pkg)
+            })
+            .collect();
+        let target_pkgs: Vec<&'static str> = if active_loader_pkgs.is_empty() {
+            vec!["nekod.loader.bepinex"]
+        } else {
+            active_loader_pkgs
+        };
+
+        let mut summary = BridgeUndeploySummary {
+            removed_count: 0,
+            restored_originals: 0,
+            conflicts: 0,
+            conflict_paths: Vec::new(),
+        };
+        for pkg in target_pkgs {
+            let report = ledger.undeploy_package(pkg).map_err(map_err)?;
+            summary.removed_count += report.removed_count;
+            summary.restored_originals += report.restored_originals;
+            summary.conflicts += report.conflicts;
+            summary.conflict_paths.extend(report.conflict_paths);
+        }
+        Ok(summary)
     })
     .await
     .map_err(map_err)?
@@ -1073,9 +1202,9 @@ fn slugify_kebab(title: &str, store_app_id: Option<&str>) -> String {
         && !app_id.is_empty()
         && app_id.chars().all(|c| c.is_ascii_digit())
     {
-        return format!("unity-app-{app_id}");
+        return format!("nekod-app-{app_id}");
     }
-    "unity-local-game".to_owned()
+    "nekod-local-game".to_owned()
 }
 
 #[tauri::command]
@@ -1360,7 +1489,7 @@ fn quick_setup_unity_starter_sync(
         "runtime": {
             "kind": "unity_bridge_v1",
             "api_version": "1.0.0",
-            "min_nekod_version": "0.1.0-alpha.0",
+            "min_nekod_version": "1.0.0",
             "entrypoint": "scripts/unity_bridge.json",
             "supported_platforms": ["windows-x64"]
         },
@@ -1441,6 +1570,287 @@ fn quick_setup_unity_starter_sync(
     })
 }
 
+fn ensure_nekod_bridges_dir() -> Result<(), String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    fs::create_dir_all(base.join("Nekod").join("bridges")).map_err(map_err)
+}
+
+#[tauri::command]
+async fn quick_setup_ue4ss_starter(
+    state: State<'_, AppState>,
+    title: String,
+    store_source: String,
+    store_app_id: Option<String>,
+    store_build_id: Option<String>,
+    install_dir: String,
+) -> Result<QuickSetupResult, String> {
+    let core = Arc::clone(&state.core);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        quick_setup_ue4ss_starter_sync(
+            &core,
+            &data_dir,
+            title,
+            store_source,
+            store_app_id,
+            store_build_id,
+            install_dir,
+        )
+    })
+    .await
+    .map_err(map_err)?
+}
+
+fn quick_setup_ue4ss_starter_sync(
+    core: &NekodAppService,
+    data_dir: &Path,
+    title: String,
+    store_source: String,
+    store_app_id: Option<String>,
+    store_build_id: Option<String>,
+    install_dir: String,
+) -> Result<QuickSetupResult, String> {
+    let env = core.inspect_installed_game_environment(&install_dir);
+    if !env.dir_exists {
+        return Err(format!("game install directory '{install_dir}' not found"));
+    }
+    if !env.anti_cheat_files_present.is_empty() {
+        return Err(format!(
+            "refusing UE4SS starter setup: anti-cheat markers present ({:?})",
+            env.anti_cheat_files_present
+        ));
+    }
+    if env.engine != GameEngineKind::UnrealEngine {
+        return Err(format!(
+            "universal UE4SS starter only supports Unreal Engine games (detected '{:?}')",
+            env.engine
+        ));
+    }
+
+    let candidate_exes = NekodAppService::collect_candidate_exes_in_dir(&install_dir);
+    let primary_exe = candidate_exes
+        .iter()
+        .find(|n| n.to_ascii_lowercase().ends_with("-win64-shipping.exe"))
+        .cloned()
+        .or_else(|| candidate_exes.into_iter().next())
+        .ok_or_else(|| format!("no primary game executable (.exe) found in '{install_dir}'"))?;
+
+    let steam_app_u64 = parse_steam_app_u64(Some(&store_source), store_app_id.as_deref());
+    let existing_manifests = core.list_registered_game_manifests().map_err(map_err)?;
+    let (candidate_id, already_exists) = resolve_game_id_candidate(
+        &existing_manifests,
+        &title,
+        None,
+        steam_app_u64,
+        Some(&primary_exe),
+        Some(&install_dir),
+        store_app_id.as_deref(),
+    )?;
+    let game_id = if already_exists {
+        candidate_id
+    } else {
+        register_minimal_game_manifest(
+            core,
+            &candidate_id,
+            &title,
+            steam_app_u64,
+            store_build_id.as_deref(),
+            &primary_exe,
+        )?
+    };
+
+    let trainer_id = format!("org.nekod.ue4ss-starter.{game_id}");
+    let pkg_dir = data_dir.join("generated-starters-ue").join(&game_id);
+    let scripts_dir = pkg_dir.join("scripts");
+    fs::create_dir_all(&scripts_dir).map_err(map_err)?;
+
+    let bridge_payload = json!({
+        "schema_version": "1.0.0",
+        "engine_version": "*",
+        "auto_discover": true,
+        "features": [
+            {
+                "kind": "cheat_manager_command",
+                "feature_id": "time-pause",
+                "enable_command": "Pause",
+                "disable_command": "Pause"
+            },
+            {
+                "kind": "cheat_manager_float",
+                "feature_id": "game-speed",
+                "command_prefix": "Slomo",
+                "reset_command": "Slomo 1.0"
+            },
+            {
+                "kind": "cheat_manager_command",
+                "feature_id": "god-mode",
+                "enable_command": "God",
+                "disable_command": "God"
+            },
+            {
+                "kind": "cheat_manager_command",
+                "feature_id": "debug-camera",
+                "enable_command": "ToggleDebugCamera",
+                "disable_command": "ToggleDebugCamera"
+            }
+        ]
+    });
+    let payload_bytes = serde_json::to_vec_pretty(&bridge_payload).map_err(map_err)?;
+    fs::write(scripts_dir.join("ue4ss_bridge.json"), &payload_bytes).map_err(map_err)?;
+
+    let payload_sha = sha256_hex(&payload_bytes);
+    let payload_len = payload_bytes.len() as u64;
+
+    let mut target_game = serde_json::Map::new();
+    target_game.insert("game_id".to_owned(), json!(game_id));
+    target_game.insert(
+        "game_name".to_owned(),
+        json!(if title.trim().is_empty() {
+            game_id.as_str()
+        } else {
+            title.trim()
+        }),
+    );
+    if let Some(aid) = steam_app_u64 {
+        target_game.insert("store_ids".to_owned(), json!({ "steam_app_id": aid }));
+    }
+
+    let mod_manifest = json!({
+        "schema_version": "2.0.0",
+        "package_format": "nmod_v1",
+        "mod_kind": "script_mod",
+        "id": trainer_id,
+        "version": "1.0.0",
+        "name": "Nekod Universal UE4SS Control Pack",
+        "description": "Universal Unreal Engine 4/5 control pack powered by NekodUE4SSBridge v0.2.0 (Pause, Slomo speed multiplier, CheatManager God mode, and Debug Camera; zero LuaSocket dependencies).",
+        "authors": [{
+            "name": "Nekod Contributors",
+            "github": "OmaruKoma",
+            "url": "https://github.com/OmaruKoma/Nekod"
+        }],
+        "license": "MIT",
+        "source_repository": "https://github.com/OmaruKoma/Nekod",
+        "target_game": target_game,
+        "supported_versions": [{
+            "platform": "windows-x64",
+            "version_pattern": "*",
+            "status": "verified"
+        }],
+        "runtime": {
+            "kind": "ue4ss_bridge_v1",
+            "api_version": "1.0.0",
+            "min_nekod_version": "1.0.0",
+            "entrypoint": "scripts/ue4ss_bridge.json",
+            "supported_platforms": ["windows-x64"]
+        },
+        "dependencies": [
+            {
+                "dependency_id": "re-ue4ss",
+                "kind": "mod_loader",
+                "version_req": ">=2.5.0",
+                "optional": false,
+                "redistribution": "local_detect_only"
+            },
+            {
+                "dependency_id": "nekod-ue4ss-bridge",
+                "kind": "runtime_bridge",
+                "version_req": ">=0.2.0",
+                "optional": false,
+                "redistribution": "local_detect_only"
+            }
+        ],
+        "permissions": [
+            {
+                "scope": "process.discover",
+                "reason": "Match running Unreal Engine game with %LOCALAPPDATA%\\Nekod\\bridges\\ue4ss-active.json.",
+                "required": true
+            },
+            {
+                "scope": "process.write_memory",
+                "reason": "Execute UE4SS CheatManager commands and update UProperties via NekodUE4SSBridge.",
+                "required": true
+            }
+        ],
+        "features": [
+            {
+                "id": "time-pause",
+                "name": "暂停游戏时间 (Pause)",
+                "description": "通过 UE4SS PlayerController 切换 Pause 暂停与恢复。",
+                "category": "time",
+                "control_type": "toggle",
+                "default_hotkey": "F8",
+                "mutates_memory": true,
+                "supports_rollback": true,
+                "risk_level": "low"
+            },
+            {
+                "id": "game-speed",
+                "name": "全局游戏变速 (Slomo)",
+                "description": "通过 Slomo 命令调整 UE 全局时间流速，退出自动回滚至 1.0。",
+                "category": "time",
+                "control_type": "float",
+                "value_range": {
+                    "min": 0.1,
+                    "max": 8.0,
+                    "step": 0.25,
+                    "default": 1.0
+                },
+                "mutates_memory": true,
+                "supports_rollback": true,
+                "risk_level": "low"
+            },
+            {
+                "id": "god-mode",
+                "name": "无敌模式 (CheatManager God)",
+                "description": "调用 CheatManager God 命令切换角色无敌（需游戏未裁剪 CheatManager）。",
+                "category": "player",
+                "control_type": "toggle",
+                "default_hotkey": "F1",
+                "mutates_memory": true,
+                "supports_rollback": true,
+                "risk_level": "low"
+            },
+            {
+                "id": "debug-camera",
+                "name": "自由调试视角 (DebugCamera)",
+                "description": "通过 ToggleDebugCamera 切换自由观察视角。",
+                "category": "camera",
+                "control_type": "toggle",
+                "default_hotkey": "F10",
+                "mutates_memory": true,
+                "supports_rollback": true,
+                "risk_level": "low"
+            }
+        ],
+        "compatibility": {
+            "singleplayer_only": true,
+            "requires_offline_mode": false,
+            "anti_cheat_incompatible": []
+        },
+        "artifacts": [{
+            "filename": "scripts/ue4ss_bridge.json",
+            "sha256": payload_sha,
+            "size_bytes": payload_len,
+            "platform": "windows-x64"
+        }]
+    });
+    let raw_mm = serde_json::to_string_pretty(&mod_manifest).map_err(map_err)?;
+    fs::write(pkg_dir.join("mod-manifest.json"), raw_mm).map_err(map_err)?;
+
+    validate_nmod_package_dir(&pkg_dir).map_err(map_err)?;
+    core.ingest_local_trainer(&pkg_dir, TrustTier::Official)
+        .map_err(map_err)?;
+    core.rescan_games().map_err(map_err)?;
+
+    Ok(QuickSetupResult {
+        game_id,
+        trainer_id,
+        engine: env.engine,
+    })
+}
+
 #[tauri::command]
 async fn list_companion_bridge_catalog(
     state: State<'_, AppState>,
@@ -1472,14 +1882,26 @@ async fn auto_deploy_companion_bridge(
             ));
         }
 
-        let (bytes, expected_sha, target_relative_path) = resolve_bridge_bytes_for_engine(
+        let (bytes, expected_sha, mut target_relative_path) = resolve_bridge_bytes_for_engine(
             &data_dir,
             env.engine,
             custom_source_override.as_deref(),
         )?;
+        let ue_enabled_rel = if env.engine == GameEngineKind::UnrealEngine {
+            let (main_rel, enabled_rel) = resolve_ue4ss_target_paths(Path::new(&install_dir));
+            if custom_source_override.is_none() {
+                target_relative_path = main_rel;
+            }
+            validate_bridge_target_path(&enabled_rel)?;
+            let _ = ensure_nekod_bridges_dir();
+            Some(enabled_rel)
+        } else {
+            None
+        };
         validate_bridge_target_path(&target_relative_path)?;
 
-        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let (backup_dir, ledger_path) =
+            resolve_bridge_ledger_paths(&data_dir, &game_key, &install_dir);
         let mut ledger =
             DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
         if ledger.records().iter().any(|r| {
@@ -1498,6 +1920,18 @@ async fn auto_deploy_companion_bridge(
                 &expected_sha,
             )
             .map_err(map_err)?;
+        if let Some(enabled_rel) = ue_enabled_rel {
+            let empty_sha = sha256_hex(b"");
+            ledger
+                .stage_file(
+                    &game_key,
+                    "nekod.companion.bridge",
+                    &enabled_rel,
+                    b"",
+                    &empty_sha,
+                )
+                .map_err(map_err)?;
+        }
 
         compute_bridge_deployment_status(&core, &data_dir, &game_key, &install_dir)
     })
@@ -1531,7 +1965,8 @@ async fn deploy_companion_bridge(
         let bytes = fs::read(&source_file)
             .map_err(|e| format!("cannot read bridge source '{source_file}': {e}"))?;
         let expected_sha = sha256_hex(&bytes);
-        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let (backup_dir, ledger_path) =
+            resolve_bridge_ledger_paths(&data_dir, &game_key, &install_dir);
         let mut ledger =
             DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
         ledger
@@ -1558,7 +1993,8 @@ async fn undeploy_companion_bridge(
 ) -> Result<BridgeUndeploySummary, String> {
     let data_dir = state.data_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &game_key);
+        let (backup_dir, ledger_path) =
+            resolve_bridge_ledger_paths(&data_dir, &game_key, &install_dir);
         let mut ledger =
             DeploymentLedger::open(&install_dir, &backup_dir, &ledger_path).map_err(map_err)?;
         let report = ledger
@@ -1599,6 +2035,17 @@ async fn get_game_artwork(
     .map_err(map_err)
 }
 
+fn display_clean_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        s
+    }
+}
+
 fn validate_direct_launch_executable(
     install_dir: &str,
     executable_path: &str,
@@ -1616,13 +2063,13 @@ fn validate_direct_launch_executable(
     if !exe_canon.starts_with(&dir_canon) {
         return Err(format!(
             "refusing to launch executable outside game install directory: '{}'",
-            exe_canon.display()
+            display_clean_path(&exe_canon)
         ));
     }
     if !exe_canon.is_file() {
         return Err(format!(
             "launch target is not a regular file: '{}'",
-            exe_canon.display()
+            display_clean_path(&exe_canon)
         ));
     }
     #[cfg(target_os = "windows")]
@@ -1635,7 +2082,7 @@ fn validate_direct_launch_executable(
         if !is_exe {
             return Err(format!(
                 "refusing direct launch of non-.exe target: '{}'",
-                exe_canon.display()
+                display_clean_path(&exe_canon)
             ));
         }
     }
@@ -1696,13 +2143,16 @@ async fn launch_game(
                 .to_owned()
         })?;
         let (dir_canon, exe_canon) = validate_direct_launch_executable(&install_dir, exe_str)?;
-        Command::new(&exe_canon)
-            .current_dir(&dir_canon)
+        let target_display = display_clean_path(&exe_canon);
+        let clean_dir = PathBuf::from(display_clean_path(&dir_canon));
+        let clean_exe = PathBuf::from(&target_display);
+        Command::new(&clean_exe)
+            .current_dir(&clean_dir)
             .spawn()
-            .map_err(|e| format!("failed to launch '{}': {e}", exe_canon.display()))?;
+            .map_err(|e| format!("failed to launch '{target_display}': {e}"))?;
         Ok(LaunchGameResult {
             method: "direct_executable".to_owned(),
-            target: exe_canon.display().to_string(),
+            target: target_display,
         })
     })
     .await
@@ -2147,12 +2597,201 @@ async fn discover_local_nmods(
     .map_err(map_err)?
 }
 
+#[tauri::command]
+async fn sync_hud_overlay_state<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    payload: HudOverlayState,
+) -> Result<HudOverlayState, String> {
+    let overlay = state.overlay.clone();
+    tauri::async_runtime::spawn_blocking(move || overlay.sync_window(&app, payload))
+        .await
+        .map_err(map_err)?
+}
+
+#[tauri::command]
+async fn get_hud_overlay_state(state: State<'_, AppState>) -> Result<HudOverlayState, String> {
+    Ok(state.overlay.snapshot())
+}
+
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
+}
+
+#[tauri::command]
+fn set_minimize_to_tray(state: State<'_, AppState>, enabled: bool) -> bool {
+    state.minimize_to_tray.store(enabled, Ordering::Relaxed);
+    enabled
+}
+
+fn pack_installed_trainer_to_nmod(
+    core: &NekodAppService,
+    trainer_id: &str,
+    dest: &Path,
+) -> Result<PathBuf, String> {
+    let installed = core
+        .list_all_installed_trainers()
+        .map_err(map_err)?
+        .into_iter()
+        .find(|t| t.manifest.id == trainer_id)
+        .ok_or_else(|| format!("未找到已安装的模组 '{trainer_id}'"))?;
+
+    let pkg_dir = PathBuf::from(&installed.package_dir);
+    let manifest_filename = if pkg_dir.join("mod-manifest.json").is_file() {
+        "mod-manifest.json"
+    } else if pkg_dir.join("trainer-manifest.json").is_file() {
+        "trainer-manifest.json"
+    } else {
+        return Err(format!(
+            "模组目录 '{}' 缺少 mod-manifest.json 或 trainer-manifest.json",
+            pkg_dir.display()
+        ));
+    };
+
+    if let Some(parent) = dest.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(map_err)?;
+    }
+
+    let out_file = fs::File::create(dest).map_err(map_err)?;
+    let mut zw = zip::ZipWriter::new(out_file);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let manifest_bytes = fs::read(pkg_dir.join(manifest_filename)).map_err(map_err)?;
+    zw.start_file(manifest_filename, opts).map_err(map_err)?;
+    zw.write_all(&manifest_bytes).map_err(map_err)?;
+
+    let sibling_gm = pkg_dir.join("game-manifest.json");
+    if sibling_gm.is_file() {
+        let gm_bytes = fs::read(&sibling_gm).map_err(map_err)?;
+        zw.start_file("game-manifest.json", opts).map_err(map_err)?;
+        zw.write_all(&gm_bytes).map_err(map_err)?;
+    }
+
+    for artifact in &installed.manifest.artifacts {
+        validate_relative_path(&artifact.filename).map_err(map_err)?;
+        let normalized = artifact.filename.replace('\\', "/");
+        let src_file = pkg_dir.join(&artifact.filename);
+        let bytes = fs::read(&src_file)
+            .map_err(|e| format!("读取模组资产 '{}' 失败: {e}", src_file.display()))?;
+        zw.start_file(&normalized, opts).map_err(map_err)?;
+        zw.write_all(&bytes).map_err(map_err)?;
+    }
+
+    zw.finish().map_err(map_err)?;
+    Ok(dest.to_path_buf())
+}
+
+#[tauri::command]
+async fn export_trainer_nmod(
+    state: State<'_, AppState>,
+    trainer_id: String,
+    output_path: Option<String>,
+) -> Result<Option<String>, String> {
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || {
+        let default_name = {
+            let installed = core
+                .list_all_installed_trainers()
+                .map_err(map_err)?
+                .into_iter()
+                .find(|t| t.manifest.id == trainer_id)
+                .ok_or_else(|| format!("未找到已安装的模组 '{trainer_id}'"))?;
+            format!(
+                "{}-{}.nmod",
+                sanitize_package_id_segment(&installed.manifest.id),
+                installed.manifest.version
+            )
+        };
+
+        let resolved_dest = if let Some(raw) = output_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            PathBuf::from(raw)
+        } else {
+            #[cfg(target_os = "windows")]
+            {
+                let picked = rfd::FileDialog::new()
+                    .set_title("导出 .nmod 单文件模组包")
+                    .set_file_name(&default_name)
+                    .add_filter("Nekod Mod Package (.nmod)", &["nmod"])
+                    .save_file();
+                let Some(path) = picked else {
+                    return Ok(None);
+                };
+                path
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mut cmd = Command::new("zenity");
+                cmd.args([
+                    "--file-selection",
+                    "--save",
+                    "--confirm-overwrite",
+                    &format!("--filename={default_name}"),
+                    "--title=导出 .nmod 单文件模组包",
+                ]);
+                match cmd.output() {
+                    Ok(out) if out.status.success() => {
+                        let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                        if s.is_empty() {
+                            return Ok(None);
+                        }
+                        PathBuf::from(s)
+                    }
+                    _ => return Ok(None),
+                }
+            }
+        };
+
+        let saved = pack_installed_trainer_to_nmod(&core, &trainer_id, &resolved_dest)?;
+        Ok(Some(display_clean_path(&saved)))
+    })
+    .await
+    .map_err(map_err)?
+}
+
+fn seed_official_registry_source_once(core: &NekodAppService, data_dir: &Path) {
+    let marker = data_dir.join(".official_registry_seeded_v1");
+    if marker.exists() {
+        return;
+    }
+    const OFFICIAL_REPO_ID: &str = "org.nekod.official-mods";
+    const OFFICIAL_INDEX_URL: &str =
+        "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/registry.json";
+
+    let already_present = core
+        .list_registry_sources()
+        .map(|list| {
+            list.iter()
+                .any(|s| s.source.repository_id == OFFICIAL_REPO_ID)
+        })
+        .unwrap_or(false);
+    if !already_present {
+        let _ = core.add_configured_registry_source(RegistrySource {
+            repository_id: OFFICIAL_REPO_ID.to_owned(),
+            index_url: OFFICIAL_INDEX_URL.to_owned(),
+            authoritative_trust_tier: TrustTier::Official,
+            enabled: true,
+        });
+    }
+    let _ = fs::create_dir_all(data_dir);
+    let _ = fs::write(marker, b"seeded_v1\n");
+}
+
 impl AppState {
     pub fn new(core: NekodAppService) -> Self {
         Self {
             core: Arc::new(core),
             data_dir: std::env::temp_dir().join("nekod_desktop_state"),
             hotkeys: GlobalHotkeyService::new(),
+            overlay: HudOverlayService::new(),
+            minimize_to_tray: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -2161,6 +2800,8 @@ impl AppState {
             core: Arc::new(core),
             data_dir,
             hotkeys: GlobalHotkeyService::new(),
+            overlay: HudOverlayService::new(),
+            minimize_to_tray: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -2197,6 +2838,7 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         remove_registry_source,
         sync_registry_sources,
         list_community_trainers_for_game,
+        list_all_community_trainers,
         check_trainer_updates,
         install_or_update_trainer_from_registry,
         inspect_game_environment,
@@ -2209,12 +2851,26 @@ pub fn desktop_invoke_handler<R: tauri::Runtime>()
         install_bepinex_loader,
         undeploy_bepinex_loader,
         quick_setup_unity_starter,
+        quick_setup_ue4ss_starter,
         import_ct_file,
         discover_local_nmods,
         sync_global_hotkeys,
+        sync_hud_overlay_state,
+        get_hud_overlay_state,
         get_game_artwork,
         launch_game,
+        get_app_version,
+        set_minimize_to_tray,
+        export_trainer_nmod,
     ]
+}
+
+fn restore_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
 }
 
 pub fn run() {
@@ -2229,15 +2885,244 @@ pub fn run() {
                 Arc::new(CompositeRuntimeRouter::with_default_providers()),
             )
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+            seed_official_registry_source_once(&core, &data_dir);
             let state = AppState::with_data_dir(core, data_dir);
             let app_handle = app.handle().clone();
             state.hotkeys.start_watcher(move |event| {
                 let _ = app_handle.emit("nekod://global-hotkey", event);
             });
+            state.overlay.start_tracker(app.handle().clone());
             app.manage(state);
+
+            let open_item =
+                tauri::menu::MenuItemBuilder::with_id("tray-open", "打开 Nekod").build(app)?;
+            let toggle_hud_item =
+                tauri::menu::MenuItemBuilder::with_id("tray-toggle-hud", "切换游戏内 HUD")
+                    .build(app)?;
+            let quit_item =
+                tauri::menu::MenuItemBuilder::with_id("tray-quit", "退出 Nekod").build(app)?;
+            let tray_menu = tauri::menu::MenuBuilder::new(app)
+                .items(&[&open_item, &toggle_hud_item])
+                .separator()
+                .item(&quit_item)
+                .build()?;
+
+            let mut tray_builder = tauri::tray::TrayIconBuilder::with_id("nekod-tray")
+                .tooltip("Nekod — Modding games, together")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "tray-open" => restore_main_window(app),
+                    "tray-toggle-hud" => {
+                        let st = app.state::<AppState>();
+                        let mut next = st.overlay.snapshot();
+                        next.enabled = !next.enabled;
+                        let enabled = next.enabled;
+                        let _ = st.overlay.sync_window(app, next);
+                        let _ = app.emit("nekod://tray-hud-toggled", enabled);
+                    }
+                    "tray-quit" => {
+                        if let Some(ov) = app.get_webview_window(overlay::OVERLAY_WINDOW_LABEL) {
+                            let _ = ov.close();
+                        }
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        restore_main_window(tray.app_handle());
+                    }
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                if let Some(main_win) = app.get_webview_window("main") {
+                    let _ = main_win.set_icon(icon.clone());
+                }
+                tray_builder = tray_builder.icon(icon);
+            }
+            let _ = tray_builder.build(app)?;
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && let tauri::WindowEvent::CloseRequested { api, .. } = event
+            {
+                let hide_to_tray = window
+                    .app_handle()
+                    .state::<AppState>()
+                    .minimize_to_tray
+                    .load(Ordering::Relaxed);
+                if hide_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                } else if let Some(ov) = window
+                    .app_handle()
+                    .get_webview_window(overlay::OVERLAY_WINDOW_LABEL)
+                {
+                    let _ = ov.close();
+                }
+            }
         })
         .invoke_handler(desktop_invoke_handler())
         .run(tauri::generate_context!())
         .expect("error while running Nekod desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CompositeRuntimeRouter, DeploymentLedger, NekodAppService, bridge_ledger_paths,
+        compute_bridge_deployment_status, display_clean_path, quick_setup_ue4ss_starter_sync,
+        sha256_hex, validate_bridge_target_path,
+    };
+    use nekod_game_detection::GameEngineKind;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    #[test]
+    fn display_clean_path_strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            display_clean_path(Path::new(r"\\?\D:\F95 Game\SakuraSegment_10.exe")),
+            r"D:\F95 Game\SakuraSegment_10.exe"
+        );
+        assert_eq!(
+            display_clean_path(Path::new(r"\\?\UNC\server\share\game.exe")),
+            r"\\server\share\game.exe"
+        );
+        assert_eq!(
+            display_clean_path(Path::new(r"D:\Games\test.exe")),
+            r"D:\Games\test.exe"
+        );
+    }
+
+    #[test]
+    fn validate_bridge_target_path_accepts_ue_win64_mods_and_rejects_unsafe_paths() {
+        assert!(
+            validate_bridge_target_path(
+                "SakuraSegment_10/Binaries/Win64/ue4ss/Mods/NekodBridge/Scripts/main.lua"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_bridge_target_path("MyGame/Binaries/Win64/Mods/NekodBridge/enabled.txt")
+                .is_ok()
+        );
+        assert!(validate_bridge_target_path("../escape/Scripts/main.lua").is_err());
+        assert!(validate_bridge_target_path("ue4ss/Mods/NekodBridge/evil.exe").is_err());
+    }
+
+    #[test]
+    fn quick_setup_ue4ss_starter_generates_valid_nmod_and_selects_shipping_exe() {
+        let root = std::env::temp_dir().join(format!(
+            "nekod_desktop_ue_starter_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let data_dir = root.join("data");
+        let game_dir = root.join("Sakura Segment v1.0.2");
+        let win64 = game_dir
+            .join("SakuraSegment_10")
+            .join("Binaries")
+            .join("Win64");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::create_dir_all(&win64).unwrap();
+        fs::write(game_dir.join("SakuraSegment_10.exe"), b"MZ").unwrap();
+        fs::write(win64.join("SakuraSegment_10-Win64-Shipping.exe"), b"MZ").unwrap();
+
+        let core = NekodAppService::open_in_dir(
+            &data_dir,
+            Arc::new(CompositeRuntimeRouter::with_default_providers()),
+        )
+        .unwrap();
+
+        let res = quick_setup_ue4ss_starter_sync(
+            &core,
+            &data_dir,
+            "SakuraSegment".to_owned(),
+            "custom_path".to_owned(),
+            None,
+            None,
+            game_dir.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert_eq!(res.engine, GameEngineKind::UnrealEngine);
+        assert_eq!(res.trainer_id, "org.nekod.ue4ss-starter.sakurasegment");
+
+        let trainers = core.list_trainers_for_game(&res.game_id, None).unwrap();
+        assert_eq!(trainers.len(), 1);
+        assert_eq!(trainers[0].features.len(), 4);
+
+        let gms = core.list_registered_game_manifests().unwrap();
+        let gm = gms.iter().find(|g| g.id == res.game_id).unwrap();
+        assert_eq!(
+            gm.executables[0].process_name,
+            "SakuraSegment_10-Win64-Shipping.exe"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolves_legacy_install_dir_ledger_after_game_id_match_and_flags_bridge_update() {
+        let root = std::env::temp_dir().join(format!(
+            "nekod_desktop_legacy_ledger_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let data_dir = root.join("data");
+        let game_dir = root.join("GameRoot");
+        let win64 = game_dir.join("SoD2").join("Binaries").join("Win64");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::create_dir_all(&win64).unwrap();
+        fs::write(win64.join("SoD2-Win64-Shipping.exe"), b"MZ").unwrap();
+
+        let install_dir_str = game_dir.to_string_lossy().into_owned();
+        let (backup_dir, ledger_path) = bridge_ledger_paths(&data_dir, &install_dir_str);
+        let mut ledger =
+            DeploymentLedger::open(&install_dir_str, &backup_dir, &ledger_path).unwrap();
+        let outdated_bytes = b"-- v0.3.0";
+        let rel_main = "SoD2/Binaries/Win64/ue4ss/Mods/NekodBridge/Scripts/main.lua";
+        ledger
+            .stage_file(
+                &install_dir_str,
+                "nekod.companion.bridge",
+                rel_main,
+                outdated_bytes,
+                &sha256_hex(outdated_bytes),
+            )
+            .unwrap();
+
+        let core = NekodAppService::open_in_dir(
+            &data_dir,
+            Arc::new(CompositeRuntimeRouter::with_default_providers()),
+        )
+        .unwrap();
+
+        let status = compute_bridge_deployment_status(
+            &core,
+            &data_dir,
+            "seed-of-the-dead-sweet-home",
+            &install_dir_str,
+        )
+        .unwrap();
+        assert!(status.deployed);
+        assert!(status.bridge_update_available);
+        assert!(status.active_files.iter().any(|f| f == rel_main));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

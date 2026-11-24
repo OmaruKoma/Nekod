@@ -27,7 +27,7 @@ nekod-validator.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2.11", features = [] }
+tauri = { version = "2.11", features = ["tray-icon"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -75,8 +75,9 @@ mod tests {
         // Instantiate the main window directly from tauri.conf.json + capabilities/default.json ACL.
         let win_cfg = app.config().app.windows[0].clone();
         assert_eq!(win_cfg.title, "Nekod — Modding games, together");
-        assert_eq!(win_cfg.width, 1180.0);
-        assert_eq!(win_cfg.height, 760.0);
+        assert_eq!(win_cfg.width, 1280.0);
+        assert_eq!(win_cfg.height, 800.0);
+        assert!(!win_cfg.decorations);
         let webview = tauri::WebviewWindowBuilder::from_config(&app, &win_cfg)
             .expect("valid window config")
             .build()
@@ -636,6 +637,40 @@ shellExecute("https://modengine.net")
         );
 
         // 3. Generic .nmod discovery locates matching unpacked .nmod via metadata (Steam AppID), then ingests it
+        let nmod_dir = data_dir.join("nmods");
+        let unpacked_mod_dir = nmod_dir.join("unpacked-demo");
+        let starter_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("unity-standalone-starter");
+        let unpacked_bridge_bytes =
+            fs::read(starter_dir.join("scripts/unity_bridge.json")).unwrap();
+        fs::create_dir_all(unpacked_mod_dir.join("scripts")).unwrap();
+        fs::write(
+            unpacked_mod_dir.join("scripts/unity_bridge.json"),
+            &unpacked_bridge_bytes,
+        )
+        .unwrap();
+        let mut unpacked_mod: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(starter_dir.join("mod-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        unpacked_mod["id"] = serde_json::json!("dev.example.unpacked-nmod");
+        unpacked_mod["target_game"]["game_id"] = serde_json::json!("unpacked-demo-game");
+        unpacked_mod["target_game"]["game_name"] = serde_json::json!("Unpacked Demo Game");
+        unpacked_mod["target_game"]["store_ids"] = serde_json::json!({ "steam_app_id": 1948700 });
+        unpacked_mod["artifacts"][0]["sha256"] =
+            serde_json::json!(nekod_trainer_manager::sha256_hex(&unpacked_bridge_bytes));
+        unpacked_mod["artifacts"][0]["size_bytes"] =
+            serde_json::json!(unpacked_bridge_bytes.len() as u64);
+        fs::write(
+            unpacked_mod_dir.join("mod-manifest.json"),
+            serde_json::to_string_pretty(&unpacked_mod).unwrap(),
+        )
+        .unwrap();
+
         let discovered = invoke_json(
             &webview,
             "discover_local_nmods",
@@ -650,8 +685,8 @@ shellExecute("https://modengine.net")
         let cand_list = discovered.as_array().unwrap();
         assert_eq!(cand_list.len(), 1);
         let cand = &cand_list[0];
-        assert_eq!(cand["mod_id"], "org.nekod.gun-soul-girl-2");
-        assert_eq!(cand["feature_count"], 23);
+        assert_eq!(cand["mod_id"], "dev.example.unpacked-nmod");
+        assert_eq!(cand["feature_count"], 3);
         assert_eq!(cand["source_format"], "nmod_dir");
         assert_eq!(cand["already_installed"], false);
 
@@ -665,20 +700,20 @@ shellExecute("https://modengine.net")
         )
         .expect("ingest discovered .nmod directory");
 
-        let gsg2_trainers = invoke_json(
+        let unpacked_trainers = invoke_json(
             &webview,
             "list_trainers_for_game",
             serde_json::json!({
-                "gameId": "gun-soul-girl-2",
+                "gameId": "unpacked-demo-game",
                 "detectedBuildId": "13294226"
             }),
         )
-        .expect("list gsg2 trainers");
-        let gsg2_trainer = &gsg2_trainers.as_array().unwrap()[0];
-        assert_eq!(gsg2_trainer["trainer_id"], "org.nekod.gun-soul-girl-2");
-        assert_eq!(gsg2_trainer["features"].as_array().unwrap().len(), 23);
+        .expect("list unpacked trainers");
+        let unpacked_trainer = &unpacked_trainers.as_array().unwrap()[0];
+        assert_eq!(unpacked_trainer["trainer_id"], "dev.example.unpacked-nmod");
+        assert_eq!(unpacked_trainer["features"].as_array().unwrap().len(), 3);
         assert_eq!(
-            gsg2_trainer["permission_state"]["status"],
+            unpacked_trainer["permission_state"]["status"],
             "requires_confirmation"
         );
 
@@ -687,7 +722,7 @@ shellExecute("https://modengine.net")
             &webview,
             "discover_local_nmods",
             serde_json::json!({
-                "gameId": "gun-soul-girl-2",
+                "gameId": "unpacked-demo-game",
                 "steamAppId": "1948700",
                 "installDir": null,
                 "executablePath": null
@@ -697,15 +732,8 @@ shellExecute("https://modengine.net")
         assert_eq!(rediscovered[0]["already_installed"], true);
 
         // 4. Single-file .nmod archive discovery + safe ingestion + unsafe .exe/.nmod rejection
-        let nmod_dir = data_dir.join("nmods");
-        fs::create_dir_all(&nmod_dir).unwrap();
         let archive_path = nmod_dir.join("archive-demo.nmod");
-        let archive_mod_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("..")
-            .join("examples")
-            .join("unity-standalone-starter");
+        let archive_mod_dir = starter_dir.clone();
         let bridge_bytes = fs::read(archive_mod_dir.join("scripts/unity_bridge.json")).unwrap();
         let mut mod_val: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(archive_mod_dir.join("mod-manifest.json")).unwrap(),
@@ -859,6 +887,40 @@ shellExecute("https://modengine.net")
                 .iter()
                 .any(|p| p["path"] == exe_path.to_string_lossy().as_ref())
         );
+
+        // 8. App version, tray preference, community list, and .nmod archive export work via IPC
+        let app_ver = invoke_json(&webview, "get_app_version", serde_json::json!({}))
+            .expect("get_app_version");
+        assert_eq!(app_ver.as_str().unwrap(), env!("CARGO_PKG_VERSION"));
+
+        let tray_disabled = invoke_json(
+            &webview,
+            "set_minimize_to_tray",
+            serde_json::json!({ "enabled": false }),
+        )
+        .expect("set_minimize_to_tray");
+        assert_eq!(tray_disabled, false);
+
+        let all_community = invoke_json(
+            &webview,
+            "list_all_community_trainers",
+            serde_json::json!({}),
+        )
+        .expect("list_all_community_trainers");
+        assert!(all_community.is_array());
+
+        let exported_nmod = root.join("exported-gsg2.nmod");
+        let export_res = invoke_json(
+            &webview,
+            "export_trainer_nmod",
+            serde_json::json!({
+                "trainerId": "dev.example.unpacked-nmod",
+                "outputPath": exported_nmod.to_string_lossy()
+            }),
+        )
+        .expect("export_trainer_nmod");
+        assert!(export_res.as_str().is_some());
+        assert!(exported_nmod.is_file());
 
         let _ = fs::remove_dir_all(&root);
     }

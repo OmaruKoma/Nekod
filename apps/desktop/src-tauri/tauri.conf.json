@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nekod",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "org.nekod.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -13,10 +13,11 @@
     "windows": [
       {
         "title": "Nekod — Modding games, together",
-        "width": 1180,
-        "height": 760,
-        "minWidth": 900,
-        "minHeight": 600
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "decorations": false
       }
     ],
     "security": {
@@ -24,10 +25,22 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["nsis"],
     "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
       "icons/icon.png",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "Nekod Contributors",
+    "shortDescription": "Open-source community game trainer and .nmod platform",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser"
+      }
+    }
   }
 }

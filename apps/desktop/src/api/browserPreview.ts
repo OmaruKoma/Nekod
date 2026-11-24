@@ -13,6 +13,7 @@ import type {
   GameProfile,
   GlobalHotkeyBinding,
   GlobalHotkeyEvent,
+  HudOverlayState,
   LaunchGameResult,
   LibraryGameView,
   LoaderProgressEvent,
@@ -201,9 +202,9 @@ export function createBrowserPreviewApi() {
   let registrySources: RegistrySourceState[] = [
     {
       source: {
-        repository_id: "org.nekod.community-index",
-        index_url: "https://raw.githubusercontent.com/nekod-org/Nekod-Community/main/registry-manifest.json",
-        authoritative_trust_tier: "community_verified",
+        repository_id: "org.nekod.official-mods",
+        index_url: "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/registry.json",
+        authoritative_trust_tier: "official",
         enabled: true,
       },
       etag: "\"preview-etag-001\"",
@@ -489,15 +490,86 @@ export function createBrowserPreviewApi() {
     }),
     listCommunityTrainersForGame: async (gameId: string): Promise<CommunityTrainerView[]> => [
       {
-        repository_id: "org.nekod.community-index",
-        trainer_id: `dev.community.${gameId}-helper`,
+        repository_id: "org.nekod.official-mods",
+        trainer_id: `org.nekod.${gameId}`,
         game_id: gameId,
         latest_version: "1.1.0",
-        manifest_url: `https://example.org/trainers/${gameId}/trainer-manifest.json`,
+        manifest_url: `https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/${gameId}/${gameId}/mod-manifest.json`,
         manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        trust_tier: "community_verified",
+        trust_tier: "official",
         compatibility_status: "verified",
         last_verified_game_version: "1.2.0",
+        install_state: { state: "not_installed" },
+      },
+    ],
+    listAllCommunityTrainers: async (): Promise<CommunityTrainerView[]> => [
+      {
+        repository_id: "org.nekod.official-mods",
+        trainer_id: "org.nekod.seed-of-the-dead-sh",
+        game_id: "seed-of-the-dead-sweet-home",
+        latest_version: "1.3.3",
+        manifest_url:
+          "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/seed-of-the-dead-sweet-home/seed-of-the-dead-sh/mod-manifest.json",
+        manifest_sha256: "fff8f4ed5c03208b1fe12e17140477f2164f33f4b4e0a3e51cf608501f0a8035",
+        trust_tier: "official",
+        compatibility_status: "verified",
+        last_verified_game_version: "Complete Edition",
+        install_state: { state: "not_installed" },
+      },
+      {
+        repository_id: "org.nekod.official-mods",
+        trainer_id: "org.nekod.aidealrays",
+        game_id: "aidealrays",
+        latest_version: "1.0.1",
+        manifest_url:
+          "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/aidealrays/aidealrays/mod-manifest.json",
+        manifest_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        trust_tier: "official",
+        compatibility_status: "verified",
+        last_verified_game_version: "Ver 2.1",
+        install_state: { state: "installed_up_to_date", installed_version: "1.0.1" },
+      },
+      {
+        repository_id: "org.nekod.official-mods",
+        trainer_id: "org.nekod.aidealrays-playable-lily",
+        game_id: "aidealrays",
+        latest_version: "1.0.5",
+        manifest_url:
+          "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/aidealrays/aidealrays-playable-lily/mod-manifest.json",
+        manifest_sha256: "907b664123157c5270688b485a06bb408cc7c59674e7892734f2ed06857a8bf5",
+        trust_tier: "official",
+        compatibility_status: "verified",
+        last_verified_game_version: "Ver 2.1",
+        install_state: {
+          state: "update_available",
+          installed_version: "1.0.4",
+          latest_version: "1.0.5",
+        },
+      },
+      {
+        repository_id: "org.nekod.official-mods",
+        trainer_id: "org.nekod.sakura-segment-zh-cn",
+        game_id: "sakura-segment",
+        latest_version: "1.0.0",
+        manifest_url:
+          "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/sakura-segment/sakura-segment-zh-cn/mod-manifest.json",
+        manifest_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        trust_tier: "official",
+        compatibility_status: "verified",
+        last_verified_game_version: "1.0.2",
+        install_state: { state: "not_installed" },
+      },
+      {
+        repository_id: "org.nekod.official-mods",
+        trainer_id: "org.nekod.gun-soul-girl-2",
+        game_id: "gun-soul-girl-2",
+        latest_version: "1.2.0",
+        manifest_url:
+          "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/gun-soul-girl-2/gun-soul-girl-2/mod-manifest.json",
+        manifest_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        trust_tier: "official",
+        compatibility_status: "verified",
+        last_verified_game_version: "13294226",
         install_state: { state: "not_installed" },
       },
     ],
@@ -780,6 +852,21 @@ export function createBrowserPreviewApi() {
         engine: "unity_il2cpp",
       };
     },
+    quickSetupUe4ssStarter: async (
+      title: string,
+      _storeSource: string,
+      _storeAppId: string | null,
+      _storeBuildId: string | null,
+      _installDir: string,
+    ): Promise<QuickSetupResult> => {
+      const gid = title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "ue-game";
+      pushLog("info", "trainer", `Initialized universal UE4SS starter for ${gid}`);
+      return {
+        game_id: gid,
+        trainer_id: `org.nekod.ue4ss-starter.${gid}`,
+        engine: "unreal_engine",
+      };
+    },
     importCtFile: async (params: {
       ctPath: string;
       gameId: string | null;
@@ -831,13 +918,25 @@ export function createBrowserPreviewApi() {
       pushLog("info", "hotkeys", `Synced ${bindings.length} global hotkey binding(s) (preview)`);
       return bindings.length;
     },
+    syncHudOverlayState: async (payload: HudOverlayState): Promise<HudOverlayState> => payload,
+    getHudOverlayState: async (): Promise<HudOverlayState> => ({
+      enabled: false,
+      game_title: "Nekod Preview",
+      bridge_tag: "Preview",
+      target_pid: null,
+      attached: false,
+      features: [],
+    }),
     getGameArtwork: async (
       _storeSource: string,
       storeAppId: string | null,
       installDir: string,
     ): Promise<GameArtwork> => {
-      const isHollow =
-        storeAppId === "367520" || installDir.toLowerCase().includes("hollow");
+      const lower = installDir.toLowerCase();
+      if (lower.includes("indiesandbox")) {
+        return { thumbnail_data_uri: null, header_data_uri: null };
+      }
+      const isHollow = storeAppId === "367520" || lower.includes("hollow");
       const [c1, c2, label] = isHollow
         ? ["#1e1b4b", "#312e81", "HK"]
         : ["#0f172a", "#1e3a5f", "RPG"];
@@ -861,6 +960,15 @@ export function createBrowserPreviewApi() {
         target,
       };
     },
+    getAppVersion: async (): Promise<string> => "1.0.0",
+    setMinimizeToTray: async (enabled: boolean): Promise<boolean> => {
+      pushLog("info", "tray", `Minimize to tray = ${enabled} (preview)`);
+      return enabled;
+    },
+    exportTrainerNmod: async (trainerId: string): Promise<string | null> => {
+      pushLog("info", "export", `Simulated export of ${trainerId}.nmod`);
+      return `C:\\Exports\\${trainerId}.nmod`;
+    },
     onGlobalHotkey: async (
       _handler: (event: GlobalHotkeyEvent) => void,
     ): Promise<() => void> => {
@@ -869,6 +977,19 @@ export function createBrowserPreviewApi() {
     onLoaderProgress: async (
       _handler: (event: LoaderProgressEvent) => void,
     ): Promise<() => void> => {
+      return () => {};
+    },
+    onHudOverlayState: async (
+      _handler: (event: HudOverlayState) => void,
+    ): Promise<() => void> => {
+      return () => {};
+    },
+    onTrayHudToggled: async (
+      _handler: (enabled: boolean) => void,
+    ): Promise<() => void> => {
+      return () => {};
+    },
+    onDragDropFiles: async (): Promise<() => void> => {
       return () => {};
     },
   };

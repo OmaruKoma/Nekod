@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { createBrowserPreviewApi } from "./browserPreview";
+
+export type { DragDropEvent };
 
 export const isBrowserPreview =
   import.meta.env.DEV &&
@@ -341,6 +344,23 @@ export interface UninstallTrainerResult {
   removed_managed_files: boolean;
 }
 
+export interface HudOverlayFeatureItem {
+  id: string;
+  label: string;
+  tag: string | null;
+  hotkey: string | null;
+  muted?: boolean;
+}
+
+export interface HudOverlayState {
+  enabled: boolean;
+  game_title: string;
+  bridge_tag: string;
+  target_pid: number | null;
+  attached: boolean;
+  features: HudOverlayFeatureItem[];
+}
+
 const tauriApi = {
   rescanGames: () => invoke<LibraryGameView[]>("rescan_games"),
   listLibraryGames: () => invoke<LibraryGameView[]>("list_library_games"),
@@ -420,6 +440,8 @@ const tauriApi = {
   syncRegistrySources: () => invoke<RegistrySyncReport>("sync_registry_sources"),
   listCommunityTrainersForGame: (gameId: string) =>
     invoke<CommunityTrainerView[]>("list_community_trainers_for_game", { gameId }),
+  listAllCommunityTrainers: () =>
+    invoke<CommunityTrainerView[]>("list_all_community_trainers"),
   checkTrainerUpdates: () => invoke<TrainerUpdateInfo[]>("check_trainer_updates"),
   installOrUpdateTrainerFromRegistry: (repositoryId: string, trainerId: string) =>
     invoke<void>("install_or_update_trainer_from_registry", {
@@ -496,6 +518,20 @@ const tauriApi = {
       storeBuildId,
       installDir,
     }),
+  quickSetupUe4ssStarter: (
+    title: string,
+    storeSource: string,
+    storeAppId: string | null,
+    storeBuildId: string | null,
+    installDir: string,
+  ) =>
+    invoke<QuickSetupResult>("quick_setup_ue4ss_starter", {
+      title,
+      storeSource,
+      storeAppId,
+      storeBuildId,
+      installDir,
+    }),
   importCtFile: (params: {
     ctPath: string;
     gameId: string | null;
@@ -515,6 +551,9 @@ const tauriApi = {
   }) => invoke<LocalNmodCandidate[]>("discover_local_nmods", params),
   syncGlobalHotkeys: (bindings: GlobalHotkeyBinding[]) =>
     invoke<number>("sync_global_hotkeys", { bindings }),
+  syncHudOverlayState: (payload: HudOverlayState) =>
+    invoke<HudOverlayState>("sync_hud_overlay_state", { payload }),
+  getHudOverlayState: () => invoke<HudOverlayState>("get_hud_overlay_state"),
   getGameArtwork: (
     storeSource: string,
     storeAppId: string | null,
@@ -537,6 +576,14 @@ const tauriApi = {
       installDir,
       executablePath,
     }),
+  getAppVersion: () => invoke<string>("get_app_version"),
+  setMinimizeToTray: (enabled: boolean) =>
+    invoke<boolean>("set_minimize_to_tray", { enabled }),
+  exportTrainerNmod: (trainerId: string, outputPath: string | null = null) =>
+    invoke<string | null>("export_trainer_nmod", {
+      trainerId,
+      outputPath,
+    }),
   onGlobalHotkey: async (
     handler: (event: GlobalHotkeyEvent) => void,
   ): Promise<() => void> => {
@@ -552,6 +599,32 @@ const tauriApi = {
     const unlisten = await listen<LoaderProgressEvent>(
       "nekod://loader-progress",
       (ev) => handler(ev.payload),
+    );
+    return unlisten;
+  },
+  onHudOverlayState: async (
+    handler: (event: HudOverlayState) => void,
+  ): Promise<() => void> => {
+    const unlisten = await listen<HudOverlayState>(
+      "nekod://hud-overlay-state",
+      (ev) => handler(ev.payload),
+    );
+    return unlisten;
+  },
+  onTrayHudToggled: async (
+    handler: (enabled: boolean) => void,
+  ): Promise<() => void> => {
+    const unlisten = await listen<boolean>(
+      "nekod://tray-hud-toggled",
+      (ev) => handler(ev.payload),
+    );
+    return unlisten;
+  },
+  onDragDropFiles: async (
+    handler: (event: DragDropEvent) => void,
+  ): Promise<() => void> => {
+    const unlisten = await getCurrentWebview().onDragDropEvent((ev) =>
+      handler(ev.payload),
     );
     return unlisten;
   },
