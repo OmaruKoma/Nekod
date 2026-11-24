@@ -4,7 +4,7 @@
 //! `profile-manager`, `registry-client`, and L3 `RuntimeProvider` implementations.
 //! Deliberately decoupled from `apps/desktop` (L1) and `crates/nekod-mcp` (L6).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,8 +23,8 @@ use nekod_permission_manager::{
 };
 use nekod_profile_manager::{CustomGamePathRecord, GameProfile, ProfileError, SqliteProfileStore};
 use nekod_registry_client::{
-    HttpTransport, RegistryError, RegistrySource, RegistrySourceState, RegistrySyncReport,
-    ReqwestHttpTransport, SqliteRegistryCache, stage_verified_trainer_package,
+    HttpTransport, IndexedTrainerRecord, RegistryError, RegistrySource, RegistrySourceState,
+    RegistrySyncReport, ReqwestHttpTransport, SqliteRegistryCache, stage_verified_trainer_package,
 };
 use nekod_runtime_api::{
     FeatureCommand, ProcessIdentity, RuntimeDiagnostics, RuntimeError, RuntimeProvider,
@@ -33,7 +33,7 @@ use nekod_runtime_api::{
 use nekod_trainer_manager::{
     CompatibilityDatabase, CompatibilityRecord, DependencyResolutionReport, InstalledTrainer,
     NewCompatibilityRecord, RuntimeDependencyManager, SqliteTrainerCatalog, TrainerCatalog,
-    TrainerManagerError, compute_compatibility, load_verified_entrypoint_str,
+    TrainerManagerError, compute_compatibility, load_verified_package_payload,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -825,14 +825,10 @@ impl NekodAppService {
         Ok(self.trainers.list_game_manifests()?)
     }
 
-    /// Collects primary top-level game executable names inside `install_dir`, skipping helper
-    /// crash handlers and installers.
-    pub fn collect_candidate_exes_in_dir(install_dir: &str) -> Vec<String> {
-        let dir = Path::new(install_dir);
+    fn collect_exes_in_single_dir(dir: &Path, names: &mut BTreeSet<String>) {
         let Ok(entries) = fs::read_dir(dir) else {
-            return Vec::new();
+            return;
         };
-        let mut names = BTreeSet::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() {
@@ -852,15 +848,52 @@ impl NekodAppService {
                     | "crashreportclient.exe"
                     | "unins000.exe"
                     | "ueprereqsetup_x64.exe"
+                    | "ue4prereqsetup_x64.exe"
                     | "vc_redist.x64.exe"
                     | "dxsetup.exe"
             ) || lower.contains("crashhandler")
+                || lower.contains("crashreportclient")
+                || lower.contains("unrealcefsubprocess")
                 || lower.starts_with("unins")
             {
                 continue;
             }
             names.insert(file_name.to_owned());
         }
+    }
+
+    /// Collects primary game executable names inside `install_dir` (including Unreal Engine
+    /// `*/Binaries/Win64/*-Win64-Shipping.exe` layouts), skipping helper crash handlers and installers.
+    pub fn collect_candidate_exes_in_dir(install_dir: &str) -> Vec<String> {
+        let dir = Path::new(install_dir);
+        let mut names = BTreeSet::new();
+        Self::collect_exes_in_single_dir(dir, &mut names);
+
+        let direct_win64 = dir.join("Binaries").join("Win64");
+        if direct_win64.is_dir() {
+            Self::collect_exes_in_single_dir(&direct_win64, &mut names);
+        }
+
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let sub_dir = entry.path();
+                if !sub_dir.is_dir() {
+                    continue;
+                }
+                if sub_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.eq_ignore_ascii_case("engine"))
+                {
+                    continue;
+                }
+                let win64_dir = sub_dir.join("Binaries").join("Win64");
+                if win64_dir.is_dir() {
+                    Self::collect_exes_in_single_dir(&win64_dir, &mut names);
+                }
+            }
+        }
+
         names.into_iter().collect()
     }
 
@@ -936,13 +969,19 @@ impl NekodAppService {
             }
         };
 
-        let payload_json = load_verified_entrypoint_str(&item)?;
+        let verified_pkg = load_verified_package_payload(&item)?;
+        let verified_package_assets: BTreeMap<String, String> = verified_pkg
+            .verified_assets
+            .into_iter()
+            .map(|(rel, abs)| (rel, abs.display().to_string()))
+            .collect();
         let pid = target_process.pid;
         let session_id = self.runtime.start_session(StartSessionRequest {
             trainer: item.manifest,
             target_process,
             granted_permissions,
-            declarative_payload_json: Some(payload_json),
+            declarative_payload_json: Some(verified_pkg.entrypoint_json),
+            verified_package_assets,
         })?;
         if let Ok(mut sessions) = self.active_sessions.lock() {
             sessions.insert(session_id.0.clone(), trainer_id.to_owned());
@@ -1094,15 +1133,11 @@ impl NekodAppService {
         Ok(report)
     }
 
-    /// Lists discovered community trainers for `game_id`, annotating local install/update status.
-    pub fn list_community_trainers_for_game(
-        &self,
-        game_id: &str,
-    ) -> Result<Vec<CommunityTrainerView>, CoreError> {
-        let indexed = self.registry.find_trainers_for_game(game_id)?;
-        let installed = self.trainers.list_for_game(game_id)?;
-
-        Ok(indexed
+    fn build_community_trainer_views(
+        indexed: Vec<IndexedTrainerRecord>,
+        installed: &[InstalledTrainer],
+    ) -> Vec<CommunityTrainerView> {
+        indexed
             .into_iter()
             .map(|rec| {
                 let local = installed
@@ -1141,7 +1176,24 @@ impl NekodAppService {
                     install_state,
                 }
             })
-            .collect())
+            .collect()
+    }
+
+    /// Lists discovered community trainers for `game_id`, annotating local install/update status.
+    pub fn list_community_trainers_for_game(
+        &self,
+        game_id: &str,
+    ) -> Result<Vec<CommunityTrainerView>, CoreError> {
+        let indexed = self.registry.find_trainers_for_game(game_id)?;
+        let installed = self.trainers.list_for_game(game_id)?;
+        Ok(Self::build_community_trainer_views(indexed, &installed))
+    }
+
+    /// Lists all discovered community trainers across all enabled registries.
+    pub fn list_all_community_trainers(&self) -> Result<Vec<CommunityTrainerView>, CoreError> {
+        let indexed = self.registry.list_all_indexed_trainers()?;
+        let installed = self.trainers.list_all_trainers()?;
+        Ok(Self::build_community_trainer_views(indexed, &installed))
     }
 
     /// Checks all locally installed trainers against cached community registries for updates.
@@ -1204,6 +1256,13 @@ impl NekodAppService {
         let staging_root = self.packages_dir.join(".staging");
         let staged_dir =
             stage_verified_trainer_package(&record, &staging_root, &*self.http_transport)?;
+
+        let sibling_gm = staged_dir.join("game-manifest.json");
+        if sibling_gm.is_file() {
+            let raw_gm =
+                fs::read_to_string(&sibling_gm).map_err(|e| CoreError::Storage(e.to_string()))?;
+            self.register_game_manifest(&raw_gm)?;
+        }
 
         let install_res = self.trainers.install_staged_package(
             &staged_dir,
@@ -1693,6 +1752,125 @@ mod tests {
             .unwrap();
         assert!(views_revoked[0].revoked);
 
+        // Verify list_all_community_trainers returns entries across all games
+        assert!(
+            service.list_all_community_trainers().unwrap().is_empty(),
+            "revoked trainers are excluded from community index views"
+        );
+
+        let _ = fs::remove_dir_all(pkgs_dir);
+    }
+
+    #[test]
+    fn installs_nmod_v2_from_registry_with_sibling_game_manifest_and_lists_all_community_trainers()
+    {
+        use nekod_registry_client::transport::mock::MockHttpTransport;
+        use nekod_trainer_runtime::DeclarativeRuntime;
+        use nekod_trainer_runtime::backend::mock::MockMemoryBackend;
+
+        let payload_bytes =
+            include_bytes!("../../../examples/unity-standalone-starter/scripts/unity_bridge.json")
+                .to_vec();
+        let mod_raw = include_str!("../../../examples/unity-standalone-starter/mod-manifest.json");
+        let mut mod_val: serde_json::Value = serde_json::from_str(mod_raw).unwrap();
+        mod_val["id"] = serde_json::json!("org.nekod.sample-nmod-starter");
+        mod_val["target_game"]["game_id"] = serde_json::json!("sample-singleplayer-rpg");
+        mod_val["target_game"]["game_name"] = serde_json::json!("Sample Singleplayer RPG");
+        mod_val["artifacts"][0]["sha256"] = serde_json::json!(sha256_hex(&payload_bytes));
+        mod_val["artifacts"][0]["size_bytes"] = serde_json::json!(payload_bytes.len() as u64);
+        let manifest_bytes = serde_json::to_vec_pretty(&mod_val).unwrap();
+        let manifest_sha = sha256_hex(&manifest_bytes);
+
+        let index_url = "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/registry.json";
+        let manifest_url = "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/sample-singleplayer-rpg/sample-nmod-starter/mod-manifest.json";
+        let artifact_url = "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/sample-singleplayer-rpg/sample-nmod-starter/scripts/unity_bridge.json";
+        let game_manifest_url = "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/sample-singleplayer-rpg/sample-nmod-starter/game-manifest.json";
+        let game_manifest_bytes =
+            include_bytes!("../../../schemas/examples/game-manifest.example.json").to_vec();
+
+        let reg_val = serde_json::json!({
+            "schema_version": "1.0.0",
+            "repository_id": "org.nekod.official-mods",
+            "name": "Nekod Official Mod Bucket",
+            "description": "Test nmod bucket",
+            "url": "https://github.com/OmaruKoma/Nekod-Mods",
+            "maintainers": [{ "name": "OmaruKoma", "github_handle": "OmaruKoma" }],
+            "trust_tier": "official",
+            "channel": "stable",
+            "feed_type": "static_index_json",
+            "updated_at": "2026-11-24T00:00:00Z",
+            "trainers": [{
+                "trainer_id": "org.nekod.sample-nmod-starter",
+                "game_id": "sample-singleplayer-rpg",
+                "latest_version": "1.0.0",
+                "manifest_url": manifest_url,
+                "manifest_sha256": manifest_sha,
+                "status": "active"
+            }]
+        });
+
+        let transport = Arc::new(MockHttpTransport::new());
+        transport.set_ok(
+            index_url,
+            serde_json::to_vec_pretty(&reg_val).unwrap(),
+            Some("\"v1\""),
+        );
+        transport.set_ok(manifest_url, manifest_bytes, None);
+        transport.set_ok(artifact_url, payload_bytes, None);
+        transport.set_ok(game_manifest_url, game_manifest_bytes, None);
+
+        let pkgs_dir = temp_dir("core_nmod_registry");
+        let runtime = Arc::new(DeclarativeRuntime::with_backend(Arc::new(
+            MockMemoryBackend::new(),
+        )));
+        let service = NekodAppService::open_in_memory_with_transport(
+            runtime,
+            None,
+            transport,
+            pkgs_dir.clone(),
+        )
+        .unwrap();
+        service
+            .add_configured_registry_source(RegistrySource {
+                repository_id: "org.nekod.official-mods".to_owned(),
+                index_url: index_url.to_owned(),
+                authoritative_trust_tier: TrustTier::Official,
+                enabled: true,
+            })
+            .unwrap();
+        service.sync_registry_sources().unwrap();
+
+        let all_before = service.list_all_community_trainers().unwrap();
+        assert_eq!(all_before.len(), 1);
+        assert_eq!(
+            all_before[0].install_state,
+            CommunityTrainerInstallState::NotInstalled
+        );
+
+        let installed = service
+            .install_or_update_trainer_from_registry(
+                "org.nekod.official-mods",
+                "org.nekod.sample-nmod-starter",
+            )
+            .unwrap();
+        assert_eq!(installed.manifest.id, "org.nekod.sample-nmod-starter");
+        assert!(
+            service
+                .list_registered_game_manifests()
+                .unwrap()
+                .iter()
+                .any(|g| g.id == "sample-singleplayer-rpg"),
+            "sibling game-manifest.json must be auto-registered on nmod install"
+        );
+
+        let all_after = service.list_all_community_trainers().unwrap();
+        assert_eq!(
+            all_after[0].install_state,
+            CommunityTrainerInstallState::InstalledUpToDate {
+                installed_version: "1.0.0".to_owned()
+            }
+        );
+
         let _ = fs::remove_dir_all(pkgs_dir);
     }
 
@@ -1706,6 +1884,30 @@ mod tests {
 
         let exes = NekodAppService::collect_candidate_exes_in_dir(dir.to_string_lossy().as_ref());
         assert_eq!(exes, vec!["Sugar Lust - Hentai Harem.exe".to_owned()]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn collects_unreal_shipping_exe_in_binaries_win64_and_skips_engine_crash_reporter() {
+        let dir = temp_dir("collect_ue_exes");
+        let game_win64 = dir.join("MyGame").join("Binaries").join("Win64");
+        let engine_win64 = dir.join("Engine").join("Binaries").join("Win64");
+        fs::create_dir_all(&game_win64).unwrap();
+        fs::create_dir_all(&engine_win64).unwrap();
+
+        fs::write(dir.join("MyGame.exe"), b"MZ").unwrap();
+        fs::write(game_win64.join("MyGame-Win64-Shipping.exe"), b"MZ").unwrap();
+        fs::write(engine_win64.join("CrashReportClient.exe"), b"MZ").unwrap();
+
+        let exes = NekodAppService::collect_candidate_exes_in_dir(dir.to_string_lossy().as_ref());
+        assert_eq!(
+            exes,
+            vec![
+                "MyGame-Win64-Shipping.exe".to_owned(),
+                "MyGame.exe".to_owned()
+            ]
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

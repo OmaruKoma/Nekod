@@ -53,7 +53,10 @@ pub use managed_framework::{
 pub use router::CompositeRuntimeRouter;
 pub use sandbox::{SandboxBudget, SandboxHostBridge, SandboxedGuestAdapter, SandboxedWasmRuntime};
 pub use session::{check_running_anti_cheat, validate_session_preflight};
-pub use ue4ss_bridge::{Ue4ssBridgePayload, Ue4ssBridgeRuntime, Ue4ssFeatureBinding};
+pub use ue4ss_bridge::{
+    Ue4ssBridgePayload, Ue4ssBridgeRuntime, Ue4ssDiscovery, Ue4ssFeatureBinding,
+    Ue4ssTransportKind, probe_nekod_ue4ss_bridge_readonly, resolve_nekod_ue4ss_discovery,
+};
 pub use unity_bridge::{
     NekodUnityDiscovery, UnityAliveCheck, UnityBridgePayload, UnityBridgeProtocol,
     UnityBridgeRuntime, UnityDamageHandler, UnityFeatureBinding, UnityFlavor, UnityLoaderKind,
@@ -327,6 +330,7 @@ mod tests {
             target_process: base_process(),
             granted_permissions,
             declarative_payload_json: Some(sample_payload_json()),
+            verified_package_assets: BTreeMap::new(),
         }
     }
 

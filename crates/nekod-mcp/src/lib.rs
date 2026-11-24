@@ -163,6 +163,12 @@ pub const PLANNED_MCP_TOOLS: &[McpToolSpec] = &[
         requires_explicit_authorization: true,
     },
     McpToolSpec {
+        name: "probe_ue4ss_bridge",
+        group: McpToolGroup::RuntimeInspection,
+        read_only: true,
+        requires_explicit_authorization: true,
+    },
+    McpToolSpec {
         name: "inspect_trainer_state",
         group: McpToolGroup::RuntimeInspection,
         read_only: true,
@@ -241,7 +247,7 @@ mod tests {
         let list_val: Value = serde_json::from_str(&list_reply).unwrap();
         let tools = list_val["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), PLANNED_MCP_TOOLS.len());
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -785,7 +791,7 @@ print("hi")
         .unwrap();
 
         let bg = thread::spawn(move || {
-            for stream in listener.incoming().take(2) {
+            for stream in listener.incoming().take(5) {
                 let mut stream = stream.unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
@@ -804,6 +810,26 @@ print("hi")
                         assert_eq!(req["params"]["class_name"], "Demo.PlayerController");
                         assert_eq!(req["params"]["field_name"], "isImmortal");
                         writeln!(stream, "{{\"ok\":true,\"data\":{{\"value\":false}}}}").unwrap();
+                    }
+                    "list_members" => {
+                        assert_eq!(req["params"]["class_name"], "Demo.PlayerController");
+                        writeln!(stream, "{{\"ok\":true,\"data\":{{\"fields\":[]}}}}").unwrap();
+                    }
+                    "find_instances" => {
+                        assert_eq!(req["params"]["class_name"], "Demo.PlayerController");
+                        writeln!(
+                            stream,
+                            "{{\"ok\":true,\"data\":{{\"total\":1,\"instances\":[]}}}}"
+                        )
+                        .unwrap();
+                    }
+                    "dump_hierarchy" => {
+                        assert_eq!(req["params"]["class_name"], "Demo.PlayerController");
+                        writeln!(
+                            stream,
+                            "{{\"ok\":true,\"data\":{{\"root\":\"Player\",\"nodes\":[]}}}}"
+                        )
+                        .unwrap();
                     }
                     other => panic!("unexpected op sent to read-only mock bridge: {other}"),
                 }
@@ -872,6 +898,210 @@ print("hi")
         assert_eq!(field_res["read_only"], true);
         assert_eq!(field_res["op"], "get_field");
         assert_eq!(field_res["data"]["value"], false);
+
+        // 5. Authorized read-only list_members, find_instances, dump_hierarchy succeed.
+        for op in ["list_members", "find_instances", "dump_hierarchy"] {
+            let res = server
+                .dispatch_tool(
+                    "probe_unity_bridge",
+                    &json!({
+                        "authorize_process_inspection": true,
+                        "pid": pid,
+                        "op": op,
+                        "class_name": "Demo.PlayerController",
+                        "discovery_dir": discovery_dir.to_string_lossy()
+                    }),
+                )
+                .unwrap();
+            assert_eq!(res["read_only"], true);
+            assert_eq!(res["op"], op);
+        }
+
+        bg.join().unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn probe_ue4ss_bridge_enforces_authz_and_readonly_allowlist() {
+        use std::thread;
+
+        let (server, root) = test_server("probe_ue4ss");
+        let discovery_dir = root.join("bridges");
+        fs::create_dir_all(&discovery_dir).unwrap();
+        let token = "ue4ss_mcp_token_9876543210abcdef";
+
+        fs::write(
+            discovery_dir.join("ue4ss-active.json"),
+            json!({
+                "bridge_version": "0.2.0",
+                "transport": "file_ipc",
+                "ipc_dir": discovery_dir.to_string_lossy(),
+                "auth_token": token,
+                "engine_version": "4.27"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // 1. Missing authorize_process_inspection fails with AuthorizationRequired.
+        let unauth_err = server
+            .dispatch_tool(
+                "probe_ue4ss_bridge",
+                &json!({
+                    "op": "ping",
+                    "discovery_dir": discovery_dir.to_string_lossy()
+                }),
+            )
+            .unwrap_err();
+        assert!(matches!(unauth_err, McpError::AuthorizationRequired(_)));
+
+        // 2. Prohibited competitive game fails with PolicyRefusal.
+        let game_json = include_str!("../../../schemas/examples/game-manifest.example.json")
+            .replace("allowed_singleplayer", "prohibited_online_competitive");
+        server.core().register_game_manifest(&game_json).unwrap();
+        let comp_err = server
+            .dispatch_tool(
+                "probe_ue4ss_bridge",
+                &json!({
+                    "authorize_process_inspection": true,
+                    "game_id": "sample-singleplayer-rpg",
+                    "op": "ping",
+                    "discovery_dir": discovery_dir.to_string_lossy()
+                }),
+            )
+            .unwrap_err();
+        assert!(matches!(comp_err, McpError::PolicyRefusal(_)));
+
+        // 3. Mutating operations must fail closed with PolicyRefusal before touching IPC.
+        for forbidden in [
+            "cheat_manager_exec",
+            "set_uproperty",
+            "call_ufunction",
+            "apply_localization",
+            "clear_localization",
+        ] {
+            let mutate_err = server
+                .dispatch_tool(
+                    "probe_ue4ss_bridge",
+                    &json!({
+                        "authorize_process_inspection": true,
+                        "op": forbidden,
+                        "discovery_dir": discovery_dir.to_string_lossy()
+                    }),
+                )
+                .unwrap_err();
+            assert!(matches!(mutate_err, McpError::PolicyRefusal(_)));
+        }
+
+        // 4. Spawn mock File-IPC responder covering all 6 read-only introspection ops.
+        let ipc_clone = discovery_dir.clone();
+        let bg = thread::spawn(move || {
+            let mut handled = 0usize;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+            while handled < 6 && std::time::Instant::now() < deadline {
+                let req_path = ipc_clone.join("ue4ss-request.json");
+                if req_path.is_file() {
+                    let raw = match fs::read_to_string(&req_path) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            thread::sleep(std::time::Duration::from_millis(10));
+                            continue;
+                        }
+                    };
+                    let _ = fs::remove_file(&req_path);
+                    let req: Value = serde_json::from_str(&raw).unwrap();
+                    assert_eq!(req["token"], token);
+                    let id = req["id"].as_str().unwrap();
+                    let op = req["op"].as_str().unwrap();
+                    let data = match op {
+                        "ping" => {
+                            json!({ "bridge_version": "0.3.0", "engine_version": "4.27", "transport": "file_ipc" })
+                        }
+                        "find_objects" => {
+                            json!({ "class_name": "PlayerController", "count": 1, "objects": [{ "index": 1, "full_name": "PlayerController /Game/Map.PersistentLevel.PC" }] })
+                        }
+                        "dump_ui_texts" => {
+                            json!({
+                                "total_scanned": 2,
+                                "count": 1,
+                                "texts": [{ "index": 1, "full_name": "TextBlock /Engine/Transient.Menu:Button", "text": "RESUME", "is_transient": true }],
+                                "untranslated_count": 1,
+                                "untranslated_sample": ["RESUME"]
+                            })
+                        }
+                        "get_uproperty" => {
+                            json!({ "object_class": "PlayerController", "property_name": "bShowMouseCursor", "value": false, "value_type": "boolean" })
+                        }
+                        "list_properties" => {
+                            json!({ "object_class": "PlayerController", "count": 1, "properties": [{ "name": "bShowMouseCursor", "type": "BoolProperty", "owner": "PlayerController" }] })
+                        }
+                        "list_functions" => {
+                            json!({ "object_class": "PlayerController", "count": 1, "functions": [{ "name": "Pause", "full_name": "Function /Script/Engine.PlayerController:Pause", "owner": "PlayerController" }] })
+                        }
+                        other => panic!("unexpected op sent to mock UE4SS bridge: {other}"),
+                    };
+                    fs::write(
+                        ipc_clone.join(format!("ue4ss-response-{id}.json")),
+                        json!({ "ok": true, "data": data }).to_string(),
+                    )
+                    .unwrap();
+                    handled += 1;
+                } else {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        });
+
+        let d = discovery_dir.to_string_lossy();
+        let ping_res = server
+            .dispatch_tool(
+                "probe_ue4ss_bridge",
+                &json!({ "authorize_process_inspection": true, "op": "ping", "discovery_dir": d }),
+            )
+            .unwrap();
+        assert_eq!(ping_res["read_only"], true);
+        assert_eq!(ping_res["data"]["engine_version"], "4.27");
+
+        let objs_res = server
+            .dispatch_tool(
+                "probe_ue4ss_bridge",
+                &json!({ "authorize_process_inspection": true, "op": "find_objects", "class_name": "PlayerController", "discovery_dir": d }),
+            )
+            .unwrap();
+        assert_eq!(objs_res["data"]["count"], 1);
+
+        let dump_res = server
+            .dispatch_tool(
+                "probe_ue4ss_bridge",
+                &json!({ "authorize_process_inspection": true, "op": "dump_ui_texts", "live_only": true, "unique_only": true, "limit": 100, "discovery_dir": d }),
+            )
+            .unwrap();
+        assert_eq!(dump_res["data"]["count"], 1);
+        assert_eq!(dump_res["data"]["texts"][0]["text"], "RESUME");
+
+        let prop_res = server
+            .dispatch_tool(
+                "probe_ue4ss_bridge",
+                &json!({ "authorize_process_inspection": true, "op": "get_uproperty", "object_class": "PlayerController", "property_name": "bShowMouseCursor", "discovery_dir": d }),
+            )
+            .unwrap();
+        assert_eq!(prop_res["data"]["value"], false);
+
+        let props_res = server
+            .dispatch_tool(
+                "probe_ue4ss_bridge",
+                &json!({ "authorize_process_inspection": true, "op": "list_properties", "object_class": "PlayerController", "discovery_dir": d }),
+            )
+            .unwrap();
+        assert_eq!(props_res["data"]["count"], 1);
+
+        let fns_res = server
+            .dispatch_tool(
+                "probe_ue4ss_bridge",
+                &json!({ "authorize_process_inspection": true, "op": "list_functions", "object_class": "PlayerController", "discovery_dir": d }),
+            )
+            .unwrap();
+        assert_eq!(fns_res["data"]["count"], 1);
 
         bg.join().unwrap();
         let _ = fs::remove_dir_all(&root);

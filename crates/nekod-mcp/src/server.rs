@@ -23,7 +23,8 @@ use nekod_manifest::{
 };
 use nekod_trainer_manager::{CompatibilityEvidence, NewCompatibilityRecord, compute_compatibility};
 use nekod_trainer_runtime::{
-    UnityBridgePayload, UnityFlavor, UnityLoaderKind, probe_nekod_unity_bridge_readonly,
+    UnityBridgePayload, UnityFlavor, UnityLoaderKind, probe_nekod_ue4ss_bridge_readonly,
+    probe_nekod_unity_bridge_readonly,
 };
 use nekod_trainer_sdk::{
     AddressLocator, DeclarativePatchBuilder, ScalarValueType, TrainerManifestBuilder,
@@ -268,7 +269,7 @@ impl NekodMcpServer {
         enforce_prohibited_pattern_guard(args)?;
         if spec.requires_explicit_authorization {
             let flag = match name {
-                "inspect_authorized_game_process" | "probe_unity_bridge" => {
+                "inspect_authorized_game_process" | "probe_unity_bridge" | "probe_ue4ss_bridge" => {
                     "authorize_process_inspection"
                 }
                 _ => "authorize_write",
@@ -302,6 +303,7 @@ impl NekodMcpServer {
             "prepare_trainer_release" => self.tool_prepare_trainer_release(args),
             "inspect_authorized_game_process" => self.tool_inspect_authorized_game_process(args),
             "probe_unity_bridge" => self.tool_probe_unity_bridge(args),
+            "probe_ue4ss_bridge" => self.tool_probe_ue4ss_bridge(args),
             "inspect_trainer_state" => self.tool_inspect_trainer_state(args),
             "get_execution_logs" => self.tool_get_execution_logs(args),
             _ => Err(McpError::UnknownTool(name.to_owned())),
@@ -1548,7 +1550,17 @@ impl NekodMcpServer {
             Some(Value::Object(map)) => map.clone(),
             _ => serde_json::Map::new(),
         };
-        for key in ["filter", "class_name", "field_name"] {
+        for key in [
+            "filter",
+            "class_name",
+            "field_name",
+            "game_object_name",
+            "include_inactive",
+            "include_static",
+            "include_methods",
+            "max_depth",
+            "limit",
+        ] {
             if !merged_params.contains_key(key)
                 && let Some(val) = args.get(key)
             {
@@ -1558,6 +1570,82 @@ impl NekodMcpServer {
 
         let data =
             probe_nekod_unity_bridge_readonly(pid, discovery_dir, op, Value::Object(merged_params))
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.contains("refuses operation") {
+                        McpError::PolicyRefusal(msg)
+                    } else {
+                        McpError::Execution(msg)
+                    }
+                })?;
+
+        Ok(json!({
+            "pid": pid,
+            "op": op,
+            "read_only": true,
+            "data": data
+        }))
+    }
+
+    fn tool_probe_ue4ss_bridge(&self, args: &Value) -> Result<Value, McpError> {
+        if let Some(game_id) = opt_str(args, "game_id")
+            && let Some(gm) = self
+                .core
+                .list_game_manifests()
+                .map_err(|e| McpError::Execution(e.to_string()))?
+                .into_iter()
+                .find(|g| g.id == game_id)
+            && gm.compatibility_policy.trainer_policy == TrainerPolicy::ProhibitedOnlineCompetitive
+        {
+            return Err(McpError::PolicyRefusal(format!(
+                "refusing live UE4SS bridge probe for prohibited competitive game '{game_id}'"
+            )));
+        }
+
+        let pid = match args.get("pid").filter(|v| !v.is_null()) {
+            Some(v) => {
+                let pid_u64 = v.as_u64().ok_or_else(|| {
+                    McpError::InvalidParams("optional 'pid' must be a positive integer".to_owned())
+                })?;
+                let parsed = u32::try_from(pid_u64).map_err(|_| {
+                    McpError::InvalidParams(format!("pid '{pid_u64}' out of u32 range"))
+                })?;
+                if parsed == 0 {
+                    return Err(McpError::InvalidParams(
+                        "pid must be a positive process id".to_owned(),
+                    ));
+                }
+                Some(parsed)
+            }
+            None => None,
+        };
+
+        let op = opt_str(args, "op").unwrap_or("ping");
+        let discovery_dir = opt_str(args, "discovery_dir");
+
+        let mut merged_params = match args.get("params") {
+            Some(Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        for key in [
+            "class_name",
+            "object_class",
+            "property_name",
+            "filter",
+            "limit",
+            "instance_index",
+            "live_only",
+            "unique_only",
+        ] {
+            if !merged_params.contains_key(key)
+                && let Some(val) = args.get(key)
+            {
+                merged_params.insert(key.to_owned(), val.clone());
+            }
+        }
+
+        let data =
+            probe_nekod_ue4ss_bridge_readonly(pid, discovery_dir, op, Value::Object(merged_params))
                 .map_err(|e| {
                     let msg = e.to_string();
                     if msg.contains("refuses operation") {
@@ -1888,7 +1976,10 @@ fn tool_metadata_json(spec: &McpToolSpec) -> Value {
             "Discover matching running processes for a non-prohibited singleplayer game (requires authorize_process_inspection: true)."
         }
         "probe_unity_bridge" => {
-            "Send a strictly read-only RPC (ping, list_types, get_field) to a live NekodUnityBridge loopback instance discovered by PID (requires authorize_process_inspection: true)."
+            "Send a strictly read-only RPC (ping, list_types, list_members, find_instances, dump_hierarchy, get_field) to a live NekodUnityBridge loopback instance discovered by PID (requires authorize_process_inspection: true)."
+        }
+        "probe_ue4ss_bridge" => {
+            "Send a strictly read-only RPC (ping, find_objects, dump_ui_texts, get_uproperty, list_properties, list_functions) to a live NekodUE4SSBridge instance via File-IPC or TCP loopback (requires authorize_process_inspection: true)."
         }
         "inspect_trainer_state" => {
             "Inspect local catalog state and revocation status for an installed trainer (read-only)."
@@ -2033,11 +2124,43 @@ fn schema_for_tool(name: &str) -> Value {
             "required": ["pid", "op", "authorize_process_inspection"],
             "properties": {
                 "pid": { "type": "integer", "minimum": 1 },
-                "op": { "type": "string", "enum": ["ping", "list_types", "get_field"] },
+                "op": {
+                    "type": "string",
+                    "enum": ["ping", "list_types", "list_members", "find_instances", "dump_hierarchy", "get_field"]
+                },
                 "params": { "type": "object" },
                 "filter": { "type": "string" },
                 "class_name": { "type": "string" },
                 "field_name": { "type": "string" },
+                "game_object_name": { "type": "string" },
+                "include_inactive": { "type": "boolean" },
+                "include_static": { "type": "boolean" },
+                "include_methods": { "type": "boolean" },
+                "max_depth": { "type": "integer", "minimum": 1, "maximum": 16 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 4000 },
+                "discovery_dir": { "type": "string" },
+                "game_id": { "type": "string" },
+                "authorize_process_inspection": { "type": "boolean" }
+            }
+        }),
+        "probe_ue4ss_bridge" => json!({
+            "type": "object",
+            "required": ["op", "authorize_process_inspection"],
+            "properties": {
+                "pid": { "type": "integer", "minimum": 1 },
+                "op": {
+                    "type": "string",
+                    "enum": ["ping", "find_objects", "dump_ui_texts", "get_uproperty", "list_properties", "list_functions"]
+                },
+                "params": { "type": "object" },
+                "class_name": { "type": "string" },
+                "object_class": { "type": "string" },
+                "property_name": { "type": "string" },
+                "filter": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+                "instance_index": { "type": "integer", "minimum": 1 },
+                "live_only": { "type": "boolean" },
+                "unique_only": { "type": "boolean" },
                 "discovery_dir": { "type": "string" },
                 "game_id": { "type": "string" },
                 "authorize_process_inspection": { "type": "boolean" }

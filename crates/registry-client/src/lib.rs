@@ -16,7 +16,8 @@ use nekod_manifest::{
     is_valid_namespaced_id, validate_https_url, validate_relative_path,
 };
 use nekod_validator::{
-    sha256_hex_bytes, validate_registry_manifest_str, validate_trainer_manifest_str,
+    sha256_hex_bytes, validate_game_manifest_str, validate_mod_manifest_str,
+    validate_nmod_package_dir, validate_registry_manifest_str, validate_trainer_manifest_str,
     validate_trainer_package_dir,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -610,18 +611,48 @@ pub fn stage_verified_trainer_package(
     let manifest_str = std::str::from_utf8(&manifest_bytes).map_err(|e| {
         RegistryError::InvalidManifest(format!("trainer manifest is not UTF-8: {e}"))
     })?;
-    let manifest = validate_trainer_manifest_str(manifest_str)
+    let manifest_val: serde_json::Value = serde_json::from_str(manifest_str)
         .map_err(|e| RegistryError::InvalidManifest(e.to_string()))?;
+    let is_nmod_v2 = manifest_url
+        .to_ascii_lowercase()
+        .ends_with("mod-manifest.json")
+        || manifest_val.get("mod_format").and_then(|v| v.as_str()) == Some("nmod_v1")
+        || manifest_val
+            .get("schema_version")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.starts_with("2."));
 
-    if manifest.id != record.entry.trainer_id
-        || manifest.target_game.game_id != record.entry.game_id
-        || manifest.version != record.entry.latest_version
+    let (pkg_id, pkg_game_id, pkg_version, pkg_artifacts, manifest_filename) = if is_nmod_v2 {
+        let mod_manifest = validate_mod_manifest_str(manifest_str)
+            .map_err(|e| RegistryError::InvalidManifest(e.to_string()))?;
+        (
+            mod_manifest.id,
+            mod_manifest.target_game.game_id,
+            mod_manifest.version,
+            mod_manifest.artifacts,
+            "mod-manifest.json",
+        )
+    } else {
+        let manifest = validate_trainer_manifest_str(manifest_str)
+            .map_err(|e| RegistryError::InvalidManifest(e.to_string()))?;
+        (
+            manifest.id,
+            manifest.target_game.game_id,
+            manifest.version,
+            manifest.artifacts,
+            "trainer-manifest.json",
+        )
+    };
+
+    if pkg_id != record.entry.trainer_id
+        || pkg_game_id != record.entry.game_id
+        || pkg_version != record.entry.latest_version
     {
         return Err(RegistryError::IntegrityMismatch(format!(
             "downloaded manifest ({}@{} for '{}') does not match registry entry ({}@{} for '{}')",
-            manifest.id,
-            manifest.version,
-            manifest.target_game.game_id,
+            pkg_id,
+            pkg_version,
+            pkg_game_id,
             record.entry.trainer_id,
             record.entry.latest_version,
             record.entry.game_id
@@ -631,7 +662,7 @@ pub fn stage_verified_trainer_package(
     fs::create_dir_all(staging_root).map_err(|e| RegistryError::Storage(e.to_string()))?;
     let temp_dir = staging_root.join(format!(
         "stage_{}_{}",
-        sanitize_segment(&manifest.id),
+        sanitize_segment(&pkg_id),
         &actual_manifest_sha[..12]
     ));
     if temp_dir.exists() {
@@ -640,13 +671,13 @@ pub fn stage_verified_trainer_package(
     fs::create_dir_all(&temp_dir).map_err(|e| RegistryError::Storage(e.to_string()))?;
 
     let result = (|| -> Result<(), RegistryError> {
-        fs::write(temp_dir.join("trainer-manifest.json"), &manifest_bytes)
+        fs::write(temp_dir.join(manifest_filename), &manifest_bytes)
             .map_err(|e| RegistryError::Storage(e.to_string()))?;
 
         let canonical_stage =
             fs::canonicalize(&temp_dir).map_err(|e| RegistryError::Storage(e.to_string()))?;
 
-        for artifact in &manifest.artifacts {
+        for artifact in &pkg_artifacts {
             validate_relative_path(&artifact.filename)
                 .map_err(|e| RegistryError::InvalidManifest(e.to_string()))?;
 
@@ -688,8 +719,31 @@ pub fn stage_verified_trainer_package(
             fs::write(&dest, &body).map_err(|e| RegistryError::Storage(e.to_string()))?;
         }
 
-        validate_trainer_package_dir(&temp_dir)
-            .map_err(|e| RegistryError::IntegrityMismatch(e.to_string()))?;
+        if is_nmod_v2 {
+            let game_manifest_url = format!("{base_url}game-manifest.json");
+            validate_https_url(&game_manifest_url)
+                .map_err(|e| RegistryError::InvalidUrl(e.to_string()))?;
+            match transport.fetch(&game_manifest_url, None, None, MAX_MANIFEST_BYTES) {
+                Ok(HttpFetchResponse::Ok { body, .. }) => {
+                    let gm_str = std::str::from_utf8(&body).map_err(|e| {
+                        RegistryError::InvalidManifest(format!(
+                            "sibling game-manifest.json is not UTF-8: {e}"
+                        ))
+                    })?;
+                    validate_game_manifest_str(gm_str)
+                        .map_err(|e| RegistryError::InvalidManifest(e.to_string()))?;
+                    fs::write(temp_dir.join("game-manifest.json"), &body)
+                        .map_err(|e| RegistryError::Storage(e.to_string()))?;
+                }
+                Ok(HttpFetchResponse::NotModified) | Err(RegistryError::UpstreamNotFound(_)) => {}
+                Err(err) => return Err(err),
+            }
+            validate_nmod_package_dir(&temp_dir)
+                .map_err(|e| RegistryError::IntegrityMismatch(e.to_string()))?;
+        } else {
+            validate_trainer_package_dir(&temp_dir)
+                .map_err(|e| RegistryError::IntegrityMismatch(e.to_string()))?;
+        }
 
         Ok(())
     })();
@@ -902,5 +956,77 @@ mod tests {
         record.entry.manifest_sha256 = Some("c".repeat(64));
         let err_mut = stage_verified_trainer_package(&record, &stage_root, &transport).unwrap_err();
         assert!(matches!(err_mut, RegistryError::IntegrityMismatch(_)));
+    }
+
+    #[test]
+    fn stages_verified_nmod_v2_package_with_optional_game_manifest() {
+        let payload_bytes =
+            include_bytes!("../../../examples/unity-standalone-starter/scripts/unity_bridge.json")
+                .to_vec();
+        let mod_raw = include_str!("../../../examples/unity-standalone-starter/mod-manifest.json");
+        let mut mod_val: serde_json::Value = serde_json::from_str(mod_raw).unwrap();
+        mod_val["id"] = serde_json::json!("org.nekod.sample-nmod-starter");
+        mod_val["target_game"]["game_id"] = serde_json::json!("sample-singleplayer-rpg");
+        mod_val["target_game"]["game_name"] = serde_json::json!("Sample Singleplayer RPG");
+        mod_val["artifacts"][0]["sha256"] = serde_json::json!(sha256_hex_bytes(&payload_bytes));
+        mod_val["artifacts"][0]["size_bytes"] = serde_json::json!(payload_bytes.len() as u64);
+        let manifest_bytes = serde_json::to_vec_pretty(&mod_val).unwrap();
+        let manifest_sha = sha256_hex_bytes(&manifest_bytes);
+
+        let manifest_url = "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/sample-singleplayer-rpg/sample-nmod-starter/mod-manifest.json";
+        let artifact_url = "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/sample-singleplayer-rpg/sample-nmod-starter/scripts/unity_bridge.json";
+        let game_manifest_url = "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/mods/sample-singleplayer-rpg/sample-nmod-starter/game-manifest.json";
+        let game_manifest_bytes =
+            include_bytes!("../../../schemas/examples/game-manifest.example.json").to_vec();
+
+        let reg_val = serde_json::json!({
+            "schema_version": "1.0.0",
+            "repository_id": "org.nekod.official-mods",
+            "name": "Nekod Official Mod Bucket",
+            "description": "Test nmod bucket",
+            "url": "https://github.com/OmaruKoma/Nekod-Mods",
+            "maintainers": [{ "name": "OmaruKoma", "github_handle": "OmaruKoma" }],
+            "trust_tier": "official",
+            "channel": "stable",
+            "feed_type": "static_index_json",
+            "updated_at": "2026-11-24T00:00:00Z",
+            "trainers": [{
+                "trainer_id": "org.nekod.sample-nmod-starter",
+                "game_id": "sample-singleplayer-rpg",
+                "latest_version": "1.0.0",
+                "manifest_url": manifest_url,
+                "manifest_sha256": manifest_sha,
+                "status": "active"
+            }]
+        });
+
+        let source = RegistrySource {
+            repository_id: "org.nekod.official-mods".to_owned(),
+            index_url: "https://raw.githubusercontent.com/OmaruKoma/Nekod-Mods/main/registry.json"
+                .to_owned(),
+            authoritative_trust_tier: TrustTier::Official,
+            enabled: true,
+        };
+        let cache = SqliteRegistryCache::open_in_memory().unwrap();
+        cache
+            .ingest_manifest_str(&source, &serde_json::to_string(&reg_val).unwrap())
+            .unwrap();
+        let record = cache
+            .find_entry("org.nekod.official-mods", "org.nekod.sample-nmod-starter")
+            .unwrap()
+            .unwrap();
+
+        let transport = MockHttpTransport::new();
+        transport.set_ok(manifest_url, manifest_bytes, None);
+        transport.set_ok(artifact_url, payload_bytes, None);
+        transport.set_ok(game_manifest_url, game_manifest_bytes, None);
+
+        let stage_root = temp_dir("stage_nmod_v2");
+        let staged_dir = stage_verified_trainer_package(&record, &stage_root, &transport).unwrap();
+        assert!(staged_dir.join("mod-manifest.json").is_file());
+        assert!(staged_dir.join("game-manifest.json").is_file());
+        assert!(staged_dir.join("scripts/unity_bridge.json").is_file());
+        assert!(!staged_dir.join("trainer-manifest.json").exists());
+        let _ = fs::remove_dir_all(&stage_root);
     }
 }

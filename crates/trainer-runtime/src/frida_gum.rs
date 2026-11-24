@@ -333,6 +333,7 @@ impl RuntimeProvider for FridaGumRuntime {
                 target_process: req.target_process.clone(),
                 runtime_kind: RuntimeKind::FridaGumV1,
                 use_unity_explorer_http: false,
+                file_ipc_dir: None,
                 state: SessionLifecycleState::Attached,
                 rollback_stack: Vec::new(),
                 rollback_failures: 0,
@@ -649,6 +650,7 @@ mod tests {
             target_process: process_identity(4242),
             granted_permissions: grants_for(&manifest_ok),
             declarative_payload_json: Some(payload_ok.clone()),
+            verified_package_assets: BTreeMap::new(),
         });
         assert!(matches!(
             blocked,
@@ -692,6 +694,7 @@ mod tests {
             target_process: process_identity(4242),
             granted_permissions: grants_for(&bad_manifest),
             declarative_payload_json: Some(bad_payload),
+            verified_package_assets: BTreeMap::new(),
         });
         assert!(matches!(unsafe_res, Err(RuntimeError::InvalidPayload(_))));
 
@@ -704,6 +707,7 @@ mod tests {
                 target_process: process_identity(4242),
                 granted_permissions: grants_for(&good_manifest),
                 declarative_payload_json: Some(good_payload),
+                verified_package_assets: BTreeMap::new(),
             })
             .unwrap();
 

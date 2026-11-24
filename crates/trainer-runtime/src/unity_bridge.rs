@@ -4,10 +4,11 @@
 //! over loopback JSON-line IPC, strictly separating `Mono` vs. `IL2CPP` runtime flavors
 //! and restoring modified class fields in LIFO order on session teardown.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use nekod_manifest::{PermissionScope, RuntimeDependencySpec, RuntimeKind};
+use nekod_manifest::{PermissionScope, RuntimeDependencySpec, RuntimeKind, validate_relative_path};
 use nekod_runtime_api::{
     DependencyCheckResult, DependencyStatus, FeatureCommand, FeatureValue, ProcessIdentity,
     RuntimeAdapterClass, RuntimeAdapterMetadata, RuntimeDiagnostics, RuntimeError,
@@ -114,10 +115,15 @@ pub struct UnityAliveCheck {
     pub health_field: Option<String>,
 }
 
+fn default_damage_handler_kind() -> String {
+    "call".to_owned()
+}
+
 /// Native Unity damage method specification executed per enemy hit in `DamageAura`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnityDamageHandler {
+    #[serde(default = "default_damage_handler_kind")]
     pub kind: String,
     pub component_class: String,
     #[serde(default)]
@@ -127,6 +133,12 @@ pub struct UnityDamageHandler {
     pub dead_field: Option<String>,
     #[serde(default)]
     pub health_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_method: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zero_health_before_call: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<Value>>,
 }
 
 fn default_lock_method() -> String {
@@ -161,6 +173,67 @@ fn default_aura_interval_ms() -> u64 {
     250
 }
 
+fn default_spin_roll_speed() -> f64 {
+    360.0
+}
+
+fn default_spin_interval_ms() -> u64 {
+    16
+}
+
+/// Single field write executed inside a lifecycle method hook (`HookSetField`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnityHookFieldWrite {
+    pub class_name: String,
+    pub field_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_value: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_from_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_from_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ensure_component: Option<String>,
+    #[serde(default)]
+    pub init_null_lists: bool,
+    #[serde(default)]
+    pub only_if_null: bool,
+    #[serde(default)]
+    pub include_inactive: bool,
+    #[serde(default)]
+    pub clone_under_owner: bool,
+}
+
+/// Ordered setup step executed before invoking an `InvokeMethod` action feature.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UnityActionStep {
+    SetField {
+        class_name: String,
+        field_name: String,
+        value: Value,
+    },
+    CopyField {
+        from_class: String,
+        from_field: String,
+        to_class: String,
+        to_field: String,
+    },
+    InvokeMethod {
+        class_name: String,
+        method_name: String,
+        #[serde(default)]
+        args: Vec<Value>,
+    },
+}
+
+fn default_hook_timing() -> String {
+    "prefix".to_owned()
+}
+
 /// Declarative Unity class/field/method binding mapped from a UI `FeatureCommand`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -193,6 +266,12 @@ pub enum UnityFeatureBinding {
         feature_id: String,
         class_name: String,
         method_name: String,
+        #[serde(default)]
+        args: Vec<Value>,
+        #[serde(default)]
+        include_inactive: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pre_steps: Vec<UnityActionStep>,
     },
     TargetLock {
         feature_id: String,
@@ -215,18 +294,131 @@ pub enum UnityFeatureBinding {
         require_collider: bool,
         #[serde(default = "default_lock_interval_ms")]
         interval_ms: u64,
+        #[serde(default)]
+        player_tags: Vec<String>,
     },
     DamageAura {
         feature_id: String,
         player_class: String,
         target_class: String,
+        #[serde(default)]
+        require_active_class: Option<String>,
+        #[serde(default)]
+        exclude_bool_field: Option<String>,
         damage_amount: i64,
         #[serde(default = "default_aura_radius")]
         radius: f64,
         #[serde(default = "default_aura_interval_ms")]
         interval_ms: u64,
         handlers: Vec<UnityDamageHandler>,
+        #[serde(default)]
+        player_tags: Vec<String>,
     },
+    SpinBot {
+        feature_id: String,
+        player_class: String,
+        #[serde(default)]
+        target_class: Option<String>,
+        #[serde(default)]
+        require_active_class: Option<String>,
+        #[serde(default)]
+        spin_node_path: Option<String>,
+        #[serde(default = "default_true")]
+        spin_local: bool,
+        #[serde(default = "default_true")]
+        late_update: bool,
+        #[serde(default)]
+        roll_field: Option<String>,
+        #[serde(default = "default_spin_roll_speed")]
+        roll_speed_deg: f64,
+        #[serde(default)]
+        orbit_radius: f64,
+        #[serde(default)]
+        orbit_speed_deg: f64,
+        #[serde(default)]
+        height_offset: f64,
+        #[serde(default)]
+        aim_at_target: bool,
+        #[serde(default = "default_lock_range")]
+        max_range: f64,
+        #[serde(default = "default_true")]
+        require_alive: bool,
+        #[serde(default)]
+        alive_checks: Vec<UnityAliveCheck>,
+        #[serde(default = "default_spin_interval_ms")]
+        interval_ms: u64,
+        #[serde(default)]
+        player_tags: Vec<String>,
+    },
+    SetGameObjectActive {
+        feature_id: String,
+        #[serde(default)]
+        game_object_name: Option<String>,
+        #[serde(default)]
+        game_object_prefix: Option<String>,
+        #[serde(default)]
+        game_object_names: Vec<String>,
+        #[serde(default)]
+        game_object_prefixes: Vec<String>,
+        enabled_active: bool,
+        #[serde(default)]
+        disabled_active: Option<bool>,
+        #[serde(default = "default_true")]
+        include_inactive: bool,
+    },
+    CopyField {
+        feature_id: String,
+        from_class: String,
+        from_field: String,
+        to_class: String,
+        to_field: String,
+    },
+    ReplaceTextureMaterial {
+        feature_id: String,
+        #[serde(default)]
+        renderer_name_prefix: Option<String>,
+        #[serde(default)]
+        renderer_name_prefixes: Vec<String>,
+        #[serde(default)]
+        material_name_prefix: Option<String>,
+        #[serde(default)]
+        material_name_prefixes: Vec<String>,
+        asset_path: String,
+        #[serde(default)]
+        shader_name: Option<String>,
+        #[serde(default)]
+        color: Option<[f64; 4]>,
+    },
+    HookSetField {
+        feature_id: String,
+        hook_class: String,
+        hook_method: String,
+        #[serde(default = "default_hook_timing")]
+        timing: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        param_count: Option<u8>,
+        #[serde(default)]
+        apply_immediately: bool,
+        writes: Vec<UnityHookFieldWrite>,
+    },
+}
+
+fn build_invoke_method_call(
+    class_name: &str,
+    method_name: &str,
+    args: &[Value],
+) -> (&'static str, Value) {
+    if args.is_empty() {
+        (
+            "invoke_method",
+            json!({ "class_name": class_name, "method_name": method_name }),
+        )
+    } else {
+        (
+            "invoke_method_args",
+            json!({ "class_name": class_name, "method_name": method_name, "args": args }),
+        )
+    }
 }
 
 impl UnityFeatureBinding {
@@ -236,15 +428,25 @@ impl UnityFeatureBinding {
             | Self::SetField { feature_id, .. }
             | Self::InvokeMethod { feature_id, .. }
             | Self::TargetLock { feature_id, .. }
-            | Self::DamageAura { feature_id, .. } => feature_id,
+            | Self::DamageAura { feature_id, .. }
+            | Self::SpinBot { feature_id, .. }
+            | Self::SetGameObjectActive { feature_id, .. }
+            | Self::CopyField { feature_id, .. }
+            | Self::ReplaceTextureMaterial { feature_id, .. }
+            | Self::HookSetField { feature_id, .. } => feature_id,
         }
     }
+}
+
+struct ActiveUnitySession {
+    payload: UnityBridgePayload,
+    verified_assets: BTreeMap<String, String>,
 }
 
 /// Controlled Unity Reflection Bridge adapter (`unity_bridge_v1`).
 pub struct UnityBridgeRuntime {
     store: BridgeSessionStore,
-    bindings: std::sync::Mutex<std::collections::BTreeMap<String, UnityBridgePayload>>,
+    bindings: std::sync::Mutex<BTreeMap<String, ActiveUnitySession>>,
 }
 
 impl Default for UnityBridgeRuntime {
@@ -287,6 +489,64 @@ impl UnityBridgeRuntime {
 
         for feature in &payload.features {
             match feature {
+                UnityFeatureBinding::InvokeMethod {
+                    feature_id,
+                    class_name,
+                    method_name,
+                    pre_steps,
+                    ..
+                } => {
+                    if feature_id.trim().is_empty()
+                        || class_name.trim().is_empty()
+                        || method_name.trim().is_empty()
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "invoke_method feature '{feature_id}' requires non-empty class_name and method_name"
+                        )));
+                    }
+                    for (idx, step) in pre_steps.iter().enumerate() {
+                        match step {
+                            UnityActionStep::SetField {
+                                class_name: step_class,
+                                field_name: step_field,
+                                ..
+                            } => {
+                                if step_class.trim().is_empty() || step_field.trim().is_empty() {
+                                    return Err(RuntimeError::InvalidPayload(format!(
+                                        "invoke_method feature '{feature_id}' pre_steps[{idx}] requires non-empty class_name and field_name"
+                                    )));
+                                }
+                            }
+                            UnityActionStep::CopyField {
+                                from_class,
+                                from_field,
+                                to_class,
+                                to_field,
+                            } => {
+                                if from_class.trim().is_empty()
+                                    || from_field.trim().is_empty()
+                                    || to_class.trim().is_empty()
+                                    || to_field.trim().is_empty()
+                                {
+                                    return Err(RuntimeError::InvalidPayload(format!(
+                                        "invoke_method feature '{feature_id}' pre_steps[{idx}] copy_field requires non-empty source and target class/field"
+                                    )));
+                                }
+                            }
+                            UnityActionStep::InvokeMethod {
+                                class_name: step_class,
+                                method_name: step_method,
+                                ..
+                            } => {
+                                if step_class.trim().is_empty() || step_method.trim().is_empty() {
+                                    return Err(RuntimeError::InvalidPayload(format!(
+                                        "invoke_method feature '{feature_id}' pre_steps[{idx}] invoke_method requires non-empty class_name and method_name"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
                 UnityFeatureBinding::TargetLock {
                     feature_id,
                     player_class,
@@ -343,6 +603,7 @@ impl UnityBridgeRuntime {
                     radius,
                     interval_ms,
                     handlers,
+                    ..
                 } => {
                     if player_class.trim().is_empty() || target_class.trim().is_empty() {
                         return Err(RuntimeError::InvalidPayload(format!(
@@ -389,11 +650,239 @@ impl UnityBridgeRuntime {
                                 }
                             }
                             "emerald_ai" | "invoke_damage_int" => {}
+                            "call" => {
+                                if h.args.is_none() {
+                                    return Err(RuntimeError::InvalidPayload(format!(
+                                        "damage_aura feature '{feature_id}' 'call' handler requires explicit 'args' array"
+                                    )));
+                                }
+                            }
                             other => {
                                 return Err(RuntimeError::InvalidPayload(format!(
                                     "unsupported damage_aura handler kind '{other}'"
                                 )));
                             }
+                        }
+                    }
+                }
+                UnityFeatureBinding::SpinBot {
+                    feature_id,
+                    player_class,
+                    target_class,
+                    spin_node_path,
+                    roll_field,
+                    roll_speed_deg,
+                    orbit_radius,
+                    orbit_speed_deg,
+                    height_offset,
+                    aim_at_target,
+                    max_range,
+                    alive_checks,
+                    interval_ms,
+                    ..
+                } => {
+                    if feature_id.trim().is_empty() || player_class.trim().is_empty() {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "spin_bot feature '{feature_id}' requires non-empty feature_id and player_class"
+                        )));
+                    }
+                    if !roll_speed_deg.is_finite()
+                        || !orbit_radius.is_finite()
+                        || !orbit_speed_deg.is_finite()
+                        || !height_offset.is_finite()
+                        || !max_range.is_finite()
+                        || *max_range <= 0.0
+                        || *orbit_radius < 0.0
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "spin_bot feature '{feature_id}' contains invalid numeric parameter"
+                        )));
+                    }
+                    if !(8..=1000).contains(interval_ms) {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "spin_bot feature '{feature_id}' interval_ms must be 8..=1000"
+                        )));
+                    }
+                    let needs_target = *orbit_radius > 0.0 || *aim_at_target;
+                    if needs_target
+                        && target_class
+                            .as_deref()
+                            .map(str::trim)
+                            .unwrap_or("")
+                            .is_empty()
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "spin_bot feature '{feature_id}' requires target_class when orbit_radius > 0 or aim_at_target is enabled"
+                        )));
+                    }
+                    let has_spin_channel = spin_node_path
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|s| !s.is_empty())
+                        || roll_field
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|s| !s.is_empty())
+                        || *orbit_radius > 0.0;
+                    if !has_spin_channel {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "spin_bot feature '{feature_id}' requires spin_node_path, roll_field, or orbit_radius > 0"
+                        )));
+                    }
+                    if alive_checks
+                        .iter()
+                        .any(|c| c.component_class.trim().is_empty())
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "spin_bot feature '{feature_id}' alive_checks entry requires component_class"
+                        )));
+                    }
+                }
+                UnityFeatureBinding::SetGameObjectActive {
+                    feature_id,
+                    game_object_name,
+                    game_object_prefix,
+                    game_object_names,
+                    game_object_prefixes,
+                    ..
+                } => {
+                    let has_selector = game_object_name
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|s| !s.is_empty())
+                        || game_object_prefix
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|s| !s.is_empty())
+                        || game_object_names.iter().any(|s| !s.trim().is_empty())
+                        || game_object_prefixes.iter().any(|s| !s.trim().is_empty());
+                    if !has_selector {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "set_game_object_active feature '{feature_id}' requires at least one GameObject name or prefix"
+                        )));
+                    }
+                }
+                UnityFeatureBinding::CopyField {
+                    feature_id,
+                    from_class,
+                    from_field,
+                    to_class,
+                    to_field,
+                } => {
+                    if from_class.trim().is_empty()
+                        || from_field.trim().is_empty()
+                        || to_class.trim().is_empty()
+                        || to_field.trim().is_empty()
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "copy_field feature '{feature_id}' requires non-empty from/to class and field names"
+                        )));
+                    }
+                }
+                UnityFeatureBinding::ReplaceTextureMaterial {
+                    feature_id,
+                    material_name_prefix,
+                    material_name_prefixes,
+                    asset_path,
+                    color,
+                    ..
+                } => {
+                    let has_mat_prefix = material_name_prefix
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|s| !s.is_empty())
+                        || material_name_prefixes.iter().any(|s| !s.trim().is_empty());
+                    if !has_mat_prefix {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "replace_texture_material feature '{feature_id}' requires material_name_prefix or material_name_prefixes"
+                        )));
+                    }
+                    validate_relative_path(asset_path).map_err(|e| {
+                        RuntimeError::InvalidPayload(format!(
+                            "replace_texture_material feature '{feature_id}' invalid asset_path '{asset_path}': {e}"
+                        ))
+                    })?;
+                    let ext = Path::new(asset_path)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_ascii_lowercase)
+                        .unwrap_or_default();
+                    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "replace_texture_material feature '{feature_id}' asset_path '{asset_path}' must be .png, .jpg, or .jpeg"
+                        )));
+                    }
+                    if let Some(rgba) = color
+                        && rgba.iter().any(|c| !c.is_finite() || *c < 0.0 || *c > 1.0)
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "replace_texture_material feature '{feature_id}' color components must be 0.0..=1.0"
+                        )));
+                    }
+                }
+                UnityFeatureBinding::HookSetField {
+                    feature_id,
+                    hook_class,
+                    hook_method,
+                    timing,
+                    writes,
+                    ..
+                } => {
+                    if feature_id.trim().is_empty()
+                        || hook_class.trim().is_empty()
+                        || hook_method.trim().is_empty()
+                    {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "hook_set_field feature '{feature_id}' requires non-empty hook_class and hook_method"
+                        )));
+                    }
+                    let normalized_timing = timing.trim().to_ascii_lowercase();
+                    if !matches!(normalized_timing.as_str(), "prefix" | "postfix") {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "hook_set_field feature '{feature_id}' timing '{timing}' must be 'prefix' or 'postfix'"
+                        )));
+                    }
+                    if writes.is_empty() {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "hook_set_field feature '{feature_id}' requires at least one entry in writes"
+                        )));
+                    }
+                    for (idx, w) in writes.iter().enumerate() {
+                        if w.class_name.trim().is_empty() || w.field_name.trim().is_empty() {
+                            return Err(RuntimeError::InvalidPayload(format!(
+                                "hook_set_field feature '{feature_id}' writes[{idx}] requires non-empty class_name and field_name"
+                            )));
+                        }
+                        let has_value = w.value.is_some();
+                        let has_copy = w.copy_from_class.is_some() || w.copy_from_field.is_some();
+                        let has_ensure = w.ensure_component.is_some();
+                        let mode_count = usize::from(has_value)
+                            + usize::from(has_copy)
+                            + usize::from(has_ensure);
+                        if mode_count != 1 {
+                            return Err(RuntimeError::InvalidPayload(format!(
+                                "hook_set_field feature '{feature_id}' writes[{idx}] must set exactly one of value, copy_from_class/copy_from_field, or ensure_component"
+                            )));
+                        }
+                        if has_copy {
+                            let src_cls = w.copy_from_class.as_deref().map(str::trim).unwrap_or("");
+                            let src_fld = w.copy_from_field.as_deref().map(str::trim).unwrap_or("");
+                            if src_cls.is_empty() || src_fld.is_empty() {
+                                return Err(RuntimeError::InvalidPayload(format!(
+                                    "hook_set_field feature '{feature_id}' writes[{idx}] requires both non-empty copy_from_class and copy_from_field"
+                                )));
+                            }
+                        }
+                        if has_ensure
+                            && w.ensure_component
+                                .as_deref()
+                                .map(str::trim)
+                                .unwrap_or("")
+                                .is_empty()
+                        {
+                            return Err(RuntimeError::InvalidPayload(format!(
+                                "hook_set_field feature '{feature_id}' writes[{idx}] ensure_component must be non-empty"
+                            )));
                         }
                     }
                 }
@@ -473,17 +962,21 @@ pub fn resolve_nekod_unity_discovery(
     })
 }
 
-/// Executes a strictly read-only inspection RPC (`ping`, `list_types`, `get_field`)
-/// against a live `NekodUnityBridge` loopback instance discovered by target PID.
+/// Executes a strictly read-only inspection RPC (`ping`, `list_types`, `list_members`,
+/// `find_instances`, `dump_hierarchy`, `get_field`) against a live `NekodUnityBridge`
+/// loopback instance discovered by target PID.
 pub fn probe_nekod_unity_bridge_readonly(
     target_pid: u32,
     discovery_dir: Option<&str>,
     op: &str,
     params: Value,
 ) -> Result<Value, RuntimeError> {
-    if !matches!(op, "ping" | "list_types" | "get_field") {
+    if !matches!(
+        op,
+        "ping" | "list_types" | "list_members" | "find_instances" | "dump_hierarchy" | "get_field"
+    ) {
         return Err(RuntimeError::InvalidPayload(format!(
-            "readonly bridge probe refuses operation '{op}'; allowed ops: ping, list_types, get_field"
+            "readonly bridge probe refuses operation '{op}'; allowed ops: ping, list_types, list_members, find_instances, dump_hierarchy, get_field"
         )));
     }
     let disc = resolve_nekod_unity_discovery(target_pid, discovery_dir).ok_or_else(|| {
@@ -606,6 +1099,25 @@ fn transform_numeric_value(
 
 fn map_bridge_rpc_error(err: RuntimeError) -> RuntimeError {
     if let RuntimeError::ExecutionFailed(msg) = &err {
+        if msg.contains("unsupported op: pin_method_hook")
+            || msg.contains("unsupported op: unpin_method_hook")
+        {
+            return RuntimeError::ExecutionFailed(
+                "companion NekodUnityBridge is outdated (missing HookSetField / Harmony method hook support); close the game and update NekodUnityBridge to v0.5.5".to_owned(),
+            );
+        }
+        if msg.contains("unsupported op: pin_spinbot")
+            || msg.contains("unsupported op: unpin_spinbot")
+            || msg.contains("unsupported op: set_gameobject_active")
+            || msg.contains("unsupported op: copy_field")
+            || msg.contains("unsupported op: invoke_method_args")
+            || msg.contains("unsupported op: replace_texture_material")
+            || msg.contains("unsupported op: restore_texture_material")
+        {
+            return RuntimeError::ExecutionFailed(
+                "companion NekodUnityBridge is outdated (missing SpinBot / GameObject / asset material support); close the game and update NekodUnityBridge to v0.5.0".to_owned(),
+            );
+        }
         if msg.contains("unsupported op: pin_target_lock")
             || msg.contains("unsupported op: unpin_target_lock")
             || msg.contains("unsupported op: pin_damage_aura")
@@ -838,6 +1350,7 @@ impl RuntimeProvider for UnityBridgeRuntime {
             target_process: req.target_process,
             runtime_kind: RuntimeKind::UnityBridgeV1,
             use_unity_explorer_http: use_http,
+            file_ipc_dir: None,
             state: SessionLifecycleState::Attached,
             rollback_stack: Vec::new(),
             rollback_failures: 0,
@@ -849,7 +1362,13 @@ impl RuntimeProvider for UnityBridgeRuntime {
         };
 
         let sid = self.store.insert("unity", session);
-        self.bindings.lock().unwrap().insert(sid.0.clone(), payload);
+        self.bindings.lock().unwrap().insert(
+            sid.0.clone(),
+            ActiveUnitySession {
+                payload,
+                verified_assets: req.verified_package_assets,
+            },
+        );
         Ok(sid)
     }
 
@@ -865,17 +1384,19 @@ impl RuntimeProvider for UnityBridgeRuntime {
             None,
         }
 
-        let binding = {
+        let (binding, verified_assets) = {
             let guard = self.bindings.lock().unwrap();
-            let payload = guard
+            let active = guard
                 .get(&session_id.0)
                 .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))?;
-            payload
+            let found = active
+                .payload
                 .features
                 .iter()
                 .find(|f| f.feature_id() == command.feature_id)
                 .cloned()
-                .ok_or_else(|| RuntimeError::UnknownFeature(command.feature_id.clone()))?
+                .ok_or_else(|| RuntimeError::UnknownFeature(command.feature_id.clone()))?;
+            (found, active.verified_assets.clone())
         };
 
         // Snapshot endpoint & token without holding the session lock while blocking on TCP I/O.
@@ -1079,26 +1600,85 @@ impl RuntimeProvider for UnityBridgeRuntime {
                 UnityFeatureBinding::InvokeMethod {
                     class_name,
                     method_name,
+                    args,
+                    pre_steps,
                     ..
                 },
                 FeatureValue::Action,
             ) => {
-                let (op, params) = if use_http {
+                if use_http {
+                    if !pre_steps.is_empty() {
+                        return Err(RuntimeError::InvalidPayload(format!(
+                            "invoke_method feature '{}' with pre_steps requires standalone NekodUnityBridge (nekod_json_line_v1)",
+                            command.feature_id
+                        )));
+                    }
                     (
-                        "invoke_static",
-                        json!({ "type": class_name, "method": method_name, "args": [] }),
+                        vec![(
+                            "invoke_static",
+                            json!({ "type": class_name, "method": method_name, "args": args }),
+                        )],
+                        RollbackUpdate::None,
+                        format!("Invoked Unity method '{class_name}.{method_name}'"),
                     )
                 } else {
-                    (
-                        "invoke_method",
-                        json!({ "class_name": class_name, "method_name": method_name }),
-                    )
-                };
-                (
-                    vec![(op, params)],
-                    RollbackUpdate::None,
-                    format!("Invoked Unity method '{class_name}.{method_name}()'"),
-                )
+                    let step_count = pre_steps.len();
+                    let mut calls = Vec::with_capacity(step_count + 1);
+                    for step in pre_steps {
+                        match step {
+                            UnityActionStep::SetField {
+                                class_name: step_class,
+                                field_name: step_field,
+                                value,
+                            } => {
+                                calls.push((
+                                    "set_field",
+                                    json!({
+                                        "class_name": step_class,
+                                        "field_name": step_field,
+                                        "value": value,
+                                    }),
+                                ));
+                            }
+                            UnityActionStep::CopyField {
+                                from_class,
+                                from_field,
+                                to_class,
+                                to_field,
+                            } => {
+                                calls.push((
+                                    "copy_field",
+                                    json!({
+                                        "from_class": from_class,
+                                        "from_field": from_field,
+                                        "to_class": to_class,
+                                        "to_field": to_field,
+                                    }),
+                                ));
+                            }
+                            UnityActionStep::InvokeMethod {
+                                class_name: step_class,
+                                method_name: step_method,
+                                args: step_args,
+                            } => {
+                                calls.push(build_invoke_method_call(
+                                    &step_class,
+                                    &step_method,
+                                    &step_args,
+                                ));
+                            }
+                        }
+                    }
+                    calls.push(build_invoke_method_call(&class_name, &method_name, &args));
+                    let summary = if step_count == 0 {
+                        format!("Invoked Unity method '{class_name}.{method_name}'")
+                    } else {
+                        format!(
+                            "Invoked Unity method '{class_name}.{method_name}' after {step_count} pre_steps"
+                        )
+                    };
+                    (calls, RollbackUpdate::None, summary)
+                }
             }
             (
                 UnityFeatureBinding::TargetLock {
@@ -1113,6 +1693,7 @@ impl RuntimeProvider for UnityBridgeRuntime {
                     lock_speed,
                     require_collider,
                     interval_ms,
+                    player_tags,
                     ..
                 },
                 FeatureValue::Toggle(enable),
@@ -1125,22 +1706,24 @@ impl RuntimeProvider for UnityBridgeRuntime {
                 }
                 let unpin_params = json!({ "id": command.feature_id });
                 if enable {
-                    let pin_params = json!({
-                        "id": command.feature_id,
-                        "player_class": player_class,
-                        "camera_class": camera_class,
-                        "target_class": target_class,
-                        "lock_method": lock_method,
-                        "unlock_method": unlock_method,
-                        "alive_checks": alive_checks,
-                        "max_range": max_range,
-                        "height_offset": height_offset,
-                        "lock_speed": lock_speed,
-                        "require_collider": require_collider,
-                        "interval_ms": interval_ms,
-                    });
+                    let mut pin_map = serde_json::Map::new();
+                    pin_map.insert("id".to_owned(), json!(command.feature_id));
+                    pin_map.insert("player_class".to_owned(), json!(player_class));
+                    pin_map.insert("camera_class".to_owned(), json!(camera_class));
+                    pin_map.insert("target_class".to_owned(), json!(target_class));
+                    pin_map.insert("lock_method".to_owned(), json!(lock_method));
+                    pin_map.insert("unlock_method".to_owned(), json!(unlock_method));
+                    pin_map.insert("alive_checks".to_owned(), json!(alive_checks));
+                    pin_map.insert("max_range".to_owned(), json!(max_range));
+                    pin_map.insert("height_offset".to_owned(), json!(height_offset));
+                    pin_map.insert("lock_speed".to_owned(), json!(lock_speed));
+                    pin_map.insert("require_collider".to_owned(), json!(require_collider));
+                    pin_map.insert("interval_ms".to_owned(), json!(interval_ms));
+                    if !player_tags.is_empty() {
+                        pin_map.insert("player_tags".to_owned(), json!(player_tags));
+                    }
                     (
-                        vec![("pin_target_lock", pin_params)],
+                        vec![("pin_target_lock", Value::Object(pin_map))],
                         RollbackUpdate::Replace(vec![BridgeRpcRequest {
                             token: auth_token.clone(),
                             op: "unpin_target_lock".to_owned(),
@@ -1162,10 +1745,13 @@ impl RuntimeProvider for UnityBridgeRuntime {
                 UnityFeatureBinding::DamageAura {
                     player_class,
                     target_class,
+                    require_active_class,
+                    exclude_bool_field,
                     damage_amount,
                     radius,
                     interval_ms,
                     handlers,
+                    player_tags,
                     ..
                 },
                 FeatureValue::Toggle(enable),
@@ -1178,17 +1764,31 @@ impl RuntimeProvider for UnityBridgeRuntime {
                 }
                 let unpin_params = json!({ "id": command.feature_id });
                 if enable {
-                    let pin_params = json!({
-                        "id": command.feature_id,
-                        "player_class": player_class,
-                        "target_class": target_class,
-                        "damage_amount": damage_amount,
-                        "radius": radius,
-                        "interval_ms": interval_ms,
-                        "handlers": handlers,
-                    });
+                    let mut pin_map = serde_json::Map::new();
+                    pin_map.insert("id".to_owned(), json!(command.feature_id));
+                    pin_map.insert("player_class".to_owned(), json!(player_class));
+                    pin_map.insert("target_class".to_owned(), json!(target_class));
+                    if let Some(req_cls) = require_active_class
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        pin_map.insert("require_active_class".to_owned(), json!(req_cls));
+                    }
+                    if let Some(ex_fld) = exclude_bool_field
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        pin_map.insert("exclude_bool_field".to_owned(), json!(ex_fld));
+                    }
+                    pin_map.insert("damage_amount".to_owned(), json!(damage_amount));
+                    pin_map.insert("radius".to_owned(), json!(radius));
+                    pin_map.insert("interval_ms".to_owned(), json!(interval_ms));
+                    pin_map.insert("handlers".to_owned(), json!(handlers));
+                    if !player_tags.is_empty() {
+                        pin_map.insert("player_tags".to_owned(), json!(player_tags));
+                    }
                     (
-                        vec![("pin_damage_aura", pin_params)],
+                        vec![("pin_damage_aura", Value::Object(pin_map))],
                         RollbackUpdate::Replace(vec![BridgeRpcRequest {
                             token: auth_token.clone(),
                             op: "unpin_damage_aura".to_owned(),
@@ -1203,6 +1803,327 @@ impl RuntimeProvider for UnityBridgeRuntime {
                         vec![("unpin_damage_aura", unpin_params)],
                         RollbackUpdate::RemoveFeature,
                         format!("Unity damage aura '{target_class}' disarmed"),
+                    )
+                }
+            }
+            (
+                UnityFeatureBinding::SpinBot {
+                    player_class,
+                    target_class,
+                    require_active_class,
+                    spin_node_path,
+                    spin_local,
+                    late_update,
+                    roll_field,
+                    roll_speed_deg,
+                    orbit_radius,
+                    orbit_speed_deg,
+                    height_offset,
+                    aim_at_target,
+                    max_range,
+                    require_alive,
+                    alive_checks,
+                    interval_ms,
+                    player_tags,
+                    ..
+                },
+                FeatureValue::Toggle(enable),
+            ) => {
+                if use_http {
+                    return Err(RuntimeError::InvalidPayload(format!(
+                        "spin_bot feature '{}' requires standalone NekodUnityBridge (nekod_json_line_v1)",
+                        command.feature_id
+                    )));
+                }
+                let unpin_params = json!({ "id": command.feature_id });
+                if enable {
+                    let mut pin_map = serde_json::Map::new();
+                    pin_map.insert("id".to_owned(), json!(command.feature_id));
+                    pin_map.insert("player_class".to_owned(), json!(player_class));
+                    if let Some(tcls) = target_class.as_deref().filter(|s| !s.trim().is_empty()) {
+                        pin_map.insert("target_class".to_owned(), json!(tcls));
+                    }
+                    if let Some(req_cls) = require_active_class
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        pin_map.insert("require_active_class".to_owned(), json!(req_cls));
+                    }
+                    if let Some(node) = spin_node_path.as_deref().filter(|s| !s.trim().is_empty()) {
+                        pin_map.insert("spin_node_path".to_owned(), json!(node));
+                    }
+                    if let Some(fld) = roll_field.as_deref().filter(|s| !s.trim().is_empty()) {
+                        pin_map.insert("roll_field".to_owned(), json!(fld));
+                    }
+                    pin_map.insert("spin_local".to_owned(), json!(spin_local));
+                    pin_map.insert("late_update".to_owned(), json!(late_update));
+                    pin_map.insert("roll_speed_deg".to_owned(), json!(roll_speed_deg));
+                    pin_map.insert("orbit_radius".to_owned(), json!(orbit_radius));
+                    pin_map.insert("orbit_speed_deg".to_owned(), json!(orbit_speed_deg));
+                    pin_map.insert("height_offset".to_owned(), json!(height_offset));
+                    pin_map.insert("aim_at_target".to_owned(), json!(aim_at_target));
+                    pin_map.insert("max_range".to_owned(), json!(max_range));
+                    pin_map.insert("require_alive".to_owned(), json!(require_alive));
+                    pin_map.insert("alive_checks".to_owned(), json!(alive_checks));
+                    pin_map.insert("interval_ms".to_owned(), json!(interval_ms));
+                    if !player_tags.is_empty() {
+                        pin_map.insert("player_tags".to_owned(), json!(player_tags));
+                    }
+                    (
+                        vec![("pin_spinbot", Value::Object(pin_map))],
+                        RollbackUpdate::Replace(vec![BridgeRpcRequest {
+                            token: auth_token.clone(),
+                            op: "unpin_spinbot".to_owned(),
+                            params: unpin_params,
+                        }]),
+                        format!(
+                            "Unity SpinBot armed on '{player_class}' (roll={roll_speed_deg} deg/s, late_update={late_update})"
+                        ),
+                    )
+                } else {
+                    (
+                        vec![("unpin_spinbot", unpin_params)],
+                        RollbackUpdate::RemoveFeature,
+                        format!("Unity SpinBot '{}' disarmed", command.feature_id),
+                    )
+                }
+            }
+            (
+                UnityFeatureBinding::SetGameObjectActive {
+                    game_object_name,
+                    game_object_prefix,
+                    game_object_names,
+                    game_object_prefixes,
+                    enabled_active,
+                    disabled_active,
+                    include_inactive,
+                    ..
+                },
+                val @ (FeatureValue::Toggle(_) | FeatureValue::Action),
+            ) => {
+                if use_http {
+                    return Err(RuntimeError::InvalidPayload(format!(
+                        "set_game_object_active feature '{}' requires standalone NekodUnityBridge (nekod_json_line_v1)",
+                        command.feature_id
+                    )));
+                }
+                let is_toggle_enable = matches!(val, FeatureValue::Toggle(true));
+                let target_active = match val {
+                    FeatureValue::Toggle(true) | FeatureValue::Action => enabled_active,
+                    FeatureValue::Toggle(false) => disabled_active.unwrap_or(!enabled_active),
+                    _ => unreachable!(),
+                };
+                let build_go_params = |active_flag: bool| {
+                    let mut m = serde_json::Map::new();
+                    if let Some(n) = &game_object_name {
+                        m.insert("game_object_name".to_owned(), json!(n));
+                    }
+                    if let Some(pfx) = &game_object_prefix {
+                        m.insert("game_object_prefix".to_owned(), json!(pfx));
+                    }
+                    if !game_object_names.is_empty() {
+                        m.insert("game_object_names".to_owned(), json!(game_object_names));
+                    }
+                    if !game_object_prefixes.is_empty() {
+                        m.insert(
+                            "game_object_prefixes".to_owned(),
+                            json!(game_object_prefixes),
+                        );
+                    }
+                    m.insert("active".to_owned(), json!(active_flag));
+                    m.insert("include_inactive".to_owned(), json!(include_inactive));
+                    Value::Object(m)
+                };
+                let params = build_go_params(target_active);
+                let rollback_update = if is_toggle_enable {
+                    RollbackUpdate::Replace(vec![BridgeRpcRequest {
+                        token: auth_token.clone(),
+                        op: "set_gameobject_active".to_owned(),
+                        params: build_go_params(disabled_active.unwrap_or(!enabled_active)),
+                    }])
+                } else if matches!(val, FeatureValue::Toggle(false)) {
+                    RollbackUpdate::RemoveFeature
+                } else {
+                    RollbackUpdate::None
+                };
+                (
+                    vec![("set_gameobject_active", params)],
+                    rollback_update,
+                    format!(
+                        "Unity GameObject(s) active={target_active} (feature '{}')",
+                        command.feature_id
+                    ),
+                )
+            }
+            (
+                UnityFeatureBinding::CopyField {
+                    from_class,
+                    from_field,
+                    to_class,
+                    to_field,
+                    ..
+                },
+                FeatureValue::Action | FeatureValue::Toggle(true),
+            ) => {
+                if use_http {
+                    return Err(RuntimeError::InvalidPayload(format!(
+                        "copy_field feature '{}' requires standalone NekodUnityBridge (nekod_json_line_v1)",
+                        command.feature_id
+                    )));
+                }
+                (
+                    vec![(
+                        "copy_field",
+                        json!({
+                            "from_class": from_class,
+                            "from_field": from_field,
+                            "to_class": to_class,
+                            "to_field": to_field
+                        }),
+                    )],
+                    RollbackUpdate::None,
+                    format!(
+                        "Copied Unity field '{from_class}.{from_field}' -> '{to_class}.{to_field}'"
+                    ),
+                )
+            }
+            (
+                UnityFeatureBinding::ReplaceTextureMaterial {
+                    renderer_name_prefix,
+                    renderer_name_prefixes,
+                    material_name_prefix,
+                    material_name_prefixes,
+                    asset_path,
+                    shader_name,
+                    color,
+                    ..
+                },
+                FeatureValue::Toggle(enable),
+            ) => {
+                if use_http {
+                    return Err(RuntimeError::InvalidPayload(format!(
+                        "replace_texture_material feature '{}' requires standalone NekodUnityBridge (nekod_json_line_v1)",
+                        command.feature_id
+                    )));
+                }
+                let mat_id = format!("mat:{}", command.feature_id);
+                if enable {
+                    let verified_path = verified_assets.get(&asset_path).ok_or_else(|| {
+                        RuntimeError::InvalidPayload(format!(
+                            "material asset '{asset_path}' for feature '{}' is not declared or SHA-256 verified in manifest.artifacts",
+                            command.feature_id
+                        ))
+                    })?;
+                    let mut m = serde_json::Map::new();
+                    m.insert("id".to_owned(), json!(mat_id));
+                    m.insert("texture_path".to_owned(), json!(verified_path));
+                    if let Some(rp) = renderer_name_prefix {
+                        m.insert("renderer_name_prefix".to_owned(), json!(rp));
+                    }
+                    if !renderer_name_prefixes.is_empty() {
+                        m.insert(
+                            "renderer_name_prefixes".to_owned(),
+                            json!(renderer_name_prefixes),
+                        );
+                    }
+                    if let Some(mp) = material_name_prefix {
+                        m.insert("material_name_prefix".to_owned(), json!(mp));
+                    }
+                    if !material_name_prefixes.is_empty() {
+                        m.insert(
+                            "material_name_prefixes".to_owned(),
+                            json!(material_name_prefixes),
+                        );
+                    }
+                    if let Some(sh) = shader_name {
+                        m.insert("shader_name".to_owned(), json!(sh));
+                    }
+                    if let Some(rgba) = color {
+                        m.insert("color".to_owned(), json!(rgba));
+                    }
+                    (
+                        vec![("replace_texture_material", Value::Object(m))],
+                        RollbackUpdate::Replace(vec![BridgeRpcRequest {
+                            token: auth_token.clone(),
+                            op: "restore_texture_material".to_owned(),
+                            params: json!({ "id": mat_id }),
+                        }]),
+                        format!(
+                            "Replaced Unity material textures using verified asset '{asset_path}'"
+                        ),
+                    )
+                } else {
+                    (
+                        vec![("restore_texture_material", json!({ "id": mat_id }))],
+                        RollbackUpdate::RemoveFeature,
+                        format!(
+                            "Restored original Unity material textures for '{}'",
+                            command.feature_id
+                        ),
+                    )
+                }
+            }
+            (
+                UnityFeatureBinding::HookSetField {
+                    hook_class,
+                    hook_method,
+                    timing,
+                    param_count,
+                    apply_immediately,
+                    writes,
+                    ..
+                },
+                FeatureValue::Toggle(enable),
+            ) => {
+                if use_http {
+                    return Err(RuntimeError::InvalidPayload(format!(
+                        "hook_set_field feature '{}' requires standalone NekodUnityBridge (nekod_json_line_v1)",
+                        command.feature_id
+                    )));
+                }
+                let hook_id = format!("hook:{}", command.feature_id);
+                if enable {
+                    let mut m = serde_json::Map::new();
+                    m.insert("id".to_owned(), json!(hook_id));
+                    m.insert("hook_class".to_owned(), json!(hook_class));
+                    m.insert("hook_method".to_owned(), json!(hook_method));
+                    m.insert(
+                        "timing".to_owned(),
+                        json!(timing.trim().to_ascii_lowercase()),
+                    );
+                    if let Some(cnt) = param_count {
+                        m.insert("param_count".to_owned(), json!(cnt));
+                    }
+                    m.insert("apply_immediately".to_owned(), json!(apply_immediately));
+                    m.insert(
+                        "writes".to_owned(),
+                        serde_json::to_value(&writes).map_err(|e| {
+                            RuntimeError::InvalidPayload(format!(
+                                "failed to serialize hook_set_field writes for '{}': {e}",
+                                command.feature_id
+                            ))
+                        })?,
+                    );
+                    (
+                        vec![("pin_method_hook", Value::Object(m))],
+                        RollbackUpdate::Replace(vec![BridgeRpcRequest {
+                            token: auth_token.clone(),
+                            op: "unpin_method_hook".to_owned(),
+                            params: json!({ "id": hook_id }),
+                        }]),
+                        format!(
+                            "Installed Unity {timing} method hook on '{hook_class}.{hook_method}' for '{}'",
+                            command.feature_id
+                        ),
+                    )
+                } else {
+                    (
+                        vec![("unpin_method_hook", json!({ "id": hook_id }))],
+                        RollbackUpdate::RemoveFeature,
+                        format!(
+                            "Removed Unity method hook on '{hook_class}.{hook_method}' for '{}'",
+                            command.feature_id
+                        ),
                     )
                 }
             }
@@ -1405,6 +2326,7 @@ mod tests {
                 scope_constraints: BTreeMap::new(),
             },
             declarative_payload_json: Some(payload),
+            verified_package_assets: BTreeMap::new(),
         }
     }
 
@@ -1829,9 +2751,22 @@ mod tests {
             probe_nekod_unity_bridge_readonly(44100, Some(&dir_str), "invoke_method", json!({})),
             Err(RuntimeError::InvalidPayload(_))
         ));
+        assert!(matches!(
+            probe_nekod_unity_bridge_readonly(44100, Some(&dir_str), "pin_spinbot", json!({})),
+            Err(RuntimeError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            probe_nekod_unity_bridge_readonly(
+                44100,
+                Some(&dir_str),
+                "replace_texture_material",
+                json!({})
+            ),
+            Err(RuntimeError::InvalidPayload(_))
+        ));
 
         let server = thread::spawn(move || {
-            for stream in listener.incoming().take(2) {
+            for stream in listener.incoming().take(5) {
                 let mut stream = stream.unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
@@ -1847,6 +2782,21 @@ mod tests {
                     "get_field" => writeln!(
                         stream,
                         "{{\"ok\":true,\"data\":{{\"type\":\"UnityEngine.Time\",\"member\":\"timeScale\",\"value\":1.0}}}}"
+                    )
+                    .unwrap(),
+                    "list_members" => writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"type\":\"PlayerControlCustom\",\"fields\":[]}}}}"
+                    )
+                    .unwrap(),
+                    "find_instances" => writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"type\":\"PlayerControlCustom\",\"total\":1,\"instances\":[]}}}}"
+                    )
+                    .unwrap(),
+                    "dump_hierarchy" => writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"root\":\"AIdealBattle\",\"count\":1,\"nodes\":[]}}}}"
                     )
                     .unwrap(),
                     other => panic!("unexpected op {other}"),
@@ -1866,6 +2816,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(field["value"], 1.0);
+
+        let members = probe_nekod_unity_bridge_readonly(
+            44100,
+            Some(&dir_str),
+            "list_members",
+            json!({ "class_name": "PlayerControlCustom" }),
+        )
+        .unwrap();
+        assert_eq!(members["type"], "PlayerControlCustom");
+
+        let instances = probe_nekod_unity_bridge_readonly(
+            44100,
+            Some(&dir_str),
+            "find_instances",
+            json!({ "class_name": "PlayerControlCustom" }),
+        )
+        .unwrap();
+        assert_eq!(instances["total"], 1);
+
+        let hier = probe_nekod_unity_bridge_readonly(
+            44100,
+            Some(&dir_str),
+            "dump_hierarchy",
+            json!({ "class_name": "PlayerControlCustom" }),
+        )
+        .unwrap();
+        assert_eq!(hier["root"], "AIdealBattle");
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(discovery_dir);
@@ -2560,5 +3537,740 @@ mod tests {
         let err2 = UnityBridgeRuntime::validate_payload(&bad_radius).unwrap_err();
         assert!(matches!(err2, RuntimeError::InvalidPayload(_)));
         let _ = runtime;
+    }
+
+    #[test]
+    fn spin_bot_game_object_copy_field_invoke_args_and_verified_material_swap_roll_back_lifo() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_srv = Arc::clone(&seen);
+
+        // ping + 6 feature applications + 4 rollback calls = 11 RPCs
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(11) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap().to_owned();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"il2cpp\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    seen_srv.lock().unwrap().push((op, req["params"].clone()));
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"ok\":true}}}}").unwrap();
+                }
+            }
+        });
+
+        let verified_png = "D:\\safe_pkg\\assets\\uncensor_placeholder.png".to_owned();
+        let mut req = unity_request(UnityFlavor::Il2cpp, UnityLoaderKind::BepinexIl2cpp, port);
+        req.verified_package_assets.insert(
+            "assets/uncensor_placeholder.png".to_owned(),
+            verified_png.clone(),
+        );
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "il2cpp",
+                "loader": "bepinex_il2cpp",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [
+                    {
+                        "kind": "spin_bot",
+                        "feature_id": "spinbot-armature",
+                        "player_class": "PlayerControlCustom",
+                        "require_active_class": "BattleManager",
+                        "spin_node_path": "Armature",
+                        "spin_local": true,
+                        "late_update": true,
+                        "roll_speed_deg": 720.0
+                    },
+                    {
+                        "kind": "set_game_object_active",
+                        "feature_id": "undress-male",
+                        "game_object_names": ["Bottoms", "Tops"],
+                        "enabled_active": false,
+                        "disabled_active": true,
+                        "include_inactive": true
+                    },
+                    {
+                        "kind": "copy_field",
+                        "feature_id": "refill-hp",
+                        "from_class": "PlayerControlCustom",
+                        "from_field": "HitpointMax",
+                        "to_class": "PlayerControlCustom",
+                        "to_field": "Hitpoint"
+                    },
+                    {
+                        "kind": "invoke_method",
+                        "feature_id": "costume-naked",
+                        "class_name": "EventManager",
+                        "method_name": "ChangeCostume",
+                        "args": [1]
+                    },
+                    {
+                        "kind": "damage_aura",
+                        "feature_id": "kill-aura",
+                        "player_class": "PlayerControlCustom",
+                        "target_class": "CharacterControllerBase",
+                        "require_active_class": "BattleManager",
+                        "exclude_bool_field": "IsPlayer",
+                        "damage_amount": 99999,
+                        "radius": 60.0,
+                        "interval_ms": 250,
+                        "handlers": [{
+                            "kind": "call",
+                            "component_class": "CharacterControllerBase",
+                            "method_name": "Die",
+                            "health_field": "Hitpoint",
+                            "dead_method": "IsDie",
+                            "zero_health_before_call": true,
+                            "args": []
+                        }]
+                    },
+                    {
+                        "kind": "replace_texture_material",
+                        "feature_id": "uncensor-material",
+                        "material_name_prefix": "VagWhite",
+                        "asset_path": "assets/uncensor_placeholder.png",
+                        "shader_name": "Standard",
+                        "color": [0.94, 0.8, 0.9, 1.0]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let runtime = UnityBridgeRuntime::new();
+        let sid = runtime.start_session(req).unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "spinbot-armature".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "undress-male".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "refill-hp".to_owned(),
+                    value: FeatureValue::Action,
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "costume-naked".to_owned(),
+                    value: FeatureValue::Action,
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "kill-aura".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "uncensor-material".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+
+        let diag = runtime.stop_session(&sid).unwrap();
+        assert_eq!(diag.rollback_failures, 0);
+        server.join().unwrap();
+
+        let ops = seen.lock().unwrap();
+        assert_eq!(ops.len(), 10);
+        assert_eq!(ops[0].0, "pin_spinbot");
+        assert_eq!(ops[0].1["spin_node_path"], "Armature");
+        assert_eq!(ops[0].1["require_active_class"], "BattleManager");
+        assert_eq!(ops[0].1["late_update"], true);
+        assert_eq!(ops[1].0, "set_gameobject_active");
+        assert_eq!(ops[1].1["active"], false);
+        assert_eq!(ops[2].0, "copy_field");
+        assert_eq!(ops[3].0, "invoke_method_args");
+        assert_eq!(ops[3].1["args"], json!([1]));
+        assert_eq!(ops[4].0, "pin_damage_aura");
+        assert_eq!(ops[4].1["require_active_class"], "BattleManager");
+        assert_eq!(ops[4].1["exclude_bool_field"], "IsPlayer");
+        assert_eq!(ops[4].1["handlers"][0]["dead_method"], "IsDie");
+        assert_eq!(ops[4].1["handlers"][0]["zero_health_before_call"], true);
+        assert_eq!(ops[4].1["handlers"][0]["args"], json!([]));
+        assert_eq!(ops[5].0, "replace_texture_material");
+        assert_eq!(ops[5].1["texture_path"], verified_png);
+        assert_eq!(ops[5].1["shader_name"], "Standard");
+
+        // LIFO rollback restores in reverse order: material -> aura -> GameObject -> spinbot
+        assert_eq!(ops[6].0, "restore_texture_material");
+        assert_eq!(ops[6].1["id"], "mat:uncensor-material");
+        assert_eq!(ops[7].0, "unpin_damage_aura");
+        assert_eq!(ops[8].0, "set_gameobject_active");
+        assert_eq!(ops[8].1["active"], true);
+        assert_eq!(ops[9].0, "unpin_spinbot");
+    }
+
+    #[test]
+    fn replace_texture_material_rejects_unverified_or_unsafe_asset_paths() {
+        for bad_asset in [
+            "../secret.png",
+            "C:\\Windows\\system32\\test.png",
+            "assets/payload.dll",
+        ] {
+            let payload: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "il2cpp",
+                "loader": "bepinex_il2cpp",
+                "host": "127.0.0.1",
+                "port": 19540,
+                "features": [{
+                    "kind": "replace_texture_material",
+                    "feature_id": "bad-mat",
+                    "material_name_prefix": "VagWhite",
+                    "asset_path": bad_asset
+                }]
+            }))
+            .unwrap();
+            let err = UnityBridgeRuntime::validate_payload(&payload).unwrap_err();
+            assert!(
+                matches!(err, RuntimeError::InvalidPayload(_)),
+                "expected validation failure for '{bad_asset}'"
+            );
+        }
+
+        // Valid relative path NOT present in verified_package_assets must fail closed at runtime.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(1) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                writeln!(
+                    stream,
+                    "{{\"ok\":true,\"data\":{{\"flavor\":\"il2cpp\",\"pid\":5200,\"port\":{port}}}}}"
+                )
+                .unwrap();
+            }
+        });
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Il2cpp, UnityLoaderKind::BepinexIl2cpp, port);
+        // Note: verified_package_assets intentionally omitted for "assets/missing.png"!
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "il2cpp",
+                "loader": "bepinex_il2cpp",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [{
+                    "kind": "replace_texture_material",
+                    "feature_id": "missing-asset",
+                    "material_name_prefix": "VagWhite",
+                    "asset_path": "assets/missing.png"
+                }]
+            })
+            .to_string(),
+        );
+
+        let sid = runtime.start_session(req).unwrap();
+        let err = runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "missing-asset".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::InvalidPayload(_)));
+        runtime.stop_session(&sid).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn unity_spinbot_generic_aura_and_texture_slot_payload_validates() {
+        let payload: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+            "schema_version": "1.0.0",
+            "flavor": "il2cpp",
+            "loader": "bepinex_il2cpp",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "auto_discover_by_pid": true,
+            "features": [
+                {
+                    "kind": "spin_bot",
+                    "feature_id": "spinbot-armature",
+                    "player_class": "PlayerRoot",
+                    "spin_node_path": "VisualArmature",
+                    "require_active_class": "BattleManager",
+                    "roll_speed_deg": 720.0
+                },
+                {
+                    "kind": "damage_aura",
+                    "feature_id": "kill-aura",
+                    "player_class": "PlayerActor",
+                    "target_class": "EnemyBase",
+                    "exclude_bool_field": "IsPlayerSide",
+                    "damage_amount": 9999,
+                    "radius": 35.0,
+                    "interval_ms": 250,
+                    "handlers": [{
+                        "kind": "call",
+                        "component_class": "EnemyHealth",
+                        "method_name": "ApplyDamage",
+                        "dead_method": "IsDead",
+                        "args": [9999]
+                    }]
+                },
+                {
+                    "kind": "replace_texture_material",
+                    "feature_id": "uncensor-material-slot",
+                    "renderer_name_prefixes": ["SkinnedBody"],
+                    "material_name_prefixes": ["SkinMat"],
+                    "asset_path": "assets/slot.png"
+                }
+            ]
+        }))
+        .expect("unity advanced payload deserializes");
+        UnityBridgeRuntime::validate_payload(&payload)
+            .expect("unity advanced payload validates cleanly");
+        assert_eq!(payload.features.len(), 3);
+    }
+
+    #[test]
+    fn hook_set_field_sends_pin_and_unpin_method_hook_and_rolls_back_lifo() {
+        let bad_timing: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+            "schema_version": "1.0.0",
+            "flavor": "il2cpp",
+            "loader": "bepinex_il2cpp",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "features": [{
+                "kind": "hook_set_field",
+                "feature_id": "playable-lily",
+                "hook_class": "BattleManager",
+                "hook_method": "AfterAssetbundleLoad",
+                "timing": "transpiler",
+                "writes": [{
+                    "class_name": "ActionFlowManager",
+                    "field_name": "Playable",
+                    "value": "LILY"
+                }]
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            UnityBridgeRuntime::validate_payload(&bad_timing),
+            Err(RuntimeError::InvalidPayload(_))
+        ));
+
+        let missing_mode: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+            "schema_version": "1.0.0",
+            "flavor": "il2cpp",
+            "loader": "bepinex_il2cpp",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "features": [{
+                "kind": "hook_set_field",
+                "feature_id": "playable-lily",
+                "hook_class": "BattleManager",
+                "hook_method": "AfterAssetbundleLoad",
+                "writes": [{
+                    "class_name": "BattleResource",
+                    "field_name": "Lily.Selection"
+                }]
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            UnityBridgeRuntime::validate_payload(&missing_mode),
+            Err(RuntimeError::InvalidPayload(_))
+        ));
+
+        let mixed_mode: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+            "schema_version": "1.0.0",
+            "flavor": "il2cpp",
+            "loader": "bepinex_il2cpp",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "features": [{
+                "kind": "hook_set_field",
+                "feature_id": "playable-lily",
+                "hook_class": "BattleManager",
+                "hook_method": "AfterAssetbundleLoad",
+                "writes": [{
+                    "class_name": "BattleResource",
+                    "field_name": "Lily.Selection",
+                    "value": "foo",
+                    "ensure_component": "SelectionManager"
+                }]
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            UnityBridgeRuntime::validate_payload(&mixed_mode),
+            Err(RuntimeError::InvalidPayload(_))
+        ));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_srv = Arc::clone(&seen);
+
+        // ping + enable + disable + re-enable + LIFO stop rollback = 5 RPCs
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(5) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap().to_owned();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"il2cpp\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    seen_srv.lock().unwrap().push((op, req["params"].clone()));
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"ok\":true}}}}").unwrap();
+                }
+            }
+        });
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Il2cpp, UnityLoaderKind::BepinexIl2cpp, port);
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "il2cpp",
+                "loader": "bepinex_il2cpp",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [{
+                    "kind": "hook_set_field",
+                    "feature_id": "playable-lily",
+                    "hook_class": "BattleManager",
+                    "hook_method": "AfterAssetbundleLoad",
+                    "timing": "prefix",
+                    "param_count": 0,
+                    "apply_immediately": true,
+                    "writes": [
+                        {
+                            "class_name": "ActionFlowManager",
+                            "field_name": "Playable",
+                            "value": "LILY",
+                            "restore_value": "AI",
+                            "include_inactive": true
+                        },
+                        {
+                            "class_name": "BattleResource",
+                            "field_name": "Lily.Selection",
+                            "ensure_component": "SelectionManager",
+                            "init_null_lists": true,
+                            "only_if_null": true,
+                            "include_inactive": true
+                        },
+                        {
+                            "class_name": "BattleResource",
+                            "field_name": "Lily.DashTimeline",
+                            "copy_from_class": "BattleResource",
+                            "copy_from_field": "AIdeal.DashTimeline",
+                            "only_if_null": true,
+                            "include_inactive": true,
+                            "clone_under_owner": true
+                        }
+                    ]
+                }]
+            })
+            .to_string(),
+        );
+
+        let sid = runtime.start_session(req).unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "playable-lily".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "playable-lily".to_owned(),
+                    value: FeatureValue::Toggle(false),
+                },
+            )
+            .unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "playable-lily".to_owned(),
+                    value: FeatureValue::Toggle(true),
+                },
+            )
+            .unwrap();
+        runtime.stop_session(&sid).unwrap();
+        server.join().unwrap();
+
+        let ops: Vec<(String, Value)> = seen.lock().unwrap().clone();
+        assert_eq!(ops.len(), 4);
+        assert_eq!(ops[0].0, "pin_method_hook");
+        assert_eq!(ops[0].1["id"], "hook:playable-lily");
+        assert_eq!(ops[0].1["hook_class"], "BattleManager");
+        assert_eq!(ops[0].1["hook_method"], "AfterAssetbundleLoad");
+        assert_eq!(ops[0].1["timing"], "prefix");
+        assert_eq!(ops[0].1["param_count"], 0);
+        assert_eq!(ops[0].1["apply_immediately"], true);
+        assert_eq!(ops[0].1["writes"][0]["class_name"], "ActionFlowManager");
+        assert_eq!(ops[0].1["writes"][0]["restore_value"], "AI");
+        assert_eq!(
+            ops[0].1["writes"][1]["ensure_component"],
+            "SelectionManager"
+        );
+        assert_eq!(ops[0].1["writes"][1]["init_null_lists"], true);
+        assert_eq!(ops[0].1["writes"][1]["only_if_null"], true);
+        assert_eq!(ops[0].1["writes"][2]["copy_from_class"], "BattleResource");
+        assert_eq!(
+            ops[0].1["writes"][2]["copy_from_field"],
+            "AIdeal.DashTimeline"
+        );
+        assert_eq!(ops[0].1["writes"][2]["only_if_null"], true);
+        assert_eq!(ops[0].1["writes"][2]["clone_under_owner"], true);
+        assert_eq!(ops[1].0, "unpin_method_hook");
+        assert_eq!(ops[1].1["id"], "hook:playable-lily");
+        assert_eq!(ops[2].0, "pin_method_hook");
+        assert_eq!(ops[3].0, "unpin_method_hook");
+    }
+
+    #[test]
+    fn invoke_method_pre_steps_validate_and_execute_in_order() {
+        let invalid_step: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+            "schema_version": "1.0.0",
+            "flavor": "il2cpp",
+            "loader": "bepinex_il2cpp",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "features": [{
+                "kind": "invoke_method",
+                "feature_id": "lily-unique-gun",
+                "class_name": "PlayerControlCustom",
+                "method_name": "AttackCommon",
+                "pre_steps": [{
+                    "kind": "copy_field",
+                    "from_class": "PlayerControlCustom",
+                    "from_field": "",
+                    "to_class": "PlayerControlCustom",
+                    "to_field": "CurrentAttackParam"
+                }]
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            UnityBridgeRuntime::validate_payload(&invalid_step),
+            Err(RuntimeError::InvalidPayload(_))
+        ));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_srv = Arc::clone(&seen);
+
+        // ping + 3 pre_steps + primary AttackCommon = 5 RPCs
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(5) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let op = req["op"].as_str().unwrap().to_owned();
+                if op == "ping" {
+                    writeln!(
+                        stream,
+                        "{{\"ok\":true,\"data\":{{\"flavor\":\"il2cpp\",\"pid\":5200,\"port\":{port}}}}}"
+                    )
+                    .unwrap();
+                } else {
+                    seen_srv.lock().unwrap().push((op, req["params"].clone()));
+                    writeln!(stream, "{{\"ok\":true,\"data\":{{\"ok\":true}}}}").unwrap();
+                }
+            }
+        });
+
+        let runtime = UnityBridgeRuntime::new();
+        let mut req = unity_request(UnityFlavor::Il2cpp, UnityLoaderKind::BepinexIl2cpp, port);
+        req.declarative_payload_json = Some(
+            serde_json::json!({
+                "schema_version": "1.0.0",
+                "flavor": "il2cpp",
+                "loader": "bepinex_il2cpp",
+                "host": "127.0.0.1",
+                "port": port,
+                "auth_token": "session_token_0123456789abcdef",
+                "features": [{
+                    "kind": "invoke_method",
+                    "feature_id": "lily-unique-gun",
+                    "class_name": "PlayerControlCustom",
+                    "method_name": "AttackCommon",
+                    "pre_steps": [
+                        {
+                            "kind": "set_field",
+                            "class_name": "PlayerControlCustom",
+                            "field_name": "Status",
+                            "value": "ATTACK"
+                        },
+                        {
+                            "kind": "invoke_method",
+                            "class_name": "PlayerControlCustom",
+                            "method_name": "InitActionParams"
+                        },
+                        {
+                            "kind": "copy_field",
+                            "from_class": "PlayerControlCustom",
+                            "from_field": "Lily.UniqueParamG",
+                            "to_class": "PlayerControlCustom",
+                            "to_field": "CurrentAttackParam"
+                        }
+                    ]
+                }]
+            })
+            .to_string(),
+        );
+
+        let sid = runtime.start_session(req).unwrap();
+        runtime
+            .apply_feature(
+                &sid,
+                FeatureCommand {
+                    feature_id: "lily-unique-gun".to_owned(),
+                    value: FeatureValue::Action,
+                },
+            )
+            .unwrap();
+        let diag = runtime.diagnostics(&sid).unwrap();
+        assert!(
+            diag.recent_events
+                .iter()
+                .any(|e| e.contains("after 3 pre_steps"))
+        );
+        runtime.stop_session(&sid).unwrap();
+        server.join().unwrap();
+
+        let ops: Vec<(String, Value)> = seen.lock().unwrap().clone();
+        assert_eq!(ops.len(), 4);
+        assert_eq!(ops[0].0, "set_field");
+        assert_eq!(ops[0].1["class_name"], "PlayerControlCustom");
+        assert_eq!(ops[0].1["field_name"], "Status");
+        assert_eq!(ops[0].1["value"], "ATTACK");
+        assert_eq!(ops[1].0, "invoke_method");
+        assert_eq!(ops[1].1["method_name"], "InitActionParams");
+        assert_eq!(ops[2].0, "copy_field");
+        assert_eq!(ops[2].1["from_field"], "Lily.UniqueParamG");
+        assert_eq!(ops[2].1["to_field"], "CurrentAttackParam");
+        assert_eq!(ops[3].0, "invoke_method");
+        assert_eq!(ops[3].1["class_name"], "PlayerControlCustom");
+        assert_eq!(ops[3].1["method_name"], "AttackCommon");
+    }
+
+    #[test]
+    fn unity_harmony_hook_and_pre_steps_invoke_payload_validates() {
+        let payload: UnityBridgePayload = serde_json::from_value(serde_json::json!({
+            "schema_version": "1.0.0",
+            "flavor": "il2cpp",
+            "loader": "bepinex_il2cpp",
+            "host": "127.0.0.1",
+            "port": 19540,
+            "auto_discover_by_pid": true,
+            "features": [
+                {
+                    "kind": "hook_set_field",
+                    "feature_id": "character-swap",
+                    "hook_class": "BattleManager",
+                    "hook_method": "AfterAssetbundleLoad",
+                    "timing": "prefix",
+                    "writes": [
+                        {
+                            "class_name": "FlowManager",
+                            "field_name": "Playable",
+                            "value": "ALT_HERO"
+                        },
+                        {
+                            "class_name": "BattleResource",
+                            "field_name": "AltHero.UniqueController",
+                            "ensure_component": "AltUniqueController",
+                            "only_if_null": true
+                        },
+                        {
+                            "class_name": "BattleResource",
+                            "field_name": "AltHero.Camera",
+                            "copy_from_class": "BattleResource",
+                            "copy_from_field": "MainHero.Camera",
+                            "clone_under_owner": true,
+                            "only_if_null": true
+                        }
+                    ]
+                },
+                {
+                    "kind": "invoke_method",
+                    "feature_id": "special-skill",
+                    "class_name": "PlayerActor",
+                    "method_name": "TriggerSpecial",
+                    "pre_steps": [
+                        {
+                            "kind": "copy_field",
+                            "from_class": "BattleResource",
+                            "from_field": "AltHero.SpecialParam",
+                            "to_class": "PlayerActor",
+                            "to_field": "ActiveSkillParam"
+                        }
+                    ]
+                }
+            ]
+        }))
+        .expect("harmony hook & pre_steps payload deserializes");
+        UnityBridgeRuntime::validate_payload(&payload)
+            .expect("harmony hook & pre_steps payload validates cleanly");
+        assert_eq!(payload.features.len(), 2);
     }
 }

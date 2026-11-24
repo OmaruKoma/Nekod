@@ -56,6 +56,11 @@ namespace Nekod.UnityBridge
             Server?.PumpMainThread();
         }
 
+        private void LateUpdate()
+        {
+            Server?.PumpLateUpdate();
+        }
+
         private void OnApplicationFocus(bool hasFocus)
         {
             EnsureBackgroundRun();
@@ -94,12 +99,6 @@ namespace Nekod.UnityBridge
             DontDestroyOnLoad(host);
             host.hideFlags = HideFlags.HideAndDontSave;
             host.AddComponent<NekodBridgeBehaviour>();
-        }
-
-        private void Update()
-        {
-            NekodBridgeBehaviour.EnsureBackgroundRun();
-            NekodBridgeBehaviour.Server?.PumpMainThread();
         }
     }
 #endif

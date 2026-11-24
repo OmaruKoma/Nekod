@@ -521,6 +521,7 @@ mod tests {
                 scope_constraints: constraints,
             },
             declarative_payload_json: None,
+            verified_package_assets: BTreeMap::new(),
         };
 
         let sid = router.start_session(req).unwrap();

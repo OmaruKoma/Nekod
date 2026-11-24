@@ -141,6 +141,7 @@ fn win32_backend_discovers_scans_patches_freezes_and_rolls_back_real_process() {
             target_process: self_proc,
             granted_permissions,
             declarative_payload_json: Some(payload.to_string()),
+            verified_package_assets: BTreeMap::new(),
         })
         .unwrap();
 

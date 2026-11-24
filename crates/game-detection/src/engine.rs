@@ -140,6 +140,9 @@ fn is_unreal_dir(root: &Path) -> bool {
     if root.join("Engine").join("Binaries").is_dir() {
         return true;
     }
+    if root.join("Binaries").join("Win64").is_dir() && root.join("Content").join("Paks").is_dir() {
+        return true;
+    }
     let Ok(entries) = fs::read_dir(root) else {
         return false;
     };
@@ -266,12 +269,28 @@ fn find_plugin_rel(plugins_dir: &Path, needle: &str) -> Option<String> {
 }
 
 fn find_nested_ue4ss(root: &Path) -> bool {
+    let direct_win64 = root.join("Binaries").join("Win64");
+    if direct_win64.join("ue4ss").join("UE4SS.dll").is_file()
+        || direct_win64.join("UE4SS.dll").is_file()
+    {
+        return true;
+    }
     let Ok(entries) = fs::read_dir(root) else {
         return false;
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        if p.is_dir() && p.join("Binaries").join("Win64").join("ue4ss").is_dir() {
+        if !p.is_dir() {
+            continue;
+        }
+        if p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("engine"))
+        {
+            continue;
+        }
+        let win64 = p.join("Binaries").join("Win64");
+        if win64.join("ue4ss").join("UE4SS.dll").is_file() || win64.join("UE4SS.dll").is_file() {
             return true;
         }
     }
@@ -433,14 +452,23 @@ mod tests {
     #[test]
     fn detects_unreal_ue4ss_and_re_engine_reframework() {
         let ue_root = temp_dir("ue5");
-        fs::create_dir_all(
-            ue_root
-                .join("MyGame")
-                .join("Binaries")
-                .join("Win64")
-                .join("ue4ss"),
-        )
-        .unwrap();
+        let ue4ss_dir = ue_root
+            .join("MyGame")
+            .join("Binaries")
+            .join("Win64")
+            .join("ue4ss");
+        // Staging only NekodBridge without UE4SS.dll must not report RE-UE4SS as installed.
+        fs::create_dir_all(ue4ss_dir.join("Mods").join("NekodBridge")).unwrap();
+        let ue_profile_no_loader = inspect_game_directory(&ue_root);
+        assert_eq!(ue_profile_no_loader.engine, GameEngineKind::UnrealEngine);
+        assert!(
+            !ue_profile_no_loader
+                .installed_loaders
+                .iter()
+                .any(|l| l.kind == InstalledLoaderKind::Ue4ss)
+        );
+
+        fs::write(ue4ss_dir.join("UE4SS.dll"), b"MZ").unwrap();
         let ue_profile = inspect_game_directory(&ue_root);
         assert_eq!(ue_profile.engine, GameEngineKind::UnrealEngine);
         assert_eq!(

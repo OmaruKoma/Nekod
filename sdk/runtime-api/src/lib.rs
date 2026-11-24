@@ -76,6 +76,9 @@ pub struct StartSessionRequest {
     /// Optional raw `declarative_patch_v1` JSON read from the trainer's verified entrypoint.
     #[serde(default)]
     pub declarative_payload_json: Option<String>,
+    /// Package-relative artifact paths mapped to canonical SHA-256-verified on-disk file paths.
+    #[serde(default)]
+    pub verified_package_assets: BTreeMap<String, String>,
 }
 
 /// Player-controlled feature value crossing the L2 <-> L3 boundary.

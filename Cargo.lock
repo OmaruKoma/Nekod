@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-core"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-game-detection",
  "nekod-manifest",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-desktop"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-core",
  "nekod-game-detection",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-game-detection"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-manifest",
  "serde",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-manifest"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "semver",
  "serde",
@@ -2271,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-mcp"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-core",
  "nekod-game-detection",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-permission-manager"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-manifest",
  "nekod-runtime-api",
@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-profile-manager"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-runtime-api",
  "rusqlite",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-registry-client"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-manifest",
  "nekod-validator",
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-runtime-api"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-manifest",
  "serde",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-trainer-manager"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-game-detection",
  "nekod-manifest",
@@ -2351,7 +2351,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-trainer-runtime"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-manifest",
  "nekod-runtime-api",
@@ -2366,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-trainer-sdk"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nekod-manifest",
  "semver",
@@ -2377,7 +2377,7 @@ dependencies = [
 
 [[package]]
 name = "nekod-validator"
-version = "0.1.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "jsonschema",
  "nekod-manifest",

@@ -933,6 +933,7 @@ mod tests {
                 },
                 granted_permissions: grants,
                 declarative_payload_json: Some(payload),
+                verified_package_assets: BTreeMap::new(),
             })
             .unwrap();
 

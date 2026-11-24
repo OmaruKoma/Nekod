@@ -11,6 +11,7 @@ pub use dependency_manager::{
     DependencyResolutionReport, DependencyResolutionState, RuntimeDependencyManager,
 };
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -399,6 +400,12 @@ impl SqliteTrainerCatalog {
         )
         .map_err(|e| TrainerManagerError::Io(e.to_string()))?;
 
+        let sibling_gm = canonical_stage.join("game-manifest.json");
+        if sibling_gm.is_file() {
+            fs::copy(&sibling_gm, target_dir.join("game-manifest.json"))
+                .map_err(|e| TrainerManagerError::Io(e.to_string()))?;
+        }
+
         for artifact in &manifest.artifacts {
             let src = canonical_stage.join(&artifact.filename);
             let dest = target_dir.join(&artifact.filename);
@@ -508,11 +515,20 @@ impl TrainerCatalog for SqliteTrainerCatalog {
     }
 }
 
-/// Checks artifact path containment, file size, and SHA-256 digest on disk.
-pub fn verify_package_artifacts(
+/// Verified entrypoint JSON plus SHA-256-verified package asset paths inside the package root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedPackagePayload {
+    pub entrypoint_json: String,
+    pub verified_assets: BTreeMap<String, PathBuf>,
+}
+
+/// Checks artifact path containment, file size, and SHA-256 digest on disk, returning
+/// each declared package-relative artifact path mapped to its canonical path.
+pub fn verify_package_artifacts_map(
     canonical_package_root: &Path,
     manifest: &TrainerManifest,
-) -> Result<(), TrainerManagerError> {
+) -> Result<BTreeMap<String, PathBuf>, TrainerManagerError> {
+    let mut verified_assets = BTreeMap::new();
     for artifact in &manifest.artifacts {
         validate_relative_path(&artifact.filename)
             .map_err(|e| TrainerManagerError::InvalidManifest(e.to_string()))?;
@@ -554,15 +570,25 @@ pub fn verify_package_artifacts(
                 format!("expected sha256 {}, got {actual_sha}", artifact.sha256),
             ));
         }
+
+        verified_assets.insert(artifact.filename.clone(), canonical_file);
     }
-    Ok(())
+    Ok(verified_assets)
+}
+
+/// Checks artifact path containment, file size, and SHA-256 digest on disk.
+pub fn verify_package_artifacts(
+    canonical_package_root: &Path,
+    manifest: &TrainerManifest,
+) -> Result<(), TrainerManagerError> {
+    verify_package_artifacts_map(canonical_package_root, manifest).map(|_| ())
 }
 
 /// Re-verifies manifest digest and artifact SHA-256 checksums on disk, then loads
-/// the trainer's declared `runtime.entrypoint` with path containment guarantees.
-pub fn load_verified_entrypoint_str(
+/// the trainer's declared `runtime.entrypoint` alongside all verified package asset paths.
+pub fn load_verified_package_payload(
     trainer: &InstalledTrainer,
-) -> Result<String, TrainerManagerError> {
+) -> Result<VerifiedPackagePayload, TrainerManagerError> {
     if trainer.revoked {
         return Err(TrainerManagerError::Revoked(trainer.manifest.id.clone()));
     }
@@ -596,40 +622,35 @@ pub fn load_verified_entrypoint_str(
         ));
     }
 
-    verify_package_artifacts(&canonical_root, &trainer.manifest)?;
+    let verified_assets = verify_package_artifacts_map(&canonical_root, &trainer.manifest)?;
 
     let entrypoint = &trainer.manifest.runtime.entrypoint;
     validate_relative_path(entrypoint)
         .map_err(|e| TrainerManagerError::InvalidManifest(e.to_string()))?;
-    if !trainer
-        .manifest
-        .artifacts
-        .iter()
-        .any(|a| a.filename == *entrypoint)
-    {
-        return Err(TrainerManagerError::IntegrityMismatch(
+    let canonical_entry = verified_assets.get(entrypoint).ok_or_else(|| {
+        TrainerManagerError::IntegrityMismatch(
             entrypoint.clone(),
             "runtime.entrypoint must be listed in manifest.artifacts with a verified SHA-256"
                 .to_owned(),
-        ));
-    }
-
-    let canonical_entry = fs::canonicalize(canonical_root.join(entrypoint)).map_err(|e| {
-        TrainerManagerError::IntegrityMismatch(
-            entrypoint.clone(),
-            format!("missing or unreadable entrypoint: {e}"),
         )
     })?;
-    if !canonical_entry.starts_with(&canonical_root) {
-        return Err(TrainerManagerError::IntegrityMismatch(
-            entrypoint.clone(),
-            "entrypoint escapes package directory".to_owned(),
-        ));
-    }
 
-    fs::read_to_string(&canonical_entry).map_err(|e| {
+    let entrypoint_json = fs::read_to_string(canonical_entry).map_err(|e| {
         TrainerManagerError::Io(format!("failed reading entrypoint '{entrypoint}': {e}"))
+    })?;
+
+    Ok(VerifiedPackagePayload {
+        entrypoint_json,
+        verified_assets,
     })
+}
+
+/// Re-verifies manifest digest and artifact SHA-256 checksums on disk, then loads
+/// the trainer's declared `runtime.entrypoint` with path containment guarantees.
+pub fn load_verified_entrypoint_str(
+    trainer: &InstalledTrainer,
+) -> Result<String, TrainerManagerError> {
+    load_verified_package_payload(trainer).map(|p| p.entrypoint_json)
 }
 
 /// Computes compatibility status for a trainer against a platform and optional store build/version.
@@ -767,7 +788,7 @@ mod tests {
         fs::write(dir.join("scripts/unity_bridge.json"), payload).unwrap();
 
         let mut mod_v2: nekod_manifest::ModManifest = serde_json::from_str(include_str!(
-            "../../../examples/gun-soul-girl-2/mod-manifest.json"
+            "../../../examples/unity-standalone-starter/mod-manifest.json"
         ))
         .unwrap();
         mod_v2.artifacts[0].sha256 = sha256_hex(payload);
@@ -783,8 +804,11 @@ mod tests {
         let installed = catalog
             .ingest_local_package(&dir, TrustTier::CommunityVerified)
             .expect("pure .nmod ingestion succeeds without trainer-manifest.json");
-        assert_eq!(installed.manifest.id, "org.nekod.gun-soul-girl-2");
-        assert_eq!(installed.manifest.features.len(), 23);
+        assert_eq!(
+            installed.manifest.id,
+            "dev.omarukoma.unity-standalone-starter"
+        );
+        assert_eq!(installed.manifest.features.len(), 3);
 
         let entry = load_verified_entrypoint_str(&installed)
             .expect("verified entrypoint loads cleanly for pure .nmod");

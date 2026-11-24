@@ -43,6 +43,10 @@
 
   <!-- BepInEx 6 IL2CPP references -->
   <ItemGroup Condition="'$(Configuration)'=='Release_IL2CPP'">
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExCoreDir)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="BepInEx.Core">
       <HintPath>$(BepInExCoreDir)\BepInEx.Core.dll</HintPath>
       <Private>false</Private>
@@ -71,6 +75,10 @@
 
   <!-- BepInEx 5 Mono references (auto-discovers *_Data\Managed under UnityGameDir if UnityManagedDir omitted) -->
   <ItemGroup Condition="'$(Configuration)'=='Release_Mono'">
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExCoreDir)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="BepInEx">
       <HintPath>$(BepInExCoreDir)\BepInEx.dll</HintPath>
       <Private>false</Private>

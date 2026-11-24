@@ -2,11 +2,14 @@
 //! managed loader bridge runtimes (`unity_bridge_v1` and `ue4ss_bridge_v1`).
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nekod_manifest::RuntimeKind;
 use nekod_runtime_api::{
@@ -17,6 +20,8 @@ use serde_json::{Value, json};
 
 const MAX_AUTH_TOKEN_LEN: usize = 128;
 const MIN_AUTH_TOKEN_LEN: usize = 16;
+static FILE_IPC_SEQ: AtomicU64 = AtomicU64::new(1);
+static FILE_IPC_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BridgeRpcRequest {
@@ -40,6 +45,7 @@ pub(crate) struct ManagedBridgeSession {
     pub target_process: ProcessIdentity,
     pub runtime_kind: RuntimeKind,
     pub use_unity_explorer_http: bool,
+    pub file_ipc_dir: Option<PathBuf>,
     pub state: SessionLifecycleState,
     pub rollback_stack: Vec<(String, BridgeRpcRequest)>,
     pub rollback_failures: usize,
@@ -85,6 +91,23 @@ impl BridgeSessionStore {
         ))
     }
 
+    /// Reads `(endpoint, auth_token, file_ipc_dir)` without holding the session lock
+    /// during blocking RPC I/O.
+    pub fn session_transport(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> Result<(SocketAddr, String, Option<PathBuf>), RuntimeError> {
+        let guard = self.sessions.lock().unwrap();
+        let session = guard
+            .get(&session_id.0)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))?;
+        Ok((
+            session.endpoint,
+            session.auth_token.clone(),
+            session.file_ipc_dir.clone(),
+        ))
+    }
+
     pub fn with_session_mut<F, R>(
         &self,
         session_id: &RuntimeSessionId,
@@ -112,7 +135,9 @@ impl BridgeSessionStore {
             .ok_or_else(|| RuntimeError::SessionNotFound(session_id.clone()))?;
 
         while let Some((fid, undo_req)) = session.rollback_stack.pop() {
-            let rpc_result = if session.use_unity_explorer_http {
+            let rpc_result = if let Some(ipc_dir) = session.file_ipc_dir.as_deref() {
+                send_file_ipc_rpc(ipc_dir, &undo_req).map(|_| ())
+            } else if session.use_unity_explorer_http {
                 send_unity_explorer_http_rpc(session.endpoint, &undo_req.op, &undo_req.params)
                     .map(|_| ())
             } else {
@@ -170,6 +195,7 @@ fn is_bridge_disconnected_error(err: &RuntimeError) -> bool {
         || lower.contains("10061")
         || lower.contains("refused")
         || lower.contains("timed out")
+        || lower.contains("file ipc timeout")
         || lower.contains("closed connection")
         || lower.contains("10054")
         || lower.contains("10053")
@@ -394,4 +420,101 @@ pub(crate) fn send_bridge_rpc(
         ));
     }
     Ok(resp)
+}
+
+pub(crate) fn send_file_ipc_rpc(
+    ipc_dir: &Path,
+    req: &BridgeRpcRequest,
+) -> Result<BridgeRpcResponse, RuntimeError> {
+    if !ipc_dir.is_dir() {
+        return Err(RuntimeError::ExecutionFailed(format!(
+            "UE4SS file IPC directory '{}' does not exist",
+            ipc_dir.display()
+        )));
+    }
+    let trimmed = req.token.trim();
+    if !(MIN_AUTH_TOKEN_LEN..=MAX_AUTH_TOKEN_LEN).contains(&trimmed.len()) {
+        return Err(RuntimeError::InvalidPayload(format!(
+            "bridge auth_token length must be {MIN_AUTH_TOKEN_LEN}..={MAX_AUTH_TOKEN_LEN} characters"
+        )));
+    }
+
+    let _serial = FILE_IPC_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let seq = FILE_IPC_SEQ.fetch_add(1, Ordering::Relaxed);
+    let req_id = format!("{}_{}_{}", std::process::id(), nanos, seq);
+
+    let tmp_path = ipc_dir.join("ue4ss-request.tmp");
+    let req_path = ipc_dir.join("ue4ss-request.json");
+    let resp_path = ipc_dir.join(format!("ue4ss-response-{req_id}.json"));
+
+    let payload = json!({
+        "id": req_id,
+        "token": trimmed,
+        "op": req.op,
+        "params": req.params,
+    });
+    let serialized = serde_json::to_vec(&payload)
+        .map_err(|e| RuntimeError::InvalidPayload(format!("serialize file IPC RPC failed: {e}")))?;
+
+    fs::write(&tmp_path, &serialized).map_err(|e| {
+        RuntimeError::ExecutionFailed(format!(
+            "failed writing UE4SS IPC request temp '{}': {e}",
+            tmp_path.display()
+        ))
+    })?;
+    if req_path.exists() {
+        let _ = fs::remove_file(&req_path);
+    }
+    if fs::rename(&tmp_path, &req_path).is_err() {
+        fs::write(&req_path, &serialized).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            RuntimeError::ExecutionFailed(format!(
+                "failed writing UE4SS IPC request '{}': {e}",
+                req_path.display()
+            ))
+        })?;
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(3500);
+    while Instant::now() < deadline {
+        if resp_path.is_file() {
+            // Brief retry on Windows if rename finished right before reader opened it
+            let raw = match fs::read_to_string(&resp_path) {
+                Ok(s) => s,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(15));
+                    fs::read_to_string(&resp_path).map_err(|e| {
+                        RuntimeError::ExecutionFailed(format!(
+                            "failed reading UE4SS IPC response '{}': {e}",
+                            resp_path.display()
+                        ))
+                    })?
+                }
+            };
+            let _ = fs::remove_file(&resp_path);
+
+            let resp: BridgeRpcResponse = serde_json::from_str(&raw).map_err(|e| {
+                RuntimeError::ExecutionFailed(format!("invalid UE4SS IPC response JSON: {e}"))
+            })?;
+            if !resp.ok {
+                return Err(RuntimeError::ExecutionFailed(
+                    resp.error
+                        .unwrap_or_else(|| "UE4SS bridge rejected operation".to_owned()),
+                ));
+            }
+            return Ok(resp);
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let _ = fs::remove_file(&req_path);
+    Err(RuntimeError::ExecutionFailed(
+        "UE4SS file IPC timeout after 3.5s (ensure RE-UE4SS + NekodBridge are loaded in the running UE game)"
+            .to_owned(),
+    ))
 }

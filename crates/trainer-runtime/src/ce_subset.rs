@@ -553,6 +553,7 @@ mod tests {
                 scope_constraints: BTreeMap::new(),
             },
             declarative_payload_json: Some(payload_json),
+            verified_package_assets: BTreeMap::new(),
         }
     }
 
