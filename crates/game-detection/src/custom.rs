@@ -106,18 +106,12 @@ impl GameDetector for CustomPathDetector {
             let mut exe_path = None;
 
             for manifest in &self.known_manifests {
-                for exe in &manifest.executables {
-                    if exe.platform == platform {
-                        let candidate = install_dir.join(&exe.relative_path);
-                        if candidate.is_file() {
-                            matched_id = Some(manifest.id.clone());
-                            matched_title = Some(manifest.name.clone());
-                            exe_path = Some(candidate.to_string_lossy().into_owned());
-                            break;
-                        }
-                    }
-                }
-                if matched_id.is_some() {
+                if let Some(candidate) =
+                    crate::steam::find_matching_executable(&install_dir, manifest, platform)
+                {
+                    matched_id = Some(manifest.id.clone());
+                    matched_title = Some(manifest.name.clone());
+                    exe_path = Some(candidate.to_string_lossy().into_owned());
                     break;
                 }
             }

@@ -206,6 +206,44 @@ impl GameDetector for SteamDetector {
     }
 }
 
+/// Resolves a matching on-disk executable for `manifest` inside `install_root`,
+/// checking native `host_platform` entries first and falling back to Windows
+/// executables on Linux/SteamOS hosts (Proton/Wine).
+pub(crate) fn find_matching_executable(
+    install_root: &Path,
+    manifest: &GameManifest,
+    host_platform: TargetPlatform,
+) -> Option<PathBuf> {
+    if let Some(exact) = manifest
+        .executables
+        .iter()
+        .filter(|exe| exe.platform == host_platform)
+        .map(|exe| install_root.join(&exe.relative_path))
+        .find(|candidate| candidate.is_file())
+    {
+        return Some(exact);
+    }
+
+    if matches!(
+        host_platform,
+        TargetPlatform::LinuxX64 | TargetPlatform::LinuxArm64 | TargetPlatform::SteamOsX64
+    ) {
+        return manifest
+            .executables
+            .iter()
+            .filter(|exe| {
+                matches!(
+                    exe.platform,
+                    TargetPlatform::WindowsX64 | TargetPlatform::WindowsArm64
+                )
+            })
+            .map(|exe| install_root.join(&exe.relative_path))
+            .find(|candidate| candidate.is_file());
+    }
+
+    None
+}
+
 /// Enriches discovered games with canonical `GameManifest` matches and resolved executable paths.
 pub fn match_games_against_manifests(games: &mut [DetectedGame], manifests: &[GameManifest]) {
     for game in games.iter_mut() {
@@ -243,14 +281,8 @@ pub fn match_games_against_manifests(games: &mut [DetectedGame], manifests: &[Ga
         game.matched_game_id = Some(manifest.id.clone());
 
         let install_root = Path::new(&game.install_dir);
-        for exe in &manifest.executables {
-            if exe.platform == game.platform {
-                let candidate = install_root.join(&exe.relative_path);
-                if candidate.is_file() {
-                    game.executable_path = Some(candidate.to_string_lossy().into_owned());
-                    break;
-                }
-            }
+        if let Some(candidate) = find_matching_executable(install_root, manifest, game.platform) {
+            game.executable_path = Some(candidate.to_string_lossy().into_owned());
         }
     }
 }
@@ -368,5 +400,20 @@ mod tests {
         assert!(discovered.is_empty());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matches_windows_executable_under_linux_proton_fallback() {
+        let root = temp_test_dir("linux_proton_exe_match");
+        let exe_path = root.join("SampleRPG.exe");
+        fs::write(&exe_path, b"MZ").unwrap();
+
+        let manifest_raw = include_str!("../../../schemas/examples/game-manifest.example.json");
+        let manifest: GameManifest = serde_json::from_str(manifest_raw).unwrap();
+
+        let found = find_matching_executable(&root, &manifest, TargetPlatform::LinuxX64);
+        assert_eq!(found.as_deref(), Some(exe_path.as_path()));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
