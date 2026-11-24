@@ -46,6 +46,7 @@ impl GogDetector {
 
     /// Probes system GOG Galaxy registry entries and standard install directories.
     pub fn from_system() -> Self {
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut dirs = BTreeSet::new();
 
         #[cfg(target_os = "windows")]

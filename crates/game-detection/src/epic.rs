@@ -43,6 +43,7 @@ impl EpicDetector {
 
     /// Probes default OS Epic Games Launcher manifest directories.
     pub fn from_system() -> Self {
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut dirs = Vec::new();
         #[cfg(target_os = "windows")]
         {

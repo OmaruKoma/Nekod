@@ -4,6 +4,7 @@ description = "UI-independent L4 Runtime API protocol between Nekod Application 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]

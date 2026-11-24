@@ -614,7 +614,10 @@ where
         if entry.is_dir() {
             continue;
         }
-        let raw_name = entry.name().to_owned();
+        let raw_name = entry
+            .name()
+            .map_err(|e| format!("failed reading archive entry #{i} name: {e}"))?
+            .into_owned();
         let clean_rel = (cfg.validate_entry)(&raw_name)?;
 
         let mut buf = Vec::new();

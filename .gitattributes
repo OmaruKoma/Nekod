@@ -1,3 +1,25 @@
+* text=auto eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.rs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.css text eol=lf
+*.lua text eol=lf
+*.cs text eol=lf
+*.gd text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.png binary
+*.ico binary
+*.jpg binary
+*.dll binary
+*.exe binary
+*.zip binary
+*.nmod binary
+
 # Preserve exact byte length and SHA-256 digests of content-addressed example packages
-examples/unity-explorer-mcp-starter/** -text
-examples/unity-standalone-starter/** -text
+examples/** -text

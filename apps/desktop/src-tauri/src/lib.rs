@@ -213,20 +213,21 @@ fn extract_and_validate_nmod_archive(
             if entry.is_dir() {
                 continue;
             }
+            let entry_name = entry
+                .name()
+                .map_err(|e| format!("读取 .nmod 归档条目 #{i} 名称失败: {e}"))?
+                .into_owned();
             if let Some(mode) = entry.unix_mode()
                 && (mode & 0o170000) == 0o120000
             {
-                return Err(format!(
-                    "拒绝包含符号链接的 .nmod 归档条目 '{}'",
-                    entry.name()
-                ));
+                return Err(format!("拒绝包含符号链接的 .nmod 归档条目 '{entry_name}'"));
             }
             entry_count += 1;
             if entry_count > MAX_NMOD_ENTRIES {
                 return Err(format!(".nmod 归档文件数超过 {MAX_NMOD_ENTRIES} 安全上限"));
             }
 
-            let normalized = entry.name().replace('\\', "/");
+            let normalized = entry_name.replace('\\', "/");
             validate_relative_path(&normalized).map_err(map_err)?;
             let lower = normalized.to_ascii_lowercase();
             if DISALLOWED_ARCHIVE_EXTENSIONS

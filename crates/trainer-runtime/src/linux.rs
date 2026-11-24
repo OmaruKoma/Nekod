@@ -269,8 +269,7 @@ pub mod backend {
             self.mem.write_all_at(bytes, address).map_err(|e| {
                 RuntimeError::AddressResolutionFailed(format!(
                     "failed to write {} byte(s) at 0x{address:x}: {e}",
-                    bytes.len(),
-                    e
+                    bytes.len()
                 ))
             })
         }

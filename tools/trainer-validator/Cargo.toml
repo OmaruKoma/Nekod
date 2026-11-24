@@ -4,6 +4,7 @@ description = "L5 local and CI validator for Nekod Game, Trainer, and Registry m
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]

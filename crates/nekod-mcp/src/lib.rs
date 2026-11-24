@@ -617,7 +617,7 @@ mod tests {
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let mut names = Vec::new();
         for i in 0..archive.len() {
-            names.push(archive.by_index(i).unwrap().name().to_owned());
+            names.push(archive.by_index(i).unwrap().name().unwrap().into_owned());
         }
         assert!(names.contains(&"mod-manifest.json".to_owned()));
         assert!(names.contains(&"game-manifest.json".to_owned()));

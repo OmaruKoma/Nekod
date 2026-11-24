@@ -4,6 +4,7 @@ description = "L1 Tauri 2 desktop application shell for Nekod."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [lib]
@@ -28,7 +29,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.11", features = ["tray-icon"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rfd = { version = "0.15", default-features = false }
